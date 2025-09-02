@@ -51,18 +51,22 @@ impl Env {
 impl General {
     // TODO
     fn load_symbol(&self, symbol: Symbol, load_function_cell: bool) -> Option<Value> {
+        // First check local variables
+        if let Some(val) = self.vars.get(&symbol) {
+            return Some(*val);
+        }
+        
+        // Then check interned symbols
         let map = INTERNED_SYMBOLS.read();
-        self.vars
-            .get(&symbol)
-            .map(|v| *v)
-            .or(map.get_index(symbol.index()).and_then(|(_, v)| {
-                let data = v.data();
-                if load_function_cell {
-                    data.func
-                } else {
-                    data.value 
-                }
-            }))
+        if let Some(cell) = map.get(&symbol.name) {
+            let data = cell.data();
+            return if load_function_cell {
+                data.func
+            } else {
+                data.value
+            };
+        }
+        None
     }
 }
 

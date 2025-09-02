@@ -56,39 +56,43 @@ impl SymbolMap {
     }
 
     pub fn get(&self, name: &str) -> Option<Symbol> {
-        let key = self.string_interner.get_or_intern(name);
-        let map = self.read();
-        let offset = map.get_index_of(&key)?;
-        Some(Symbol::new(offset, key))
+        let key = self.string_interner.get(name)?;
+        Some(Symbol::new(key))
     }
 
-    pub fn intern<'ob>(&self, name: &str) -> Symbol {
+    pub fn intern(&self, name: &str) -> Symbol {
         let key = self.string_interner.get_or_intern(name);
         let mut map = self.write();
-        if let Some(index) = map.get_index_of(&key) {
-            Symbol::new(index, key)
-        } else {
+        // Ensure the symbol cell exists in the map
+        if !map.contains_key(&key) {
             let special = name.starts_with(':');
             map.insert(key, SymbolCell::new(key, special));
-            Symbol::new(map.get_index_of(&key).unwrap(), key)
         }
+        Symbol::new(key)
     }
 }
 
 #[repr(C)]
-#[derive(Clone, Trace, Copy, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct Symbol {
-    #[no_trace]
-    pub index: u32,
     #[no_trace]
     pub name: Spur,
     phantom: PhantomData<SymbolCell>,
 }
 
+impl Trace for Symbol {
+    unsafe fn trace(&self, _visitor: crate::gc::Visitor) {
+        // No-op: Symbol only contains interned name which doesn't need tracing
+    }
+
+    unsafe fn finalize(&mut self) {
+        // No-op
+    }
+}
+
 impl Symbol {
-    pub fn new(index: usize, name: Spur) -> Self {
+    pub fn new(name: Spur) -> Self {
         Self {
-            index: index as u32,
             name,
             phantom: PhantomData,
         }
@@ -98,40 +102,39 @@ impl Symbol {
         INTERNED_SYMBOLS.intern(ident)
     }
 
-    pub fn index(self) -> usize {
-        self.index as usize
-    }
-
-    pub fn name(&self) -> Option<&str> {
-        Some(INTERNED_SYMBOLS.string_interner.resolve(&self.name))
+    pub fn name(&self) -> &str {
+        INTERNED_SYMBOLS.string_interner.resolve(&self.name)
     }
 
     pub(crate) fn get<'a>(self) -> Option<SymbolCell>  {
-        INTERNED_SYMBOLS.read().get_index(self.index as usize).map(|(k, v)| {
-            let a = v.clone();
-            a
-        })
+        // We need to find the cell by the spur key
+        let map = INTERNED_SYMBOLS.read();
+        // Find the index where the key matches
+        // Since IndexMap uses usize indices, we need to find the position
+        for (i, (k, v)) in map.iter().enumerate() {
+            if k == &self.name {
+                return Some(v.clone());
+            }
+        }
+        None
     }
 }
 
-
-const KEY_MASK: u64 = (1 << 32) - 1;
+const KEY_MASK: u64 = u64::MAX;
 
 impl TaggedPtr for Symbol {
     const TAG: LispType = LispType::Symbol;
 
     unsafe fn cast(val: u64) -> Self {
         let key = (val & KEY_MASK) as usize;
-        let index = ((val >> 32) & KEY_MASK) as u32;
-        Self {
-            index,
+        Symbol {
             name: Spur::try_from_usize(key).unwrap(),
             phantom: PhantomData,
         }
     }
 
     unsafe fn get_untagged_data(self) -> u64 {
-        ((self.index as u64) << 32) | (self.name.into_usize() as u64)
+        self.name.into_usize() as u64
     }
 }
 
