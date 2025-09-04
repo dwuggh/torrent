@@ -734,6 +734,7 @@ dependencies = [
  "cranelift-jit",
  "cranelift-module",
  "cranelift-native",
+ "dashmap",
  "env_logger",
  "indexmap",
  "inkwell",

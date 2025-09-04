@@ -1,6 +1,6 @@
 use std::{marker::PhantomData, mem::ManuallyDrop, ops::Deref, sync::Arc};
 
-use proc_macros::Trace;
+use proc_macros::{Trace, defun};
 
 use crate::{core::{function::Function, string::LispString, symbol::Symbol}, gc::{Gc, GcInner, Trace}};
 
@@ -31,7 +31,7 @@ pub enum LispType {
     Function,
 }
 
-#[derive(Clone, Trace)]
+#[derive(Clone, Trace, Debug)]
 pub enum LispValue {
     Nil,
     Int(i64),
@@ -74,6 +74,32 @@ impl Value {
 
     pub fn tag<T: TaggedPtr>(val: T) -> Self {
         TaggedPtr::tag(val)
+    }
+
+    pub fn from_raw_inc_rc(raw: u64) -> Self {
+        let val = Value(raw);
+        let untagged = val.untag();
+        unsafe {
+            match untagged {
+                LispValue::String(string) => Arc::increment_strong_count(&string),
+                LispValue::Symbol(symbol) => {
+                    if let Some(cell) = symbol.get() {
+                        cell.value().0.inc_ref_count();
+                    }
+                }
+                LispValue::Vector(vector) => {
+                    vector.0.inc_ref_count();
+                }
+                LispValue::Cons(cons) => {
+                    cons.0.inc_ref_count();
+                }
+                LispValue::Function(function) => {
+                    function.inner.inc_ref_count();
+ }
+                _ => ()
+            }
+        }
+        val
     }
 
 }
@@ -167,14 +193,18 @@ impl TaggedPtr for Vector {
     }
 }
 
-#[derive(Clone, Trace)]
+#[derive(Clone, Trace, Debug)]
 pub struct Cons(Gc<ConsInner>);
 
-#[derive(Clone, Trace)]
+#[derive(Clone, Trace, Debug)]
 pub struct ConsInner {
     car: Value,
     cdr: Value,
 }
 
-#[derive(Clone, Trace)]
+#[derive(Clone, Trace, Debug)]
 pub struct Vector(Gc<Vec<Value>>);
+
+#[defun]
+fn test(a: Value, b: Value) {
+}

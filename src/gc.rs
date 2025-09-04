@@ -118,6 +118,14 @@ impl<T: Trace> Gc<T> {
         }
     }
 
+    pub fn inc_ref_count(&self) {
+        inc_rc(self.ptr);
+    }
+
+    pub fn dec_ref_count(&self) {
+        dec_rc(self.ptr);
+    }
+
     // pub fn into_any(this: Self) -> Gc<dyn Any> {
     //     let this = ManuallyDrop::new(this);
     //     let any: NonNull<GcInner<dyn Any>> = this.ptr;

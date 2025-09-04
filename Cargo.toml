@@ -33,6 +33,7 @@ rand = "0.9.2"
 lasso = { version = "0.7.3", features = ["multi-threaded"] }
 string-interner = "0.19.0"
 inventory = "0.3.21"
+dashmap = "6.1.0"
 
 [build-dependencies]
 syn = { workspace = true }

@@ -3,11 +3,12 @@ use std::{
     sync::{atomic::AtomicU64, Arc, LazyLock, OnceLock},
 };
 
+use cranelift::prelude::Variable;
 use proc_macros::Trace;
 
 use crate::{
     core::{
-        symbol::{Symbol, INTERNED_SYMBOLS},
+        symbol::{Symbol, SymbolCell, INTERNED_SYMBOLS},
         value::Value,
     },
     gc::{Gc, Trace},
@@ -15,16 +16,22 @@ use crate::{
 
 // pub(crate) static INTERNED_SYMBOLS: OnceLock<std::sync::Mutex<SymbolMap>>;
 
+pub struct Environment(pub Gc<General>);
+
 #[derive(Debug, Clone, Trace)]
-pub struct Env {
-    inner: Gc<General>,
+pub enum Env {
+    General(Gc<General>),
+    // Lexical(Gc<LexicalScope>),
+    Params(Arc<ParamsScope>),
 }
 
-#[derive(Debug, Clone)]
-struct General {
+#[derive(Debug, Clone, Default)]
+pub struct General {
     // TODO Value or Gc<Value>?
     // TODO should we trace Symbol here?
     vars: HashMap<Symbol, Value>,
+
+    parent: Option<Env>
 }
 
 unsafe impl Trace for General {
@@ -43,21 +50,34 @@ unsafe impl Trace for General {
 
 impl Env {
     pub fn load_symbol(&self, symbol: Symbol, load_function_cell: bool) -> Option<Value> {
-        self.inner.get().load_symbol(symbol, load_function_cell)
+        // self.inner.get().load_symbol(symbol, load_function_cell)
+        match self {
+            Env::General(general) => {
+                general.get().load_symbol(symbol, load_function_cell)
+            }
+            Env::Params(params_scope) => {
+                let var = params_scope.params.get(&symbol);
+                todo!()
+            }
+        }
+    }
+
+    pub fn add_params(&self, params: HashMap<Symbol, Variable>) -> Self {
+        Self::Params(Arc::new(ParamsScope::new(params )))
     }
 }
 
 
 impl General {
     // TODO
-    fn load_symbol(&self, symbol: Symbol, load_function_cell: bool) -> Option<Value> {
+    pub fn load_symbol(&self, symbol: Symbol, load_function_cell: bool) -> Option<Value> {
         // First check local variables
         if let Some(val) = self.vars.get(&symbol) {
             return Some(*val);
         }
         
         // Then check interned symbols
-        let map = INTERNED_SYMBOLS.read();
+        let map = INTERNED_SYMBOLS.map();
         if let Some(cell) = map.get(&symbol.name) {
             let data = cell.data();
             return if load_function_cell {
@@ -70,29 +90,28 @@ impl General {
     }
 }
 
-#[derive(Debug, Clone, Trace)]
-struct LexicalScope {}
-
-
-struct ParamsScope {
-    params: HashMap<Symbol, cranelift::prelude::Variable>,
-    parent: Env
+#[derive(Debug)]
+pub struct LexicalScope {
+    pub vars: HashMap<Symbol, Gc<SymbolCell>> 
 }
-// #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Trace)]
-// struct Mark(u64);
 
-// impl Mark {
-//     pub fn new() -> Self {
-//         static MARK: AtomicU64 = AtomicU64::new(0);
-//         let ordering = std::sync::atomic::Ordering::SeqCst;
-//         let val = MARK.load(ordering);
-//         MARK.store(val + 1, ordering);
-//         Mark(val)
-//     }
-// }
+pub type ParamsMap = HashMap<Symbol, Variable>;
 
-// impl Default for Mark {
-//     fn default() -> Self {
-//         Self::new()
-//     }
-// }
+#[derive(Debug, Clone, Trace)]
+pub struct ParamsScope {
+    #[no_trace]
+    params: ParamsMap,
+}
+
+impl ParamsScope {
+    pub fn new(params: ParamsMap) -> Self {
+        Self {
+            params,
+        }
+    }
+
+    pub fn load_params(&self, symbol: Symbol) -> Option<Variable> {
+        self.params.get(&symbol).copied()
+    }
+}
+

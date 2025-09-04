@@ -1,8 +1,12 @@
 #![allow(dead_code)]
+use std::collections::HashSet;
+
 use chumsky::{
     prelude::*,
     text::{digits, Char},
 };
+
+use crate::core::{env::Env, symbol::Symbol};
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum Node {
@@ -188,6 +192,63 @@ pub fn special_chars(c: char) -> bool {
     let chars = "#[]()\\\"\',";
     chars.contains(c)
 }
+
+impl Node {
+    pub fn read_free_vars(&self, env: &Env, result: &mut HashSet<Symbol>) {
+        match self {
+            Node::Ident(ident) => {
+                if let Some(kw) = Keyword::try_from(ident.as_str()).ok() {
+                    return
+                }
+            }
+            Node::Sexp(nodes) => {
+                for node in nodes.iter() {
+                    node.read_free_vars(env, result);
+                }
+            }
+            Node::Vector(nodes) => {
+                for node in nodes.iter() {
+                    node.read_free_vars(env, result);
+                }
+            }
+            _ => ()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keyword {
+    If,
+    Cond,
+    Lambda,
+    Defun,
+    Defmacro,
+    Defvar,
+    Set,
+    Setq,
+    Setf,
+}
+
+impl TryFrom<&str> for Keyword {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let result = match value {
+            "if" => Self::If,
+            "cond" => Self::Cond,
+            "lambda" => Self::Lambda,
+            "defun" => Self::Defun,
+            "defmacro" => Self::Defmacro,
+            "defvar" => Self::Defvar,
+            "set" => Self::Set,
+            "setq" => Self::Setq,
+            "setf" => Self::Setf,
+            _ => return Err(())
+        };
+        Ok(result)
+    }
+}
+
 
 // --- Test Module ---
 #[cfg(test)]

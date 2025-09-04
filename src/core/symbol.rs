@@ -4,6 +4,7 @@ use std::sync::{LazyLock, RwLock};
 // include!(concat!(env!("OUT_DIR"), "/sym.rs"));
 // use sym::BUILTIN_SYMBOLS;
 
+use dashmap::DashMap;
 use lasso::{Capacity, Key, Spur, ThreadedRodeo};
 use proc_macros::Trace;
 
@@ -23,19 +24,19 @@ use indexmap::IndexMap;
 
 #[derive(Debug)]
 pub struct SymbolMap {
-    inner: RwLock<IndexMap<Spur, SymbolCell>>,
+    map: DashMap<Spur, SymbolCell>,
     string_interner: lasso::ThreadedRodeo,
 }
 
 unsafe impl Trace for SymbolMap {
     unsafe fn trace(&self, visitor: crate::gc::Visitor) {
-        for val in self.read().values() {
+        for val in self.map.iter() {
             val.trace(visitor);
         }
     }
 
     unsafe fn finalize(&mut self) {
-        for val in self.write().values_mut() {
+        for mut val in self.map.iter_mut() {
             val.finalize();
         }
     }
@@ -43,16 +44,9 @@ unsafe impl Trace for SymbolMap {
 
 impl SymbolMap {
     pub fn with_capacity(size: usize) -> Self {
-        let map = IndexMap::with_capacity(size);
+        let map = DashMap::with_capacity(size);
         let string_interner = ThreadedRodeo::with_capacity(Capacity::for_strings(size));
-        Self { inner: RwLock::new(map), string_interner }
-    }
-
-    pub fn read(&self) -> std::sync::RwLockReadGuard<'_, IndexMap<Spur, SymbolCell>> {
-        self.inner.read().unwrap()
-    }
-    pub fn write(&self) -> std::sync::RwLockWriteGuard<'_, IndexMap<Spur, SymbolCell>> {
-        self.inner.write().unwrap()
+        Self { map, string_interner }
     }
 
     pub fn get(&self, name: &str) -> Option<Symbol> {
@@ -60,34 +54,27 @@ impl SymbolMap {
         Some(Symbol::new(key))
     }
 
+    pub fn map(&self) -> &DashMap<Spur, SymbolCell>  {
+        &self.map
+    }
+
     pub fn intern(&self, name: &str) -> Symbol {
         let key = self.string_interner.get_or_intern(name);
-        let mut map = self.write();
         // Ensure the symbol cell exists in the map
-        if !map.contains_key(&key) {
+        if !self.map.contains_key(&key) {
             let special = name.starts_with(':');
-            map.insert(key, SymbolCell::new(key, special));
+            self.map.insert(key, SymbolCell::new(key, special));
         }
         Symbol::new(key)
     }
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Trace)]
 pub struct Symbol {
     #[no_trace]
     pub name: Spur,
     phantom: PhantomData<SymbolCell>,
-}
-
-impl Trace for Symbol {
-    unsafe fn trace(&self, _visitor: crate::gc::Visitor) {
-        // No-op: Symbol only contains interned name which doesn't need tracing
-    }
-
-    unsafe fn finalize(&mut self) {
-        // No-op
-    }
 }
 
 impl Symbol {
@@ -106,27 +93,21 @@ impl Symbol {
         INTERNED_SYMBOLS.string_interner.resolve(&self.name)
     }
 
-    pub(crate) fn get<'a>(self) -> Option<SymbolCell>  {
+    // TODO
+    pub(crate) fn get(&self) -> Option<dashmap::mapref::one::Ref<'_, Spur, SymbolCell>> {
         // We need to find the cell by the spur key
-        let map = INTERNED_SYMBOLS.read();
+        INTERNED_SYMBOLS.map.get(&self.name)
+
         // Find the index where the key matches
         // Since IndexMap uses usize indices, we need to find the position
-        for (i, (k, v)) in map.iter().enumerate() {
-            if k == &self.name {
-                return Some(v.clone());
-            }
-        }
-        None
     }
 }
-
-const KEY_MASK: u64 = u64::MAX;
 
 impl TaggedPtr for Symbol {
     const TAG: LispType = LispType::Symbol;
 
     unsafe fn cast(val: u64) -> Self {
-        let key = (val & KEY_MASK) as usize;
+        let key = val as usize;
         Symbol {
             name: Spur::try_from_usize(key).unwrap(),
             phantom: PhantomData,
@@ -138,18 +119,20 @@ impl TaggedPtr for Symbol {
     }
 }
 
-#[derive(Debug, Trace, Clone)]
+#[derive(Debug, Trace, Clone, Copy)]
 pub struct SymbolCellData {
     #[no_trace]
     pub name: Spur,
+    #[no_trace]
     pub interned: bool,
+    #[no_trace]
     pub special: bool,
     pub func: Option<Value>,
     pub value: Option<Value>,
 }
 
 #[derive(Debug, Trace, Clone)]
-pub struct SymbolCell(SymbolCellData);
+pub struct SymbolCell(pub Gc<SymbolCellData>);
 
 impl SymbolCellData {
     fn new(name: Spur, special: bool) -> Self {
@@ -165,10 +148,10 @@ impl SymbolCellData {
 
 impl SymbolCell {
     pub fn new(name: Spur, special: bool) -> Self {
-        SymbolCell(SymbolCellData::new(name, special))
+        SymbolCell(Gc::new(SymbolCellData::new(name, special)))
     }
 
     pub fn data(&self) -> &SymbolCellData {
-        &self.0
+        &self.0.get()
     }
 }
