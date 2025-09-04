@@ -24,10 +24,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     // Create the context from a pointer to get around the issue that the
     // return val is bound to the mutable borrow, meaning we can use them
     // both in the into_obj function. Similar to the rebind! macro.
-    let subr_call = quote! {
-        let val = #subr(#(#param_names),*)#err;
-        Ok(val.into())
-    };
+    let subr_call = quote! {};
 
     // Generate parameter types for the new function signature
     let new_params = args.iter().map(|arg_type| {
