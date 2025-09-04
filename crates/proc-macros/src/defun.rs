@@ -25,18 +25,81 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     // return val is bound to the mutable borrow, meaning we can use them
     // both in the into_obj function. Similar to the rebind! macro.
     let subr_call = quote! {
-        let ptr = cx as *mut crate::core::gc::Context;
-        let val = #subr(#(#arg_conversion),*)#err;
-        let cx: &'ob mut crate::core::gc::Context = unsafe {&mut *ptr};
-        Ok(crate::core::object::IntoObject::into_obj(val, cx).into())
+        let val = #subr(#(#param_names),*)#err;
+        Ok(val.into())
     };
 
+    // Generate parameter types for the new function signature
+    let new_params = args.iter().map(|arg_type| {
+        match arg_type {
+            ArgType::Env(_) => quote! { env: *mut crate::core::env::Environment },
+            _ => quote! { arg: i64 },
+        }
+    });
+    
+    // Generate parameter names for the call
+    let param_names = args.iter().enumerate().map(|(i, arg_type)| {
+        match arg_type {
+            ArgType::Env(_) => quote! { env },
+            _ => {
+                let ident = format_ident!("arg_{}", i);
+                quote! { #ident }
+            }
+        }
+    });
+    
+    // Convert parameters back to their original types
+    let param_conversions = args.iter().enumerate().map(|(i, arg_type)| {
+        let param_name = format_ident!("arg_{}", i);
+        match arg_type {
+            ArgType::Env(_) => quote! { env },
+            ArgType::Gc => {
+                quote! {
+                    {
+                        let val = crate::core::value::Value(#param_name as u64);
+                        crate::core::gc::Gc::try_from(val)?
+                    }
+                }
+            }
+            ArgType::Value => {
+                quote! { crate::core::value::Value(#param_name as u64) }
+            }
+            ArgType::IntoValue => {
+                quote! { 
+                    {
+                        let val = crate::core::value::Value(#param_name as u64);
+                        // This needs to be more specific based on the actual type
+                        val
+                    }
+                }
+            }
+            ArgType::Option => {
+                quote! {
+                    if #param_name == 0 {
+                        None
+                    } else {
+                        Some(crate::core::value::Value(#param_name as u64))
+                    }
+                }
+            }
+            ArgType::Other => {
+                quote! {
+                    // Handle other types appropriately
+                    #param_name
+                }
+            }
+        }
+    });
+    
     quote! {
         #[automatically_derived]
         #[doc(hidden)]
         fn #func_name<'ob>(
-            #(#arg_conversion),*
-        ) -> anyhow::Result<Value> {
+            #(#new_params),*
+        ) -> anyhow::Result<crate::core::value::Value> {
+            #(
+                let #param_names = #param_conversions;
+            )*
             #subr_call
         }
 
@@ -48,26 +111,52 @@ fn get_arg_conversion(args: &[ArgType]) -> Vec<TokenStream> {
     args.iter()
         .enumerate()
         .map(|(idx, arg_type)| match arg_type {
-            ArgType::Env(_) => quote! {env},
+            ArgType::Env(_) => quote! { env as *mut crate::core::env::Environment },
             ArgType::Gc => {
-                quote! { args.get(#idx): i64 }
+                quote! { 
+                    {
+                        let val: crate::core::value::Value = args.get(#idx);
+                        val.0 as i64
                     }
+                }
+            }
             ArgType::Option => {
-                        let bind = quote! {x.bind(cx)};
-                        quote! {
-                            match args.get(#idx) {
-                                Some(x) => crate::core::object::Gc::try_from_option(#bind)?,
-                                None => None,
-                            }
+                quote! {
+                    {
+                        match args.get(#idx) {
+                            Some(x) => {
+                                let val: crate::core::value::Value = *x;
+                                val.0 as i64
+                            },
+                            None => 0i64,
                         }
+                    }
+                }
             }
             ArgType::Value => {
-                quote! { args.get(#idx): i64 }
-            }
-            ArgType::IntoValue => quote! { val.into() },
-            ArgType::Other => {
-                        quote! { std::convert::TryFrom::try_from(&args[#idx])? }
+                quote! { 
+                    {
+                        let val: crate::core::value::Value = args.get(#idx);
+                        val.0 as i64
                     }
+                }
+            }
+            ArgType::IntoValue => {
+                quote! {
+                    {
+                        let val: crate::core::value::Value = args.get(#idx).into();
+                        val.0 as i64
+                    }
+                }
+            }
+            ArgType::Other => {
+                quote! {
+                    {
+                        let val: i64 = std::convert::TryFrom::try_from(&args[#idx])?;
+                        val
+                    }
+                }
+            }
         })
         .collect()
 }
