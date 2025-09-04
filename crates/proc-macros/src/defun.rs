@@ -5,7 +5,6 @@ use quote::{format_ident, quote};
 use syn::Error;
 
 pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
-
     let body = function.body;
     let subr = function.name;
     let subr_name = subr.to_string();
@@ -13,7 +12,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let lisp_name = spec.name.unwrap_or_else(|| map_function_name(&subr_name));
 
     let args = function.args;
-    let arg_conversion = get_arg_conversion(&args);
+    let arg_conversion = get_arg_conversion(&args.iter().map(|(_, _, arg_type)| arg_type).collect::<Vec<_>>());
 
     let err = if function.fallible {
         quote! {?}
@@ -21,94 +20,81 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         quote! {}
     };
 
-    // Create the context from a pointer to get around the issue that the
-    // return val is bound to the mutable borrow, meaning we can use them
-    // both in the into_obj function. Similar to the rebind! macro.
-    let subr_call = quote! {};
-
-    // Generate parameter types for the new function signature
-    let new_params = args.iter().map(|arg_type| {
-        match arg_type {
-            ArgType::Env(_) => quote! { env: *mut crate::core::env::Environment },
-            _ => quote! { arg: i64 },
-        }
-    });
+    // Generate the extern "C" function signature
+    let c_params = (0..args.len()).map(|i| quote! { arg_#i: i64 });
+    let c_param_names = (0..args.len()).map(|i| format_ident!("arg_{}", i));
     
-    // Generate parameter names for the call
-    let param_names = args.iter().enumerate().map(|(i, arg_type)| {
-        match arg_type {
-            ArgType::Env(_) => quote! { env },
-            _ => {
-                let ident = format_ident!("arg_{}", i);
-                quote! { #ident }
-            }
-        }
-    });
-    
-    // Convert parameters back to their original types
-    let param_conversions = args.iter().enumerate().map(|(i, arg_type)| {
+    // Generate conversions from i64 to actual types
+    let conversions = args.iter().enumerate().map(|(i, (ident, ty, arg_type))| {
         let param_name = format_ident!("arg_{}", i);
         match arg_type {
-            ArgType::Env(_) => quote! { env },
-            ArgType::Gc => {
-                quote! {
-                    {
-                        let val = crate::core::value::Value(#param_name as u64);
-                        crate::core::gc::Gc::try_from(val)?
-                    }
-                }
-            }
-            ArgType::Value => {
-                quote! { crate::core::value::Value(#param_name as u64) }
-            }
-            ArgType::IntoValue => {
-                quote! { 
-                    {
-                        let val = crate::core::value::Value(#param_name as u64);
-                        // This needs to be more specific based on the actual type
-                        val
-                    }
-                }
-            }
-            ArgType::Option => {
-                quote! {
-                    if #param_name == 0 {
-                        None
-                    } else {
-                        Some(crate::core::value::Value(#param_name as u64))
-                    }
-                }
-            }
-            ArgType::Other => {
-                quote! {
-                    // Handle other types appropriately
-                    #param_name
-                }
-            }
+            ArgType::Env(_) => quote! {
+                let #ident = std::mem::transmute::<i64, *mut crate::core::env::Environment>(#param_name);
+            },
+            ArgType::Gc => quote! {
+                let #ident = unsafe {
+                    let val = crate::core::value::Value(#param_name as u64);
+                    crate::core::gc::Gc::try_from(val).unwrap()
+                };
+            },
+            ArgType::Value => quote! {
+                let #ident = crate::core::value::Value(#param_name as u64);
+            },
+            ArgType::IntoValue => quote! {
+                let #ident = crate::core::value::Value(#param_name as u64);
+            },
+            ArgType::Option => quote! {
+                let #ident = if #param_name == 0 {
+                    None
+                } else {
+                    Some(crate::core::value::Value(#param_name as u64))
+                };
+            },
+            ArgType::Other => quote! {
+                let #ident = std::mem::transmute::<i64, #ty>(#param_name);
+            },
         }
     });
+
+    // Generate the actual function call
+    let call_args = args.iter().map(|(ident, _, _)| quote! { #ident });
     
+    // Handle result conversion
+    let result_conversion = if function.fallible {
+        quote! {
+            match result {
+                Ok(val) => val.0 as i64,
+                Err(_) => 0, // Handle error appropriately
+            }
+        }
+    } else {
+        quote! {
+            result.0 as i64
+        }
+    };
+
     quote! {
         #[automatically_derived]
         #[doc(hidden)]
-        fn #func_name<'ob>(
-            #(#new_params),*
-        ) -> anyhow::Result<crate::core::value::Value> {
-            #(
-                let #param_names = #param_conversions;
-            )*
-            #subr_call
+        unsafe extern "C" fn #func_name(
+            #(#c_params),*
+        ) -> i64 {
+            #(#conversions)*
+            
+            let result = #subr(#(#call_args),*)#err;
+            
+            #result_conversion
         }
 
         #body
     }
 }
 
-fn get_arg_conversion(args: &[ArgType]) -> Vec<TokenStream> {
+fn get_arg_conversion(args: &[&ArgType]) -> Vec<TokenStream> {
     args.iter()
         .enumerate()
         .map(|(idx, arg_type)| match arg_type {
-            ArgType::Env(_) => quote! { env as *mut crate::core::env::Environment },
+            ArgType::Env(_) => quote! { env as i64 },
             ArgType::Gc => {
                 quote! { 
                     {
@@ -204,7 +190,7 @@ impl ArgType {
 pub(crate) struct Function {
     name: syn::Ident,
     body: syn::Item,
-    args: Vec<ArgType>,
+    args: Vec<(syn::Ident, syn::Type, ArgType)>,
     fallible: bool,
 }
 
@@ -239,7 +225,7 @@ fn parse_fn(item: syn::Item) -> Result<Function, Error> {
 }
 
 
-fn parse_signature(sig: &syn::Signature) -> Result<Vec<ArgType>, Error> {
+fn parse_signature(sig: &syn::Signature) -> Result<Vec<(syn::Ident, syn::Type, ArgType)>, Error> {
     let mut args = Vec::new();
     for input in &sig.inputs {
         match input {
@@ -248,8 +234,15 @@ fn parse_signature(sig: &syn::Signature) -> Result<Vec<ArgType>, Error> {
             }
             syn::FnArg::Typed(pat_type) => {
                 let ty = pat_type.ty.as_ref().clone();
-                let arg = get_arg_type(&ty)?;
-                args.push(arg);
+                let arg_type = get_arg_type(&ty)?;
+                
+                // Extract the identifier from the pattern
+                let ident = match pat_type.pat.as_ref() {
+                    syn::Pat::Ident(pat_ident) => pat_ident.ident.clone(),
+                    _ => return Err(Error::new_spanned(pat_type, "Only simple identifiers are supported as function arguments")),
+                };
+                
+                args.push((ident, ty, arg_type));
             }
         }
     }
