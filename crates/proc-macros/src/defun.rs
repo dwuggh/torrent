@@ -11,7 +11,6 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let subr_name = subr.to_string();
     let func_name = format_ident!("__wrapper_fn_{}", &subr_name);
     let lisp_name = spec.name.unwrap_or_else(|| map_function_name(&subr_name));
-    let (required, optional, rest) = parse_call_signature(&function.args, spec.required);
 
     let args = function.args;
     let arg_conversion = get_arg_conversion(&args);
@@ -73,27 +72,6 @@ fn get_arg_conversion(args: &[ArgType]) -> Vec<TokenStream> {
         .collect()
 }
 
-fn parse_call_signature(args: &[ArgType], spec_required: Option<u16>) -> (u16, u16, bool) {
-    let required = {
-        let actual_required = args.iter().filter(|x| x.is_required_arg()).count();
-        let spec_required = match spec_required {
-            Some(x) => x as usize,
-            None => 0,
-        };
-        std::cmp::max(actual_required, spec_required)
-    };
-
-    let optional = {
-        let pos_args = args.iter().filter(|x| x.is_positional_arg()).count();
-        pos_args - required
-    };
-
-    let rest = args.iter().any(|x| x.is_rest_arg());
-
-    let required = u16::try_from(required).unwrap();
-    let optional = u16::try_from(optional).unwrap();
-    (required, optional, rest)
-}
 
 fn get_path_ident_name(type_path: &syn::TypePath) -> String {
     type_path.path.segments.last().unwrap().ident.to_string()
