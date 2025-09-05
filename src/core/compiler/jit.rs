@@ -12,7 +12,6 @@ use cranelift_module::Module;
 use crate::ast::Node;
 use crate::core::compiler::BuiltinFnPlugin;
 use crate::core::env::Environment;
-use crate::core::env::General;
 use crate::core::env::LexicalScope;
 use crate::core::env::ParamsMap;
 use crate::core::env::ParamsScope;
@@ -256,13 +255,13 @@ pub struct ParamsCtx<'a> {
     parent: ScopeCtx<'a>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct RootCtx {
-    env: Gc<General>,
+    env: *mut Environment,
 }
 
 impl RootCtx {
-    pub fn new(env: Gc<General>) -> Self {
+    pub fn new(env: *mut Environment) -> Self {
         Self { env }
     }
 }
@@ -299,10 +298,7 @@ impl<'a> From<&'a ParamsCtx<'a>> for ScopeCtx<'a> {
 impl ScopeCtx<'_> {
     fn get_root(self) -> *mut Environment {
         match self {
-            ScopeCtx::Root(root_ctx) => {
-                let mut env = Environment(root_ctx.env.clone());
-                &mut env
-            }
+            ScopeCtx::Root(root_ctx) => root_ctx.env,
             ScopeCtx::Lexical(lexical_ctx) => lexical_ctx.parent.get_root(),
             ScopeCtx::Function(params_ctx) => params_ctx.parent.get_root(),
         }
@@ -326,7 +322,8 @@ impl ScopeCtx<'_> {
     ) -> Option<Value> {
         match self {
             ScopeCtx::Root(root_ctx) => {
-                let val = root_ctx.env.get().load_symbol(symbol, load_function_cell)?;
+                // Compile-time lookup through global symbol table; no env state required.
+                let val = Environment::default().load_symbol(symbol, load_function_cell)?;
                 let value = builder.ins().iconst(types::I64, val.0 as i64);
                 Some(value)
             }

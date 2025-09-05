@@ -20,7 +20,7 @@
 
 use chumsky::Parser;
 
-use crate::{ast::elisp_parser, core::{env::General, value::Value}, gc::Gc, core::compiler::jit::{RootCtx, ScopeCtx, JIT}};
+use crate::{ast::elisp_parser, core::{env::Environment, value::Value}, core::compiler::jit::{RootCtx, ScopeCtx, JIT}};
 
 pub mod ast;
 pub mod gc;
@@ -30,8 +30,9 @@ fn main() -> anyhow::Result<()> {
     let mut jit = JIT::default();
     let text = "(+ 1 2)";
     // let text = "2";
-    let env = RootCtx::new(Gc::new(General::default()));
-    let ctx = ScopeCtx::Root(&env);
+    let mut runtime_env = Environment::default();
+    let root = RootCtx::new(&mut runtime_env as *mut _);
+    let ctx = ScopeCtx::Root(&root);
 
     unsafe {
         let a: u64 = run_code(&mut jit, text, ctx, ()).unwrap();
