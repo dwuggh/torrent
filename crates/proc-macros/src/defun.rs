@@ -21,8 +21,25 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
 
     // Generate the extern "C" function signature
     // let c_params = (0..args.len()).map(|i| quote! { arg_#i: i64 });
-    let c_param_idents: Vec<Ident> = (0..args.len()).map(|i| format_ident!("arg_{}", i)).collect();
-    let c_params = c_param_idents.iter().map(|i| quote! { #i: i64 }).collect::<Vec<_>>();
+    let mut c_param_idents: Vec<Ident> = Vec::new();
+    let mut c_params: Vec<TokenStream> = Vec::new();
+    for (i, (_ident, _ty, arg_info)) in args.iter().enumerate() {
+        match &arg_info.kind {
+            ArgKind::Slice(_) => {
+                let ptr = format_ident!("arg_{}_ptr", i);
+                let len = format_ident!("arg_{}_len", i);
+                c_params.push(quote! { #ptr: i64 });
+                c_params.push(quote! { #len: i64 });
+                c_param_idents.push(ptr);
+                c_param_idents.push(len);
+            }
+            _ => {
+                let id = format_ident!("arg_{}", i);
+                c_params.push(quote! { #id: i64 });
+                c_param_idents.push(id);
+            }
+        }
+    }
 
     
 
@@ -42,9 +59,24 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         }
     };
 
-    let signatures = args.iter().map(|_| quote! {
-        sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64));
-    });
+    let mut signatures: Vec<TokenStream> = Vec::new();
+    for (_, _, arg_info) in args.iter() {
+        match &arg_info.kind {
+            ArgKind::Slice(_) => {
+                signatures.push(quote! {
+                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64));
+                });
+                signatures.push(quote! {
+                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64));
+                });
+            }
+            _ => {
+                signatures.push(quote! {
+                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64));
+                });
+            }
+        }
+    }
 
     quote! {
 
@@ -221,6 +253,72 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                     }
                 }
 
+                // Slice arguments: reconstruct from (ptr,len)
+                ArgKind::Slice(inner_kind) => {
+                    // arg_i comes in as two C-ABI params: arg_{i}_ptr (i64) and arg_{i}_len (i64)
+                    let ptr_param = format_ident!("arg_{}_ptr", i);
+                    let len_param = format_ident!("arg_{}_len", i);
+                    let vec_name = format_ident!("__arg_slice_vec_{}", i);
+                    let len_name = format_ident!("__arg_slice_len_{}", i);
+                    let ptr_cast = quote! { #ptr_param as *const i64 };
+
+                    // Whether the Rust parameter is &mut [..]
+                    let ref_tok = if arg_info.is_mut { quote! { &mut #vec_name[..] } } else { quote! { &#vec_name[..] } };
+
+                    // If the inner item requires TryFrom<Value>
+                    match &**inner_kind {
+                        ArgKind::Value => {
+                            quote! {
+                                let #len_name: usize = ::std::convert::TryFrom::try_from(#len_param)
+                                    .map_err(|_| "invalid slice length")?;
+                                let __ptr = #ptr_cast;
+                                let mut #vec_name: ::std::vec::Vec<crate::core::value::Value> = ::std::vec::Vec::with_capacity(#len_name);
+                                for __i in 0..#len_name {
+                                    let __raw = unsafe { __ptr.add(__i).read() as u64 };
+                                    let __val = crate::core::value::Value::from_raw_inc_rc(__raw);
+                                    #vec_name.push(__val);
+                                }
+                                let #ident = #ref_tok;
+                            }
+                        }
+                        ArgKind::FromValue => {
+                            // Determine the element type from the Rust type: it must be a slice [T]
+                            let elem_ty: &syn::Type = match ty {
+                                syn::Type::Slice(s) => s.elem.as_ref(),
+                                _ => ty, // fallback; shouldn't happen
+                            };
+                            quote! {
+                                let #len_name: usize = ::std::convert::TryFrom::try_from(#len_param)
+                                    .map_err(|_| "invalid slice length")?;
+                                let __ptr = #ptr_cast;
+                                let mut #vec_name: ::std::vec::Vec<#elem_ty> = ::std::vec::Vec::with_capacity(#len_name);
+                                for __i in 0..#len_name {
+                                    let __raw = unsafe { __ptr.add(__i).read() as u64 };
+                                    let __val = crate::core::value::Value::from_raw_inc_rc(__raw);
+                                    let __cast: #elem_ty = ::std::convert::TryFrom::try_from(__val)?;
+                                    #vec_name.push(__cast);
+                                }
+                                let #ident = #ref_tok;
+                            }
+                        }
+                        _ => {
+                            // Fallback: treat as slice of raw i64 payloads
+                            quote! {
+                                let #len_name: usize = ::std::convert::TryFrom::try_from(#len_param)
+                                    .map_err(|_| "invalid slice length")?;
+                                let __ptr = #ptr_cast;
+                                // Rebuild a Vec<i64> and borrow it as a slice
+                                let mut #vec_name: ::std::vec::Vec<i64> = ::std::vec::Vec::with_capacity(#len_name);
+                                for __i in 0..#len_name {
+                                    let __raw = unsafe { __ptr.add(__i).read() };
+                                    #vec_name.push(__raw);
+                                }
+                                let #ident = #ref_tok;
+                            }
+                        }
+                    }
+                }
+
                 // Fallback for other ABI-passed primitives: transmute raw i64
                 ArgKind::Other => {
                     quote! {
@@ -254,6 +352,7 @@ enum ArgKind {
     Value,
     FromValue,
     Option(Box<ArgKind>),
+    Slice(Box<ArgKind>),
     Other,
 }
 
@@ -353,6 +452,13 @@ fn get_arg_type(ty: &syn::Type) -> Result<(ArgInfo, &syn::Type), Error> {
                 }
                 _ => get_object_kind(path),
             }
+        }
+        syn::Type::Slice(slice) => {
+            // Slice element kind
+            let (elem_info, _elem_ty) = get_arg_type(&slice.elem)?;
+            // Slices must be passed by reference at the Rust boundary.
+            is_ref = true | is_ref;
+            ArgKind::Slice(Box::new(elem_info.kind))
         }
         _ => ArgKind::Other,
     };
