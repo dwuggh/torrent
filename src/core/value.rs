@@ -1,7 +1,6 @@
 use std::{marker::PhantomData, mem::ManuallyDrop, ops::Deref, sync::Arc};
 
 use proc_macros::{Trace, defun};
-use std::collections::HashMap;
 
 use crate::{core::{function::Function, string::LispString, symbol::Symbol}, gc::{Gc, GcInner, Trace}};
 
@@ -219,20 +218,6 @@ pub struct ConsInner {
 #[derive(Clone, Trace, Debug)]
 pub struct Vector(Gc<Vec<Value>>);
 
-#[derive(Clone, Trace, Debug)]
-pub struct Map(Gc<HashMap<Value, Value>>);
-
-impl TaggedPtr for Map {
-    const TAG: LispType = LispType::Map;
-
-    unsafe fn cast(val: u64) -> Self {
-        Map(Gc::from_raw(val as *mut GcInner<HashMap<Value, Value>>))
-    }
-
-    unsafe fn get_untagged_data(self) -> u64 {
-        Gc::into_raw(self.0) as u64
-    }
-}
 
 macro_rules! impl_try_from_value_variant {
     ($($ty:ty => $variant:ident),+ $(,)?) => {
