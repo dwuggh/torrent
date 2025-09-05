@@ -28,37 +28,6 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let c_params = (0..args.len()).map(|i| format_ident!("arg_{}", i)).map(|i| quote! {#i: i64});
 
     
-    // Generate conversions from i64 to actual types
-    let conversions = args.iter().enumerate().map(|(i, (ident, ty, arg_info))| {
-        let param_name = param_name(i);
-        match arg_info.kind {
-            ArgKind::Env => quote! {
-                let #ident = #param_name as *mut crate::core::env::Environment;
-            },
-            ArgKind::Gc => quote! {
-                let #ident = unsafe {
-                    let val = crate::core::value::Value(#param_name as u64);
-                    crate::core::gc::Gc::try_from(val).unwrap()
-                };
-            },
-            ArgKind::Value => quote! {
-                let #ident = crate::core::value::Value(#param_name as u64);
-            },
-            ArgKind::IntoValue => quote! {
-                let #ident = crate::core::value::Value(#param_name as u64);
-            },
-            ArgKind::Option => quote! {
-                let #ident = if #param_name == crate::core::value::NIL {
-                    None
-                } else {
-                    Some(crate::core::value::Value(#param_name as u64))
-                };
-            },
-            ArgKind::Other => quote! {
-                let #ident = std::mem::transmute::<i64, #ty>(#param_name);
-            },
-        }
-    });
 
     // Generate the actual function call
     let call_args = args.iter().map(|(ident, _, _)| quote! { #ident });
@@ -112,7 +81,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         unsafe extern "C" fn #func_name(
             #(#c_params),*
         ) -> i64 {
-            #(#conversions)*
+            #(#arg_conversion)*
             
             let result = #subr(#(#call_args),*)#err;
             
@@ -131,46 +100,106 @@ fn param_name(i: usize) -> Ident {
 fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
     args.iter()
         .enumerate()
-        .map(|(idx, (_ident, _ty, arg_info))| {
-            match arg_info.kind {
-                // environment pointer is passed as an i64
-                ArgKind::Env => quote! { env as i64 },
+        .map(|(i, (ident, ty, arg_info))| {
+            let param = param_name(i);
 
-                // For GC-backed, raw Value, and types that are represented as Value at the call boundary,
-                // we pass the raw Value bits (upper 56 payload + 8-bit tag) as i64.
-                ArgKind::Gc | ArgKind::Value | ArgKind::IntoValue => {
+            match arg_info.kind {
+                ArgKind::Env => {
                     quote! {
-                        {
-                            let val: crate::core::value::Value = args.get(#idx);
-                            val.0 as i64
+                        let #ident = #param as *mut crate::core::env::Environment;
+                    }
+                }
+
+                ArgKind::Gc => {
+                    if arg_info.is_ref {
+                        let tmp = format_ident!("__arg_tmp_{}", i);
+                        let ref_tok = if arg_info.is_mut { quote! { &mut #tmp } else { quote! { &#tmp } };
+                        let mut_tok = if arg_info.is_mut { quote! { mut } else { quote! {} };
+                        quote! {
+                            let #mut_tok #tmp = unsafe {
+                                let val = crate::core::value::Value(#param as u64);
+                                crate::core::gc::Gc::try_from(val).unwrap()
+                            };
+                            let #ident = #ref_tok;
+                        }
+                    } else {
+                        quote! {
+                            let #ident = unsafe {
+                                let val = crate::core::value::Value(#param as u64);
+                                crate::core::gc::Gc::try_from(val).unwrap()
+                            };
                         }
                     }
                 }
 
-                // Optional arguments: when absent, pass the NIL sentinel so the wrapper can detect None.
-                // When present, pass the raw Value bits.
+                // For raw Value-like params we reconstruct a Value from bits, and
+                // if the Rust parameter is a reference we bind a local and borrow it.
+                ArgKind::Value | ArgKind::IntoValue => {
+                    if arg_info.is_ref {
+                        let tmp = format_ident!("__arg_tmp_{}", i);
+                        let ref_tok = if arg_info.is_mut { quote! { &mut #tmp } else { quote! { &#tmp } };
+                        let mut_tok = if arg_info.is_mut { quote! { mut } else { quote! {} };
+                        quote! {
+                            let #mut_tok #tmp = crate::core::value::Value(#param as u64);
+                            let #ident = #ref_tok;
+                        }
+                    } else {
+                        quote! {
+                            let #ident = crate::core::value::Value(#param as u64);
+                        }
+                    }
+                }
+
+                // Option handling:
+                // - If the parameter is Option<&Value> or Option<&mut Value>, produce a borrowed Some(&[mut]tmp)
+                // - Otherwise, default to Option<Value> using NIL as None
                 ArgKind::Option => {
-                    quote! {
-                        {
-                            match args.get(#idx) {
-                                Some(v) => {
-                                    let val: crate::core::value::Value = v.into();
-                                    val.0 as i64
-                                },
-                                None => crate::core::value::NIL,
+                    // Inspect the type to see if it's Option<&Value> or Option<&mut Value>
+                    let (is_ref_value_opt, is_mut_ref_value_opt) = match ty {
+                        Type::Path(type_path) if get_path_ident_name(type_path) == "Option" => {
+                            let outer = type_path.path.segments.last().unwrap();
+                            match get_generic_param(outer) {
+                                Some(Type::Reference(inner_ref)) => {
+                                    if let Type::Path(inner_ty_path) = inner_ref.elem.as_ref() {
+                                        let name = get_path_ident_name(inner_ty_path);
+                                        (name == "Value", inner_ref.mutability.is_some())
+                                    } else {
+                                        (false, false)
+                                    }
+                                }
+                                _ => (false, false),
                             }
                         }
+                        _ => (false, false),
+                    };
+
+                    if is_ref_value_opt {
+                        let tmp = format_ident!("__arg_tmp_{}", i);
+                        let ref_tok = if is_mut_ref_value_opt { quote! { &mut #tmp } else { quote! { &#tmp } };
+                        let mut_tok = if is_mut_ref_value_opt { quote! { mut } else { quote! {} };
+                        quote! {
+                            let #ident = if #param == crate::core::value::NIL {
+                                None
+                            } else {
+                                let #mut_tok #tmp = crate::core::value::Value(#param as u64);
+                                Some(#ref_tok)
+                            };
+                        }
+                    } else {
+                        quote! {
+                            let #ident = if #param == crate::core::value::NIL {
+                                None
+                            } else {
+                                Some(crate::core::value::Value(#param as u64))
+                            };
+                        }
                     }
                 }
 
-                // Fallback for other primitive/native ABI cases where the callee expects a raw i64
-                // (kept as-is; relies on TryFrom to extract i64 from the runtime argument source).
+                // Fallback for other ABI types: transmute the raw i64 to the expected type.
                 ArgKind::Other => {
                     quote! {
-                        {
-                            let val: i64 = std::convert::TryFrom::try_from(&args[#idx])?;
-                            val
-                        }
+                        let #ident = std::mem::transmute::<i64, #ty>(#param);
                     }
                 }
             }
