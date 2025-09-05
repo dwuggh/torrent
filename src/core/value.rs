@@ -206,3 +206,50 @@ pub struct ConsInner {
 
 #[derive(Clone, Trace, Debug)]
 pub struct Vector(Gc<Vec<Value>>);
+
+macro_rules! impl_try_from_value_variant {
+    ($($ty:ty => $variant:ident),+ $(,)?) => {
+        $(
+            impl ::std::convert::TryFrom<Value> for $ty {
+                type Error = &'static str;
+                fn try_from(value: Value) -> ::std::result::Result<Self, Self::Error> {
+                    match value.untag() {
+                        LispValue::$variant(inner) => Ok(inner),
+                        _ => Err(concat!("expected ", stringify!($variant))),
+                    }
+                }
+            }
+        )+
+    };
+}
+
+// Implement TryFrom<Value> for each inner LispValue variant type.
+impl_try_from_value_variant! {
+    i64 => Int,
+    f64 => Float,
+    char => Character,
+    LispString => String,
+    Symbol => Symbol,
+    Vector => Vector,
+    Cons => Cons,
+    Function => Function,
+}
+
+// Useful blanket: convert Value -> LispValue via untag (infallible).
+impl ::std::convert::TryFrom<Value> for LispValue {
+    type Error = ::std::convert::Infallible;
+    fn try_from(value: Value) -> ::std::result::Result<Self, Self::Error> {
+        Ok(value.untag())
+    }
+}
+
+// Optional convenience: treat Nil as unit type.
+impl ::std::convert::TryFrom<Value> for () {
+    type Error = &'static str;
+    fn try_from(value: Value) -> ::std::result::Result<Self, Self::Error> {
+        match value.untag() {
+            LispValue::Nil => Ok(()),
+            _ => Err("expected Nil"),
+        }
+    }
+}
