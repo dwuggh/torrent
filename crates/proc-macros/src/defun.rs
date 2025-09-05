@@ -29,32 +29,32 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
 
     
     // Generate conversions from i64 to actual types
-    let conversions = args.iter().enumerate().map(|(i, (ident, ty, arg_type))| {
+    let conversions = args.iter().enumerate().map(|(i, (ident, ty, arg_info))| {
         let param_name = param_name(i);
-        match arg_type {
-            ArgType::Env(_) => quote! {
-                let #ident = #param_name as *mut crate::core::env::Envrionment;
+        match arg_info.kind {
+            ArgKind::Env => quote! {
+                let #ident = #param_name as *mut crate::core::env::Environment;
             },
-            ArgType::Gc => quote! {
+            ArgKind::Gc => quote! {
                 let #ident = unsafe {
                     let val = crate::core::value::Value(#param_name as u64);
                     crate::core::gc::Gc::try_from(val).unwrap()
                 };
             },
-            ArgType::Value => quote! {
+            ArgKind::Value => quote! {
                 let #ident = crate::core::value::Value(#param_name as u64);
             },
-            ArgType::IntoValue => quote! {
+            ArgKind::IntoValue => quote! {
                 let #ident = crate::core::value::Value(#param_name as u64);
             },
-            ArgType::Option => quote! {
+            ArgKind::Option => quote! {
                 let #ident = if #param_name == crate::core::value::NIL {
                     None
                 } else {
                     Some(crate::core::value::Value(#param_name as u64))
                 };
             },
-            ArgType::Other => quote! {
+            ArgKind::Other => quote! {
                 let #ident = std::mem::transmute::<i64, #ty>(#param_name);
             },
         }
@@ -128,14 +128,14 @@ fn param_name(i: usize) -> Ident {
     param_name
 }
 
-fn get_arg_conversion(args: &[(Ident, Type, ArgType)]) -> Vec<TokenStream> {
+fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
     args.iter()
         .enumerate()
-        .map(|(idx, (ident, ty, arg_type))| {
+        .map(|(idx, (ident, ty, arg_info))| {
             let param_name = param_name(idx);
-            match arg_type {
-            ArgType::Env(_) => quote! { env as i64 },
-            ArgType::Gc => {
+            match arg_info.kind {
+            ArgKind::Env => quote! { env as i64 },
+            ArgKind::Gc => {
                 quote! { 
                     {
                         let val: crate::core::value::Value = args.get(#idx);
@@ -143,7 +143,7 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgType)]) -> Vec<TokenStream> {
                     }
                 }
             }
-            ArgType::Option => {
+            ArgKind::Option => {
                 quote! {
                     {
                         match args.get(#idx) {
@@ -156,7 +156,7 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgType)]) -> Vec<TokenStream> {
                     }
                 }
             }
-            ArgType::Value => {
+            ArgKind::Value => {
                 quote! { 
                     {
                         let val: crate::core::value::Value = args.get(#idx);
@@ -164,7 +164,7 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgType)]) -> Vec<TokenStream> {
                     }
                 }
             }
-            ArgType::IntoValue => {
+            ArgKind::IntoValue => {
                 quote! {
                     {
                         let val: crate::core::value::Value = args.get(#idx).into();
@@ -172,7 +172,7 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgType)]) -> Vec<TokenStream> {
                     }
                 }
             }
-            ArgType::Other => {
+            ArgKind::Other => {
                 quote! {
                     {
                         let val: i64 = std::convert::TryFrom::try_from(&args[#idx])?;
@@ -196,30 +196,26 @@ fn map_function_name(name: &str) -> String {
 }
 
 
-struct ArgTy {
-    ty: ArgType,
+struct ArgInfo {
+    kind: ArgKind,
     is_mut: bool,
     is_ref: bool,
 }
 
 #[derive(PartialEq, Debug, Copy, Clone)]
-enum ArgType {
-    Env(bool),
+enum ArgKind {
+    Env,
     Gc,
-    // Slice(Gc),
-    // SliceRt(Gc),
-    // ArgSlice,
     Value,
     IntoValue,
     Option,
-    // OptionRt,
     Other,
 }
 
 pub(crate) struct Function {
     name: syn::Ident,
     body: syn::Item,
-    args: Vec<(syn::Ident, syn::Type, ArgType)>,
+    args: Vec<(syn::Ident, syn::Type, ArgInfo)>,
     fallible: bool,
 }
 
@@ -254,7 +250,7 @@ fn parse_fn(item: syn::Item) -> Result<Function, Error> {
 }
 
 
-fn parse_signature(sig: &syn::Signature) -> Result<Vec<(syn::Ident, syn::Type, ArgType)>, Error> {
+fn parse_signature(sig: &syn::Signature) -> Result<Vec<(syn::Ident, syn::Type, ArgInfo)>, Error> {
     let mut args = Vec::new();
     for input in &sig.inputs {
         match input {
@@ -263,7 +259,7 @@ fn parse_signature(sig: &syn::Signature) -> Result<Vec<(syn::Ident, syn::Type, A
             }
             syn::FnArg::Typed(pat_type) => {
                 let ty = pat_type.ty.as_ref().clone();
-                let arg_type = get_arg_type(&ty)?;
+                let arg_info = get_arg_type(&ty)?;
                 
                 // Extract the identifier from the pattern
                 let ident = match pat_type.pat.as_ref() {
@@ -271,7 +267,7 @@ fn parse_signature(sig: &syn::Signature) -> Result<Vec<(syn::Ident, syn::Type, A
                     _ => return Err(Error::new_spanned(pat_type, "Only simple identifiers are supported as function arguments")),
                 };
                 
-                args.push((ident, ty, arg_type));
+                args.push((ident, ty, arg_info));
             }
         }
     }
@@ -288,19 +284,15 @@ fn return_type_is_result(output: &syn::ReturnType) -> bool {
     }
 }
 
-fn get_arg_type(ty: &syn::Type) -> Result<ArgType, Error> {
-    let is_ref = matches!(ty, syn::Type::Reference(x));
-    Ok(match ty {
+fn get_arg_type(ty: &syn::Type) -> Result<ArgInfo, Error> {
+    let (inner_ty, is_ref, is_mut) = match ty {
         syn::Type::Reference(syn::TypeReference {
             elem, mutability, ..
-        }) => match elem.as_ref() {
-            syn::Type::Path(path) => match &*get_path_ident_name(path) {
-                "Envrionment" => ArgType::Env(mutability.is_some()),
-                // "Rt" | "Rto" => get_rt_type(path, mutability.is_some())?,
-                _ => ArgType::Other,
-            },
-            ty @ _ => get_arg_type(ty)?,
-        },
+        }) => (elem.as_ref(), true, mutability.is_some()),
+        _ => (ty, false, false),
+    };
+
+    let kind = match inner_ty {
         syn::Type::Path(path) => {
             let name = get_path_ident_name(path);
             match &*name {
@@ -309,25 +301,27 @@ fn get_arg_type(ty: &syn::Type) -> Result<ArgType, Error> {
                     match get_generic_param(outer) {
                         Some(syn::Type::Reference(inner)) => match inner.elem.as_ref() {
                             syn::Type::Path(path) => match &*get_path_ident_name(path) {
-                                _ => ArgType::Option,
+                                _ => ArgKind::Option,
                             },
-                            _ => ArgType::Option,
+                            _ => ArgKind::Option,
                         },
-                        _ => ArgType::Option,
+                        _ => ArgKind::Option,
                     }
                 }
-                "OptionalFlag" => ArgType::Option,
-                _ => get_object_type(path),
+                "OptionalFlag" => ArgKind::Option,
+                _ => get_object_kind(path),
             }
         }
-        _ => ArgType::Other,
-    })
+        _ => ArgKind::Other,
+    };
+
+    Ok(ArgInfo { kind, is_mut, is_ref })
 }
 
-fn get_object_type(type_path: &syn::TypePath) -> ArgType {
+fn get_object_kind(type_path: &syn::TypePath) -> ArgKind {
     let outer_type = type_path.path.segments.last().unwrap();
     if outer_type.ident == "Value" {
-        ArgType::Value
+        ArgKind::Value
     } else if outer_type.ident == "LispString"
         || outer_type.ident == "Symbol"
         || outer_type.ident == "Vector"
@@ -335,13 +329,13 @@ fn get_object_type(type_path: &syn::TypePath) -> ArgType {
         || outer_type.ident == "Function"
         || outer_type.ident == "i64"
     {
-        ArgType::IntoValue
+        ArgKind::IntoValue
     } else if outer_type.ident == "Gc" {
-        ArgType::Gc
+        ArgKind::Gc
     } else if outer_type.ident == "Environment" {
-        ArgType::Env(false)
+        ArgKind::Env
     } else {
-        ArgType::Other
+        ArgKind::Other
     }
 }
 
