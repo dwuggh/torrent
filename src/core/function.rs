@@ -13,7 +13,6 @@ use crate::core::symbol::Symbol;
 use crate::core::symbol::SymbolCell;
 use crate::{
     core::{
-        env::Env,
         value::{LispType, TaggedPtr, Value},
     },
     gc::{Gc, GcInner, Trace},

@@ -13,7 +13,6 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let def_func_name = format_ident!("__def_{}", &subr_name);
     let register_func_name = format_ident!("__register_{}", &subr_name);
     let rust_wrapper_name = format_ident!("__rust_wrapper_{}", &subr_name);
-    // let name_lit = Literal::string(&runtime_fn.sig.ident.to_string());
 
     let args = function.args;
     let arg_conversion = get_arg_conversion(&args);
@@ -101,7 +100,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
 
         }
 
-        inventory::submit!(crate::runtime::BuiltinFnPlugin::new(#def_func_name, #register_func_name));
+        inventory::submit!(crate::core::compiler::BuiltinFnPlugin::new(#def_func_name, #register_func_name));
 
 
         #[automatically_derived]

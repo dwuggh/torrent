@@ -6,8 +6,6 @@ use chumsky::{
     text::{digits, Char},
 };
 
-use crate::core::{env::Env, symbol::Symbol};
-
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum Node {
     Ident(String),
@@ -191,29 +189,6 @@ pub fn elisp_parser<'a>() -> impl Parser<'a, &'a str, Vec<Node>, extra::Err<Rich
 pub fn special_chars(c: char) -> bool {
     let chars = "#[]()\\\"\',";
     chars.contains(c)
-}
-
-impl Node {
-    pub fn read_free_vars(&self, env: &Env, result: &mut HashSet<Symbol>) {
-        match self {
-            Node::Ident(ident) => {
-                if let Some(kw) = Keyword::try_from(ident.as_str()).ok() {
-                    return
-                }
-            }
-            Node::Sexp(nodes) => {
-                for node in nodes.iter() {
-                    node.read_free_vars(env, result);
-                }
-            }
-            Node::Vector(nodes) => {
-                for node in nodes.iter() {
-                    node.read_free_vars(env, result);
-                }
-            }
-            _ => ()
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

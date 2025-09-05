@@ -24,4 +24,4 @@ impl BuiltinFnPlugin {
 }
 
 mod codegen;
-mod jit;
+pub mod jit;

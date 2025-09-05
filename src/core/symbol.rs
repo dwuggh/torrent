@@ -6,7 +6,7 @@ use std::sync::{LazyLock, RwLock};
 
 use dashmap::DashMap;
 use lasso::{Capacity, Key, Spur, ThreadedRodeo};
-use proc_macros::{defun, Trace};
+use proc_macros::Trace;
 
 use crate::gc::Trace;
 use crate::{
@@ -154,9 +154,4 @@ impl SymbolCell {
     pub fn data(&self) -> &SymbolCellData {
         &self.0.get()
     }
-}
-
-#[defun]
-fn test_name(a: &Value, b: Value, c: &mut Symbol) -> Value {
-    todo!()
 }
