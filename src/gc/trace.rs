@@ -117,6 +117,29 @@ where
     }
 }
 
+unsafe impl<K, V> Trace for std::collections::HashMap<K, V>
+where
+    K: Trace,
+    V: Trace,
+{
+    unsafe fn trace(&self, visitor: Visitor) {
+        for (k, v) in self.iter() {
+            k.trace(visitor);
+            v.trace(visitor);
+        }
+    }
+
+    unsafe fn finalize(&mut self) {
+        for (mut k, mut v) in std::mem::take(self)
+            .into_iter()
+            .map(|(k, v)| (ManuallyDrop::new(k), ManuallyDrop::new(v)))
+        {
+            k.finalize();
+            v.finalize();
+        }
+    }
+}
+
 unsafe impl<T> Trace for PhantomData<T>
 {
     unsafe fn trace(&self, _: Visitor) {}

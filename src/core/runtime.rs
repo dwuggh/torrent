@@ -13,16 +13,26 @@ fn __store_lexical(symbol: Symbol, value: Value, func: &Function) {
     let FunctionType::Lambda(func) = func.get_func_type_mut() else {
         return;
     };
-    func.captures.insert(symbol, value.clone());
+    let key = symbol.tag();
+    func.captures.0.get_mut().insert(key, value.clone());
 }
 
 #[defun]
 fn __load_captured(symbol: Symbol, func: &Function) -> Result<Value> {
-    func.get_func_type_mut()
-        .as_closure_mut()
-        .and_then(|closure| closure.captures.get(&symbol))
-        .copied()
-        .ok_or(anyhow!("failed to load captured value"))
+    let Some(closure) = func.get_func_type_mut().as_closure_mut() else {
+        return Err(anyhow!("not a closure"));
+    };
+    let key = symbol.tag();
+    if let Some(v) = closure.captures.0.get().get(&key) {
+        return Ok(v.clone());
+    }
+    if let Some(cell_ref) = symbol.get() {
+        if let Some(v) = cell_ref.data().value.clone() {
+            closure.captures.0.get_mut().insert(key, v.clone());
+            return Ok(v);
+        }
+    }
+    Err(anyhow!("failed to load captured value"))
 }
 
 #[defun]

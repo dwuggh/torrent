@@ -7,6 +7,7 @@ use cranelift_jit::JITModule;
 use cranelift_module::FuncId;
 use cranelift_module::Module;
 use proc_macros::Trace;
+use crate::core::value::Map;
 
 use crate::core::env::Environment;
 use crate::core::symbol::Symbol;
@@ -31,9 +32,8 @@ pub(crate) type Closure =
 // TODO closures
 #[derive(Debug, Clone, Trace)]
 pub struct LambdaFn {
-    #[no_trace]
-    // TODO is this Value or Gc<Value>?
-    pub captures: HashMap<Symbol, Value>,
+    // Captured environment as a GC’d map of Value -> Value (key is typically a Symbol tagged as Value).
+    pub captures: Map,
     #[no_trace]
     pub func: BuiltInFn,
 }
@@ -73,7 +73,7 @@ impl Function {
         unsafe {
             let func = func as Closure;
             let closure = LambdaFn {
-                captures: HashMap::new(),
+                captures: Map(Gc::new(HashMap::new())),
                 func,
             };
             Self {

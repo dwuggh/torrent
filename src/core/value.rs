@@ -1,12 +1,19 @@
 use std::{marker::PhantomData, mem::ManuallyDrop, ops::Deref, sync::Arc};
 
 use proc_macros::{Trace, defun};
+use std::collections::HashMap;
 
 use crate::{core::{function::Function, string::LispString, symbol::Symbol}, gc::{Gc, GcInner, Trace}};
 
 #[repr(transparent)]
 #[derive(PartialEq, PartialOrd, Eq, Copy, Debug)]
 pub struct Value(pub u64);
+
+impl ::std::hash::Hash for Value {
+    fn hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
 
 unsafe impl Trace for Value {
     unsafe fn trace(&self, visitor: crate::gc::Visitor) {
@@ -35,6 +42,7 @@ pub enum LispType {
     Vector,
     Cons,
     Function,
+    Map,
 }
 
 pub const NIL: i64 = LispType::Nil as i64;
@@ -54,7 +62,8 @@ pub enum LispValue {
     Symbol(Symbol),
     Vector(Vector),
     Cons(Cons),
-    Function(Function)
+    Function(Function),
+    Map(Map),
 }
 
 impl Value {
@@ -73,6 +82,7 @@ impl Value {
                 LispType::Vector => LispValue::Vector(TaggedPtr::cast(data)),
                 LispType::Cons => LispValue::Cons(TaggedPtr::cast(data)),
                 LispType::Function => LispValue::Function(TaggedPtr::cast(data)),
+                LispType::Map => LispValue::Map(TaggedPtr::cast(data)),
             }
         }
     }
@@ -108,7 +118,10 @@ impl Value {
                 }
                 LispValue::Function(function) => {
                     function.inner.inc_ref_count();
- }
+                }
+                LispValue::Map(map) => {
+                    map.0.inc_ref_count();
+                }
                 _ => ()
             }
         }
@@ -206,6 +219,21 @@ pub struct ConsInner {
 #[derive(Clone, Trace, Debug)]
 pub struct Vector(Gc<Vec<Value>>);
 
+#[derive(Clone, Trace, Debug)]
+pub struct Map(Gc<HashMap<Value, Value>>);
+
+impl TaggedPtr for Map {
+    const TAG: LispType = LispType::Map;
+
+    unsafe fn cast(val: u64) -> Self {
+        Map(Gc::from_raw(val as *mut GcInner<HashMap<Value, Value>>))
+    }
+
+    unsafe fn get_untagged_data(self) -> u64 {
+        Gc::into_raw(self.0) as u64
+    }
+}
+
 macro_rules! impl_try_from_value_variant {
     ($($ty:ty => $variant:ident),+ $(,)?) => {
         $(
@@ -232,6 +260,7 @@ impl_try_from_value_variant! {
     Vector => Vector,
     Cons => Cons,
     Function => Function,
+    Map => Map,
 }
 
 // Useful blanket: convert Value -> LispValue via untag (infallible).
