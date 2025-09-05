@@ -143,7 +143,7 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                 ArgKind::Env => {
                     quote! {
                         let #ident = #param as *mut crate::core::env::Environment;
-                        let #ident = #ident.as_mut().ok_or(anyhow::anyhow!("failed to convert env"))?;
+                        let #ident = #ident.as_mut().ok_or("failed to convert env")?;
                     }
                 }
 
