@@ -21,4 +21,35 @@ impl TaggedPtr for Map {
 }
 
 impl Map {
+    pub fn new() -> Self {
+        Map(Gc::new(HashMap::new()))
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.get().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.get().is_empty()
+    }
+
+    pub fn contains_key(&self, key: &Value) -> bool {
+        self.0.get().contains_key(key)
+    }
+
+    pub fn get(&self, key: &Value) -> Option<Value> {
+        self.0.get().get(key).cloned()
+    }
+
+    pub fn insert(&mut self, key: Value, value: Value) {
+        self.0.get_mut().insert(key, value);
+    }
+
+    pub fn remove(&mut self, key: &Value) -> Option<Value> {
+        self.0.get_mut().remove(key)
+    }
+
+    pub fn clear(&mut self) {
+        self.0.get_mut().clear();
+    }
 }

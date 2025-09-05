@@ -2,7 +2,7 @@ use std::{marker::PhantomData, mem::ManuallyDrop, ops::Deref, sync::Arc};
 
 use proc_macros::{Trace, defun};
 
-use crate::{core::{function::Function, string::LispString, symbol::Symbol}, gc::{Gc, GcInner, Trace}};
+use crate::{core::{function::Function, string::LispString, symbol::Symbol, map::Map}, gc::{Gc, GcInner, Trace}};
 
 #[repr(transparent)]
 #[derive(PartialEq, PartialOrd, Eq, Copy, Debug)]

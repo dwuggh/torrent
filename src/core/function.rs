@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 
 use cranelift::prelude::types;
 use cranelift::prelude::AbiParam;
@@ -73,7 +72,7 @@ impl Function {
         unsafe {
             let func = func as Closure;
             let closure = LambdaFn {
-                captures: Map(Gc::new(HashMap::new())),
+                captures: Map::new(),
                 func,
             };
             Self {

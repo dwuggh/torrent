@@ -14,7 +14,7 @@ fn __store_lexical(symbol: Symbol, value: Value, func: &Function) {
         return;
     };
     let key = symbol.tag();
-    func.captures.0.get_mut().insert(key, value.clone());
+    func.captures.insert(key, value.clone());
 }
 
 #[defun]
@@ -23,12 +23,12 @@ fn __load_captured(symbol: Symbol, func: &Function) -> Result<Value> {
         return Err(anyhow!("not a closure"));
     };
     let key = symbol.tag();
-    if let Some(v) = closure.captures.0.get().get(&key) {
-        return Ok(v.clone());
+    if let Some(v) = closure.captures.get(&key) {
+        return Ok(v);
     }
     if let Some(cell_ref) = symbol.get() {
         if let Some(v) = cell_ref.data().value.clone() {
-            closure.captures.0.get_mut().insert(key, v.clone());
+            closure.captures.insert(key, v.clone());
             return Ok(v);
         }
     }
