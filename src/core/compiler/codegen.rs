@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use anyhow::Result;
 use cranelift::codegen::Context;
@@ -12,9 +13,12 @@ use cranelift_module::Module;
 use crate::ast::Node;
 use crate::core::compiler::scope::CompileScope;
 use crate::core::compiler::scope::FrameScope;
+use crate::core::compiler::scope::Val;
 use crate::core::env::Environment;
+use crate::core::function::Function;
 use crate::core::string::LispString;
 use crate::core::symbol::Symbol;
+use crate::core::value::TaggedPtr;
 use crate::core::value::NIL;
 use crate::Value as RuntimeValue;
 
@@ -22,7 +26,10 @@ pub struct Codegen<'a, 's> {
     module: &'a mut JITModule,
     builder: FunctionBuilder<'a>,
     scope: CompileScope<'s>,
-    builtin_funcs: &'a HashMap<String, FuncId>
+    captures: HashSet<Symbol>,
+    closure: Value,
+    func_id: FuncId,
+    builtin_funcs: &'a HashMap<String, FuncId>,
 }
 
 impl<'a, 's> Codegen<'a, 's> {
@@ -44,6 +51,9 @@ impl<'a, 's> Codegen<'a, 's> {
         sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
 
+        let func_id = module.declare_anonymous_function(
+            &ctx.func.signature,
+        )?;
         let mut builder = FunctionBuilder::new(&mut ctx.func, fctx);
 
         let entry_block = builder.create_block();
@@ -64,12 +74,19 @@ impl<'a, 's> Codegen<'a, 's> {
             builder.def_var(var, val);
         }
 
-        let scope = FrameScope::new(variables, prev_scope).into();
+        let captures = HashSet::new();
+        let closure = Function::new_closure(0 as *const u8, func_id).tag();
+        let closure = load_value(&mut builder, closure);
+
+        let scope = FrameScope::new(variables, prev_scope, false).into();
 
         Ok(Self {
             module,
             builtin_funcs,
             builder,
+            captures,
+            closure,
+            func_id,
             scope,
         })
     }
@@ -91,13 +108,32 @@ impl<'a, 's> Codegen<'a, 's> {
         self.builder.finalize();
     }
 
+    pub fn load_symbol(&mut self, symbol: Symbol) -> Result<Value> {
+        self.scope
+            .load_symbol(symbol, false, &mut self.builder)
+            .ok_or(anyhow::anyhow!("symbol not found"))
+            .map(|val| match val {
+                Val::Value(value) => value,
+                Val::Symbol(symbol) => {
+                    self.captures.insert(symbol);
+                    // self.builder.ins().call(FN, args);
+                    let func_id = *self.builtin_funcs.get("--load-captured").unwrap();
+                    let sym = load_value(&mut self.builder, symbol.tag());
+
+                    let load = self.module.declare_func_in_func(func_id, self.builder.func);
+                    let inst = self.builder.ins().call(load, &[sym, self.closure]);
+                    self.builder.inst_results(inst)[0]
+                }
+            })
+    }
+
     pub fn translate_node(&mut self, node: &Node) -> anyhow::Result<Value> {
         match node {
             Node::Ident(ident) => {
                 let symbol = Symbol::from_string(ident);
-                self.scope
-                    .load_symbol(symbol, false, &mut self.builder)
-                    .ok_or(anyhow::anyhow!("symbol not found"))
+                let val = self
+                    .load_symbol(symbol)?;
+                Ok(val)
             }
             Node::Sexp(nodes) => {
                 if nodes.is_empty() {
@@ -196,10 +232,18 @@ impl<'a, 's> Codegen<'a, 's> {
         name: &str,
         args: &[Node],
         body: &[Node],
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Function> {
         let mut fctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
-        let mut codegen = Codegen::new(self.module, self.builtin_funcs, &mut fctx, &mut ctx, args, &self.scope)?;
+
+        let mut codegen = Codegen::new(
+            self.module,
+            self.builtin_funcs,
+            &mut fctx,
+            &mut ctx,
+            args,
+            &self.scope,
+        )?;
 
         let result = codegen.translate_nodes(body)?;
         codegen.finalize(result);
@@ -215,7 +259,16 @@ impl<'a, 's> Codegen<'a, 's> {
 
         self.module.define_function(func_id, &mut ctx)?;
         self.module.clear_context(&mut ctx);
+        let func_ptr = self.module.get_finalized_function(func_id);
+        let closure = Function::new_closure(func_ptr, func_id);
+        Ok(closure)
+    }
 
+    pub fn translate_let(&mut self, body: &[Node]) -> Result<()> {
         todo!()
     }
+}
+
+fn load_value(builder: &mut FunctionBuilder, val: RuntimeValue) -> Value {
+    builder.ins().iconst(types::I64, val.0 as i64)
 }

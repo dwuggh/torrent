@@ -93,11 +93,11 @@ impl Symbol {
 
     // TODO
     pub(crate) fn get(&self) -> Option<dashmap::mapref::one::Ref<'_, Spur, SymbolCell>> {
-        // We need to find the cell by the spur key
         INTERNED_SYMBOLS.map.get(&self.name)
+    }
 
-        // Find the index where the key matches
-        // Since IndexMap uses usize indices, we need to find the position
+    pub fn get_or_init(&self) -> dashmap::mapref::one::RefMut<'_, Spur, SymbolCell> {
+        INTERNED_SYMBOLS.map.get_mut(&self.name).unwrap()
     }
 }
 
@@ -149,7 +149,7 @@ impl SymbolCell {
         SymbolCell(Gc::new(SymbolCellData::new(name, special)))
     }
 
-    pub fn data(&self) -> &SymbolCellData {
-        &self.0.get()
+    pub fn data(&self) -> &mut SymbolCellData {
+        self.0.get_mut()
     }
 }

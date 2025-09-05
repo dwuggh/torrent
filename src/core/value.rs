@@ -5,7 +5,7 @@ use proc_macros::{Trace, defun};
 use crate::{core::{function::Function, string::LispString, symbol::Symbol}, gc::{Gc, GcInner, Trace}};
 
 #[repr(transparent)]
-#[derive(Clone, PartialEq, PartialOrd, Eq, Copy, Debug)]
+#[derive(PartialEq, PartialOrd, Eq, Copy, Debug)]
 pub struct Value(pub u64);
 
 unsafe impl Trace for Value {
@@ -15,6 +15,12 @@ unsafe impl Trace for Value {
 
     unsafe fn finalize(&mut self) {
         ManuallyDrop::new(self.untag()).finalize();
+    }
+}
+
+impl Clone for Value {
+    fn clone(&self) -> Self {
+        Self::from_raw_inc_rc(self.0)
     }
 }
 

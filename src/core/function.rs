@@ -12,9 +12,7 @@ use crate::core::env::Environment;
 use crate::core::symbol::Symbol;
 use crate::core::symbol::SymbolCell;
 use crate::{
-    core::{
-        value::{LispType, TaggedPtr, Value},
-    },
+    core::value::{LispType, TaggedPtr, Value},
     gc::{Gc, GcInner, Trace},
 };
 
@@ -34,13 +32,14 @@ pub(crate) type Closure =
 #[derive(Debug, Clone, Trace)]
 pub struct LambdaFn {
     #[no_trace]
-    pub captures: HashMap<Symbol, Gc<SymbolCell>>,
+    // TODO is this Value or Gc<Value>?
+    pub captures: HashMap<Symbol, Value>,
     #[no_trace]
     pub func: BuiltInFn,
 }
 
 #[derive(Debug, Clone, Trace)]
-enum FunctionType {
+pub enum FunctionType {
     #[no_trace]
     Subr(SubrFn),
     Lambda(LambdaFn),
@@ -59,23 +58,53 @@ pub struct Function {
     pub(crate) inner: Gc<FunctionInner>,
 }
 
-impl Function {
-    pub fn func_id(&self) -> FuncId {
-        self.inner.get().func_id
+impl FunctionType {
+    pub fn as_closure_mut(&mut self) -> Option<&mut LambdaFn> {
+        if let FunctionType::Lambda(func) = self {
+            Some(func)
+        } else {
+            None
+        }
     }
+}
 
-    pub fn run(&self, args: &[Value], env: &mut Environment) -> anyhow::Result<Value> {
-        match &self.inner.get().func_type {
-            FunctionType::Subr(subr_fn) => {
-                (subr_fn.func)(args.as_ptr(), env)
-            }
-            FunctionType::Lambda(lambda_fn) => {
-                (lambda_fn.func)(args.as_ptr(), env)
+impl Function {
+    pub fn new_closure(func: *const u8, func_id: FuncId) -> Self {
+        unsafe {
+            let func = func as Closure;
+            let closure = LambdaFn {
+                captures: HashMap::new(),
+                func,
+            };
+            Self {
+                inner: Gc::new(FunctionInner {
+                    func_id,
+                    func_type: FunctionType::Lambda(closure),
+                }),
             }
         }
     }
 
-    pub fn declare_subr(subr_fn: SubrFn, module: &mut JITModule, name: &str) -> anyhow::Result<Self> {
+    pub fn func_id(&self) -> FuncId {
+        self.inner.get().func_id
+    }
+
+    pub fn get_func_type_mut(&self) -> &mut FunctionType {
+        &mut self.inner.get_mut().func_type
+    }
+
+    pub fn run(&self, args: &[Value], env: &mut Environment) -> anyhow::Result<Value> {
+        match &self.inner.get().func_type {
+            FunctionType::Subr(subr_fn) => (subr_fn.func)(args.as_ptr(), env),
+            FunctionType::Lambda(lambda_fn) => (lambda_fn.func)(args.as_ptr(), env),
+        }
+    }
+
+    pub fn declare_subr(
+        subr_fn: SubrFn,
+        module: &mut JITModule,
+        name: &str,
+    ) -> anyhow::Result<Self> {
         let mut sig = module.make_signature();
         for i in 0..subr_fn.argcnt {
             sig.params.push(AbiParam::new(types::I64));
