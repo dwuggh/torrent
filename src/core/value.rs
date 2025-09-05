@@ -20,8 +20,8 @@ unsafe impl Trace for Value {
 
 #[repr(u8)]
 pub enum LispType {
-    Nil = 0,
-    Int,
+    Int = 0,
+    Nil,
     Float,
     Character,
     String,
@@ -30,6 +30,8 @@ pub enum LispType {
     Cons,
     Function,
 }
+
+pub const NIL: i64 = LispType::Nil as i64;
 
 #[derive(Clone, Trace, Debug)]
 pub enum LispValue {
@@ -204,7 +206,3 @@ pub struct ConsInner {
 
 #[derive(Clone, Trace, Debug)]
 pub struct Vector(Gc<Vec<Value>>);
-
-#[defun]
-fn test(a: Value, b: Value) {
-}

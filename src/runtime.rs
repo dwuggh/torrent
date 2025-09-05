@@ -244,19 +244,19 @@ impl JIT {
 
 pub type InstallSubr = for<'a> fn(module: &'a mut cranelift_jit::JITModule) -> FuncId;
 
-pub(crate) struct RuntimeFn {
-    install_subr: InstallSubr,
-    install_symbol: for<'a> fn(&'a mut cranelift_jit::JITBuilder),
+pub(crate) struct BuiltinFnPlugin {
+    decl_subr: InstallSubr,
+    decl_jit_sym: for<'a> fn(&'a mut cranelift_jit::JITBuilder),
 }
 
-impl RuntimeFn {
+impl BuiltinFnPlugin {
     pub(crate) const fn new(
-        install_subr: InstallSubr,
-        install_symbol: for<'a> fn(&'a mut cranelift_jit::JITBuilder),
+        decl_subr: InstallSubr,
+        decl_jit_sym: for<'a> fn(&'a mut cranelift_jit::JITBuilder),
     ) -> Self {
         Self {
-            install_subr,
-            install_symbol,
+            decl_subr,
+            decl_jit_sym,
         }
     }
 }
