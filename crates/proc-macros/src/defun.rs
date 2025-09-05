@@ -113,8 +113,8 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                 ArgKind::Gc => {
                     if arg_info.is_ref {
                         let tmp = format_ident!("__arg_tmp_{}", i);
-                        let ref_tok = if arg_info.is_mut { quote! { &mut #tmp } else { quote! { &#tmp } };
-                        let mut_tok = if arg_info.is_mut { quote! { mut } else { quote! {} };
+                        let ref_tok = if arg_info.is_mut { quote! { &mut #tmp } } else { quote! { &#tmp } };
+                        let mut_tok = if arg_info.is_mut { quote! { mut } } else { quote! {} };
                         quote! {
                             let #mut_tok #tmp = unsafe {
                                 let val = crate::core::value::Value(#param as u64);
@@ -137,8 +137,8 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                 ArgKind::Value | ArgKind::IntoValue => {
                     if arg_info.is_ref {
                         let tmp = format_ident!("__arg_tmp_{}", i);
-                        let ref_tok = if arg_info.is_mut { quote! { &mut #tmp } else { quote! { &#tmp } };
-                        let mut_tok = if arg_info.is_mut { quote! { mut } else { quote! {} };
+                        let ref_tok = if arg_info.is_mut { quote! { &mut #tmp } } else { quote! { &#tmp } };
+                        let mut_tok = if arg_info.is_mut { quote! { mut } } else { quote! {} };
                         quote! {
                             let #mut_tok #tmp = crate::core::value::Value(#param as u64);
                             let #ident = #ref_tok;
@@ -175,8 +175,8 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
 
                     if is_ref_value_opt {
                         let tmp = format_ident!("__arg_tmp_{}", i);
-                        let ref_tok = if is_mut_ref_value_opt { quote! { &mut #tmp } else { quote! { &#tmp } };
-                        let mut_tok = if is_mut_ref_value_opt { quote! { mut } else { quote! {} };
+                        let ref_tok = if is_mut_ref_value_opt { quote! { &mut #tmp } } else { quote! { &#tmp } };
+                        let mut_tok = if is_mut_ref_value_opt { quote! { mut } } else { quote! {} };
                         quote! {
                             let #ident = if #param == crate::core::value::NIL {
                                 None
