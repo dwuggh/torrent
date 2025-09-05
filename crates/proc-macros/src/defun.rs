@@ -143,6 +143,7 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                 ArgKind::Env => {
                     quote! {
                         let #ident = #param as *mut crate::core::env::Environment;
+                        let #ident = #ident.as_mut().ok_or(anyhow::anyhow!("failed to convert env"))?;
                     }
                 }
 
@@ -172,7 +173,7 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                         let ref_tok = if arg_info.is_mut { quote! { &mut #tmp_cast } } else { quote! { &#tmp_cast } };
                         quote! {
                             let #mut_val #tmp_val = crate::core::value::Value(#param as u64);
-                            let #tmp_cast: #ty = ::std::convert::TryFrom::try_from(#tmp_val)?;
+                            let #mut_val #tmp_cast: #ty = ::std::convert::TryFrom::try_from(#tmp_val)?;
                             let #ident = #ref_tok;
                         }
                     } else {
@@ -468,7 +469,7 @@ fn get_arg_type(ty: &syn::Type) -> Result<(ArgInfo, &syn::Type), Error> {
 
 fn get_object_kind(type_path: &syn::TypePath) -> ArgKind {
     let outer_type = type_path.path.segments.last().unwrap();
-    if outer_type.ident == "Value" {
+    if outer_type.ident == "Value" || outer_type.ident == "RuntimeValue" {
         ArgKind::Value
     } else if outer_type.ident == "LispString"
         || outer_type.ident == "Symbol"
