@@ -22,6 +22,138 @@ pub enum Node {
     Nil,
 }
 
+impl Node {
+    // Predicates
+    pub fn is_nil(&self) -> bool {
+        matches!(self, Node::Nil)
+    }
+
+    pub fn is_ident(&self) -> bool {
+        matches!(self, Node::Ident(_))
+    }
+
+    pub fn is_sexp(&self) -> bool {
+        matches!(self, Node::Sexp(_))
+    }
+
+    pub fn is_vector(&self) -> bool {
+        matches!(self, Node::Vector(_))
+    }
+
+    // Lisp "atom" (treat Nil as an atom; Sexp/Vector are not)
+    pub fn is_atom(&self) -> bool {
+        matches!(
+            self,
+            Node::Ident(_) | Node::Integer(_) | Node::Float(_) | Node::Char(_) | Node::Str(_) | Node::Nil
+        )
+    }
+
+    // Accessors / as-views
+    pub fn as_ident(&self) -> Option<&str> {
+        if let Node::Ident(s) = self { Some(s.as_str()) } else { None }
+    }
+
+    pub fn as_integer(&self) -> Option<i64> {
+        if let Node::Integer(n) = self { Some(*n) } else { None }
+    }
+
+    pub fn as_float(&self) -> Option<f64> {
+        if let Node::Float(n) = self { Some(*n) } else { None }
+    }
+
+    pub fn as_char(&self) -> Option<char> {
+        if let Node::Char(c) = self { Some(*c) } else { None }
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        if let Node::Str(s) = self { Some(s.as_str()) } else { None }
+    }
+
+    // Treat Nil as an empty list
+    pub fn as_list(&self) -> Option<&[Node]> {
+        match self {
+            Node::Sexp(v) => Some(v.as_slice()),
+            Node::Nil => Some(&[]),
+            _ => None,
+        }
+    }
+
+    pub fn as_vector(&self) -> Option<&[Node]> {
+        if let Node::Vector(v) = self { Some(v.as_slice()) } else { None }
+    }
+
+    pub fn len_list(&self) -> Option<usize> {
+        self.as_list().map(|s| s.len())
+    }
+
+    // car/cdr + synonyms
+    pub fn car(&self) -> Option<&Node> {
+        self.as_list().and_then(|s| s.get(0))
+    }
+
+    pub fn cdr(&self) -> Option<&[Node]> {
+        self.as_list().and_then(|s| s.get(1..))
+    }
+
+    pub fn first(&self) -> Option<&Node> { self.car() }
+    pub fn rest(&self) -> Option<&[Node]> { self.cdr() }
+
+    pub fn nth(&self, idx: usize) -> Option<&Node> {
+        self.as_list().and_then(|s| s.get(idx))
+    }
+
+    // Common composed selectors
+    pub fn cadr(&self) -> Option<&Node> {
+        self.cdr().and_then(|s| s.get(0))
+    }
+
+    pub fn caddr(&self) -> Option<&Node> {
+        self.cdr().and_then(|s| s.get(1))
+    }
+
+    pub fn cddr(&self) -> Option<&[Node]> {
+        self.cdr().and_then(|s| s.get(1..))
+    }
+
+    pub fn caar(&self) -> Option<&Node> {
+        self.car()?.car()
+    }
+
+    pub fn cdar(&self) -> Option<&[Node]> {
+        self.car()?.cdr()
+    }
+
+    // List constructors/manipulators
+    // cons: if tail is a list (or nil), prepend head; otherwise make a 2-element list.
+    pub fn cons(head: Node, tail: &Node) -> Node {
+        match tail {
+            Node::Sexp(v) => {
+                let mut out = Vec::with_capacity(v.len() + 1);
+                out.push(head);
+                out.extend_from_slice(v);
+                Node::Sexp(out)
+            }
+            Node::Nil => Node::Sexp(vec![head]),
+            _ => Node::Sexp(vec![head, tail.clone()]),
+        }
+    }
+
+    // Append two lists (Nil is identity). Returns None if either side is not a list/Nil.
+    pub fn append(&self, other: &Node) -> Option<Node> {
+        match (self, other) {
+            (Node::Nil, Node::Nil) => Some(Node::Nil),
+            (Node::Nil, Node::Sexp(v)) | (Node::Sexp(v), Node::Nil) => Some(Node::Sexp(v.clone())),
+            (Node::Sexp(a), Node::Sexp(b)) => {
+                let mut out = Vec::with_capacity(a.len() + b.len());
+                out.extend_from_slice(a);
+                out.extend_from_slice(b);
+                Some(Node::Sexp(out))
+            }
+            _ => None,
+        }
+    }
+}
+
 pub fn elisp_parser<'a>() -> impl Parser<'a, &'a str, Vec<Node>, extra::Err<Rich<'a, char>>> {
     // A parser for a single S-expression node.
     // It's recursive to handle nested lists and vectors.
