@@ -22,7 +22,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     // Generate the extern "C" function signature
     // let c_params = (0..args.len()).map(|i| quote! { arg_#i: i64 });
     let c_param_idents: Vec<Ident> = (0..args.len()).map(|i| format_ident!("arg_{}", i)).collect();
-    let c_params = c_param_idents.iter().map(|i| quote! { #i: i64 });
+    let c_params = c_param_idents.iter().map(|i| quote! { #i: i64 }).collect::<Vec<_>>();
 
     
 
