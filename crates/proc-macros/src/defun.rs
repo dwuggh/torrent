@@ -72,7 +72,6 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
 
         }
 
-        #[allow_unused]
         inventory::submit!(crate::runtime::BuiltinFnPlugin::new(#def_func_name, #register_func_name));
 
 
@@ -103,42 +102,29 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
         .map(|(i, (ident, ty, arg_info))| {
             let param = param_name(i);
 
-            match arg_info.kind {
+            match &arg_info.kind {
                 ArgKind::Env => {
                     quote! {
                         let #ident = #param as *mut crate::core::env::Environment;
                     }
                 }
 
-                ArgKind::Gc => {
-                    if arg_info.is_ref {
-                        let tmp = format_ident!("__arg_tmp_{}", i);
-                        let ref_tok = if arg_info.is_mut { quote! { &mut #tmp } } else { quote! { &#tmp } };
-                        let mut_tok = if arg_info.is_mut { quote! { mut } } else { quote! {} };
-                        quote! {
-                            let #mut_tok #tmp = unsafe {
-                                let val = crate::core::value::Value(#param as u64);
-                                crate::core::gc::Gc::try_from(val).unwrap()
-                            };
-                            let #ident = #ref_tok;
-                        }
-                    } else {
-                        quote! {
-                            let #ident = unsafe {
-                                let val = crate::core::value::Value(#param as u64);
-                                crate::core::gc::Gc::try_from(val).unwrap()
-                            };
-                        }
-                    }
-                }
-
                 // For raw Value-like params we reconstruct a Value from bits, and
                 // if the Rust parameter is a reference we bind a local and borrow it.
-                ArgKind::Value | ArgKind::IntoValue => {
+                kind @ (ArgKind::Value | ArgKind::FromValue) => {
                     if arg_info.is_ref {
                         let tmp = format_ident!("__arg_tmp_{}", i);
-                        let ref_tok = if arg_info.is_mut { quote! { &mut #tmp } } else { quote! { &#tmp } };
                         let mut_tok = if arg_info.is_mut { quote! { mut } } else { quote! {} };
+                        let kind_tok = if *kind == ArgKind::FromValue {
+                            quote! {
+                                #ty::try_from(#tmp).unwrap()
+                            }
+                        } else {
+                            quote! {
+                                #tmp
+                            }
+                        };
+                        let ref_tok = if arg_info.is_mut { quote! { &mut #kind_tok } } else { quote! { &#kind_tok } };
                         quote! {
                             let #mut_tok #tmp = crate::core::value::Value(#param as u64);
                             let #ident = #ref_tok;
@@ -153,30 +139,32 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                 // Option handling:
                 // - If the parameter is Option<&Value> or Option<&mut Value>, produce a borrowed Some(&[mut]tmp)
                 // - Otherwise, default to Option<Value> using NIL as None
-                ArgKind::Option => {
+                ArgKind::Option(kind) => {
                     // Inspect the type to see if it's Option<&Value> or Option<&mut Value>
-                    let (is_ref_value_opt, is_mut_ref_value_opt) = match ty {
-                        Type::Path(type_path) if get_path_ident_name(type_path) == "Option" => {
-                            let outer = type_path.path.segments.last().unwrap();
-                            match get_generic_param(outer) {
-                                Some(Type::Reference(inner_ref)) => {
-                                    if let Type::Path(inner_ty_path) = inner_ref.elem.as_ref() {
-                                        let name = get_path_ident_name(inner_ty_path);
-                                        (name == "Value", inner_ref.mutability.is_some())
-                                    } else {
-                                        (false, false)
-                                    }
-                                }
-                                _ => (false, false),
-                            }
-                        }
-                        _ => (false, false),
-                    };
+                    // let (is_ref_value_opt, is_mut_ref_value_opt) = match ty {
+                    //     Type::Path(type_path) if get_path_ident_name(type_path) == "Option" => {
+                    //         let outer = type_path.path.segments.last().unwrap();
+                    //         match get_generic_param(outer) {
+                    //             Some(Type::Reference(inner_ref)) => {
+                    //                 if let Type::Path(inner_ty_path) = inner_ref.elem.as_ref() {
+                    //                     let name = get_path_ident_name(inner_ty_path);
+                    //                     (name == "Value", inner_ref.mutability.is_some())
+                    //                 } else {
+                    //                     (false, false)
+                    //                 }
+                    //             }
+                    //             _ => (false, false),
+                    //         }
+                    //     }
+                    //     _ => (false, false),
+                    // };
+                    let is_ref = arg_info.is_ref;
+                    let is_mut = arg_info.is_mut;
 
-                    if is_ref_value_opt {
+                    if is_ref {
                         let tmp = format_ident!("__arg_tmp_{}", i);
-                        let ref_tok = if is_mut_ref_value_opt { quote! { &mut #tmp } } else { quote! { &#tmp } };
-                        let mut_tok = if is_mut_ref_value_opt { quote! { mut } } else { quote! {} };
+                        let ref_tok = if is_mut { quote! { &mut #tmp } } else { quote! { &#tmp } };
+                        let mut_tok = if is_mut { quote! { mut } } else { quote! {} };
                         quote! {
                             let #ident = if #param == crate::core::value::NIL {
                                 None
@@ -223,13 +211,12 @@ struct ArgInfo {
     is_ref: bool,
 }
 
-#[derive(PartialEq, Debug, Copy, Clone)]
+#[derive(PartialEq, Debug, Clone)]
 enum ArgKind {
     Env,
-    Gc,
     Value,
-    IntoValue,
-    Option,
+    FromValue,
+    Option(Box<ArgKind>),
     Other,
 }
 
@@ -280,7 +267,7 @@ fn parse_signature(sig: &syn::Signature) -> Result<Vec<(syn::Ident, syn::Type, A
             }
             syn::FnArg::Typed(pat_type) => {
                 let ty = pat_type.ty.as_ref().clone();
-                let arg_info = get_arg_type(&ty)?;
+                let (arg_info,  ty) = get_arg_type(&ty)?;
                 
                 // Extract the identifier from the pattern
                 let ident = match pat_type.pat.as_ref() {
@@ -288,7 +275,7 @@ fn parse_signature(sig: &syn::Signature) -> Result<Vec<(syn::Ident, syn::Type, A
                     _ => return Err(Error::new_spanned(pat_type, "Only simple identifiers are supported as function arguments")),
                 };
                 
-                args.push((ident, ty, arg_info));
+                args.push((ident, ty.to_owned(), arg_info));
             }
         }
     }
@@ -305,8 +292,8 @@ fn return_type_is_result(output: &syn::ReturnType) -> bool {
     }
 }
 
-fn get_arg_type(ty: &syn::Type) -> Result<ArgInfo, Error> {
-    let (inner_ty, is_ref, is_mut) = match ty {
+fn get_arg_type(ty: &syn::Type) -> Result<(ArgInfo, &syn::Type), Error> {
+    let (mut inner_ty, mut is_ref, mut is_mut) = match ty {
         syn::Type::Reference(syn::TypeReference {
             elem, mutability, ..
         }) => (elem.as_ref(), true, mutability.is_some()),
@@ -319,24 +306,21 @@ fn get_arg_type(ty: &syn::Type) -> Result<ArgInfo, Error> {
             match &*name {
                 "Option" => {
                     let outer = path.path.segments.last().unwrap();
-                    match get_generic_param(outer) {
-                        Some(syn::Type::Reference(inner)) => match inner.elem.as_ref() {
-                            syn::Type::Path(path) => match &*get_path_ident_name(path) {
-                                _ => ArgKind::Option,
-                            },
-                            _ => ArgKind::Option,
-                        },
-                        _ => ArgKind::Option,
-                    }
+                    let option_ty = get_generic_param(outer).expect("incorrect Option types"); 
+                    let (info, ty) = get_arg_type(option_ty)?;
+                    // inner_ty = ty;
+                    // TODO we are not expecting double reference, so this is fine
+                    is_ref = is_ref | info.is_ref;
+                    is_mut = is_mut | info.is_mut;
+                    ArgKind::Option(Box::new(info.kind))
                 }
-                "OptionalFlag" => ArgKind::Option,
                 _ => get_object_kind(path),
             }
         }
         _ => ArgKind::Other,
     };
 
-    Ok(ArgInfo { kind, is_mut, is_ref })
+    Ok((ArgInfo { kind, is_mut, is_ref }, inner_ty))
 }
 
 fn get_object_kind(type_path: &syn::TypePath) -> ArgKind {
@@ -350,9 +334,7 @@ fn get_object_kind(type_path: &syn::TypePath) -> ArgKind {
         || outer_type.ident == "Function"
         || outer_type.ident == "i64"
     {
-        ArgKind::IntoValue
-    } else if outer_type.ident == "Gc" {
-        ArgKind::Gc
+        ArgKind::FromValue
     } else if outer_type.ident == "Environment" {
         ArgKind::Env
     } else {
