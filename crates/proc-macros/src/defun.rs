@@ -131,58 +131,50 @@ fn param_name(i: usize) -> Ident {
 fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
     args.iter()
         .enumerate()
-        .map(|(idx, (ident, ty, arg_info))| {
-            let param_name = param_name(idx);
+        .map(|(idx, (_ident, _ty, arg_info))| {
             match arg_info.kind {
-            ArgKind::Env => quote! { env as i64 },
-            ArgKind::Gc => {
-                quote! { 
-                    {
-                        let val: crate::core::value::Value = args.get(#idx);
-                        val.0 as i64
+                // environment pointer is passed as an i64
+                ArgKind::Env => quote! { env as i64 },
+
+                // For GC-backed, raw Value, and types that are represented as Value at the call boundary,
+                // we pass the raw Value bits (upper 56 payload + 8-bit tag) as i64.
+                ArgKind::Gc | ArgKind::Value | ArgKind::IntoValue => {
+                    quote! {
+                        {
+                            let val: crate::core::value::Value = args.get(#idx);
+                            val.0 as i64
+                        }
                     }
                 }
-            }
-            ArgKind::Option => {
-                quote! {
-                    {
-                        match args.get(#idx) {
-                            Some(x) => {
-                                let val: crate::core::value::Value = *x;
-                                val.0 as i64
-                            },
-                            None => 0i64,
+
+                // Optional arguments: when absent, pass the NIL sentinel so the wrapper can detect None.
+                // When present, pass the raw Value bits.
+                ArgKind::Option => {
+                    quote! {
+                        {
+                            match args.get(#idx) {
+                                Some(v) => {
+                                    let val: crate::core::value::Value = v.into();
+                                    val.0 as i64
+                                },
+                                None => crate::core::value::NIL,
+                            }
+                        }
+                    }
+                }
+
+                // Fallback for other primitive/native ABI cases where the callee expects a raw i64
+                // (kept as-is; relies on TryFrom to extract i64 from the runtime argument source).
+                ArgKind::Other => {
+                    quote! {
+                        {
+                            let val: i64 = std::convert::TryFrom::try_from(&args[#idx])?;
+                            val
                         }
                     }
                 }
             }
-            ArgKind::Value => {
-                quote! { 
-                    {
-                        let val: crate::core::value::Value = args.get(#idx);
-                        val.0 as i64
-                    }
-                }
-            }
-            ArgKind::IntoValue => {
-                quote! {
-                    {
-                        let val: crate::core::value::Value = args.get(#idx).into();
-                        val.0 as i64
-                    }
-                }
-            }
-            ArgKind::Other => {
-                quote! {
-                    {
-                        let val: i64 = std::convert::TryFrom::try_from(&args[#idx])?;
-                        val
-                    }
-                }
-            }
-            }
-            }
-        )
+        })
         .collect()
 }
 
