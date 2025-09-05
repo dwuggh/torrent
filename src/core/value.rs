@@ -35,10 +35,15 @@ pub const NIL: i64 = LispType::Nil as i64;
 
 #[derive(Clone, Trace, Debug)]
 pub enum LispValue {
+    #[no_trace]
     Nil,
+    #[no_trace]
     Int(i64),
+    #[no_trace]
     Float(f64),
+    #[no_trace]
     Character(char),
+    #[no_trace]
     String(LispString),
     Symbol(Symbol),
     Vector(Vector),
@@ -83,7 +88,7 @@ impl Value {
         let untagged = val.untag();
         unsafe {
             match untagged {
-                LispValue::String(string) => Arc::increment_strong_count(&string),
+                LispValue::String(string) => string.inc_strong_rc(),
                 LispValue::Symbol(symbol) => {
                     if let Some(cell) = symbol.get() {
                         cell.value().0.inc_ref_count();
@@ -156,18 +161,6 @@ impl TaggedPtr for f64 {
     // TODO
     unsafe fn get_untagged_data(self) -> u64 {
         self as u64
-    }
-}
-
-impl TaggedPtr for Arc<String> {
-    const TAG: LispType = LispType::Float;
-    unsafe fn cast(val: u64) -> Self {
-        Arc::from_raw(val as *const String)
-    }
-
-    // TODO
-    unsafe fn get_untagged_data(self) -> u64 {
-        self.as_ptr() as u64
     }
 }
 

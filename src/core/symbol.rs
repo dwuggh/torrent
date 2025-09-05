@@ -157,6 +157,6 @@ impl SymbolCell {
 }
 
 #[defun]
-fn test_name(a: Value, b: Value) -> Value {
+fn test_name(a: &Value, b: Value, c: &mut Symbol) -> Value {
     todo!()
 }

@@ -82,13 +82,14 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
 
         #[automatically_derived]
         #[doc(hidden)]
-        fn #def_func_name<T: cranelift_module::Module>(module: &mut T) -> anyhow::Result<cranelift_module::FuncId> {
+        fn #def_func_name<T: cranelift_module::Module>(module: &mut T) -> anyhow::Result<(String, cranelift_module::FuncId)> {
             let mut sig = module.make_signature();
             #(#signatures)*
             sig.returns.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64));
 
             let func_id = module.declare_function(#lisp_name, cranelift_module::Linkage::Import, &sig)?;
-            Ok(func_id)
+            let func_name = #lisp_name.to_string();
+            Ok((func_name, func_id))
 
         }
 
@@ -105,7 +106,8 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
 
         #[automatically_derived]
         #[doc(hidden)]
-        fn #rust_wrapper_name(
+        #[inline(always)]
+        unsafe fn #rust_wrapper_name(
             #(#c_params),*
         ) -> ::std::result::Result<i64, &'static str> {
             #(#arg_conversion)*

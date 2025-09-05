@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::bail;
-use cranelift::codegen;
 use cranelift::prelude::*;
 use cranelift_jit::JITBuilder;
 use cranelift_jit::JITModule;
@@ -11,14 +10,14 @@ use cranelift_module::FuncId;
 use cranelift_module::Module;
 
 use crate::ast::Node;
-use crate::core::env::Env;
+use crate::core::compiler::BuiltinFnPlugin;
 use crate::core::env::Environment;
 use crate::core::env::General;
 use crate::core::env::LexicalScope;
 use crate::core::env::ParamsMap;
 use crate::core::env::ParamsScope;
+use crate::core::string::LispString;
 use crate::core::symbol::Symbol;
-use crate::core::value::LispValue;
 use crate::core::value::Value as RuntimeValue;
 use crate::gc::Gc;
 use anyhow::Result;
@@ -26,6 +25,7 @@ use anyhow::Result;
 pub struct JIT {
     data_desc: DataDescription,
     module: JITModule,
+    builtin_funcs: HashMap<String, FuncId>
 }
 
 impl Default for JIT {
@@ -41,11 +41,20 @@ impl Default for JIT {
             .unwrap();
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
 
-        builder.symbol("apply", apply as *const u8);
+        // builder.symbol("apply", apply as *const u8);
+        for func in inventory::iter::<BuiltinFnPlugin> {
+            (func.decl_jit_sym)(&mut builder);
+        }
 
-        let module = JITModule::new(builder);
+        let mut module = JITModule::new(builder);
+        let mut builtin_funcs = HashMap::new();
+        for func in inventory::iter::<BuiltinFnPlugin> {
+            let (name, id) = (func.decl_subr)(&mut module).unwrap();
+            builtin_funcs.insert(name, id);
+        }
         Self {
             data_desc: DataDescription::new(),
+            builtin_funcs,
             module,
         }
     }
@@ -128,7 +137,8 @@ impl JIT {
                         // let LispValue::Function(func) = value.untag() else {
                         //     bail!("not a function in func cell");
                         // };
-                        let func_id = def_apply(&mut self.module);
+                        // let func_id = def_apply(&mut self.module);
+                        let func_id = *self.builtin_funcs.get("apply").unwrap();
 
                         let apply = self.module.declare_func_in_func(func_id, builder.func);
 
@@ -169,7 +179,7 @@ impl JIT {
                 todo!()
             }
             Node::Str(string) => {
-                let val = RuntimeValue::tag(Arc::from(string.clone())).0 as i64;
+                let val = RuntimeValue::tag(LispString::from_str(string)).0 as i64;
                 Ok(builder.ins().iconst(types::I64, val))
             }
             Node::Unquote => todo!(),
@@ -241,26 +251,6 @@ impl JIT {
         todo!()
     }
 }
-
-pub type InstallSubr = for<'a> fn(module: &'a mut cranelift_jit::JITModule) -> FuncId;
-
-pub(crate) struct BuiltinFnPlugin {
-    decl_subr: InstallSubr,
-    decl_jit_sym: for<'a> fn(&'a mut cranelift_jit::JITBuilder),
-}
-
-impl BuiltinFnPlugin {
-    pub(crate) const fn new(
-        decl_subr: InstallSubr,
-        decl_jit_sym: for<'a> fn(&'a mut cranelift_jit::JITBuilder),
-    ) -> Self {
-        Self {
-            decl_subr,
-            decl_jit_sym,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct ParamsCtx<'a> {
     scope: Arc<ParamsScope>,
@@ -375,35 +365,4 @@ impl ScopeCtx<'_> {
                 )),
         }
     }
-}
-
-unsafe extern "C" fn apply(func: i64, args: *const i64, argcnt: i64, env: *mut Environment) -> i64 {
-    let args: Vec<_> = (0..argcnt)
-        .map(|i| RuntimeValue::from_raw_inc_rc(args.add(i as usize).read() as u64))
-        .collect();
-    let func = RuntimeValue(func as u64);
-    match func.untag() {
-        LispValue::Function(func) => {
-            let val = func.run(&args, env.as_mut().unwrap()).unwrap();
-            val.0 as i64
-        }
-        _ => panic!(),
-    }
-}
-
-fn def_apply<T: Module>(module: &mut T) -> FuncId {
-    let mut sig = module.make_signature();
-    sig.params.push(AbiParam::new(types::I64));
-    sig.params.push(AbiParam::new(types::I64));
-    sig.params.push(AbiParam::new(types::I64));
-    sig.params.push(AbiParam::new(types::I64));
-    sig.returns.push(AbiParam::new(types::I64));
-    let func = module
-        .declare_function("apply", cranelift_module::Linkage::Import, &sig)
-        .unwrap();
-
-    // module.define_function(func, ctx);
-    return func;
-
-    // builder.symbol("apply", apply as *const u8);
 }
