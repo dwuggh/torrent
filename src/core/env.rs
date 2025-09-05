@@ -1,17 +1,9 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-};
-
+use std::collections::HashMap;
 use cranelift::prelude::Variable;
-use proc_macros::Trace;
 
-use crate::{
-    core::{
-        symbol::{Symbol, SymbolCell, INTERNED_SYMBOLS},
-        value::Value,
-    },
-    gc::Gc,
+use crate::core::{
+    symbol::{Symbol, INTERNED_SYMBOLS},
+    value::Value,
 };
 
 // pub(crate) static INTERNED_SYMBOLS: OnceLock<std::sync::Mutex<SymbolMap>>;
@@ -36,28 +28,19 @@ impl Environment {
     }
 }
 
-#[derive(Debug)]
-pub struct LexicalScope {
-    pub vars: HashMap<Symbol, Gc<SymbolCell>> 
+
+#[derive(Debug, Clone)]
+pub struct ParamSlots {
+    slots: HashMap<Symbol, Variable>,
 }
 
-pub type ParamsMap = HashMap<Symbol, Variable>;
-
-#[derive(Debug, Clone, Trace)]
-pub struct ParamsScope {
-    #[no_trace]
-    params: ParamsMap,
-}
-
-impl ParamsScope {
-    pub fn new(params: ParamsMap) -> Self {
-        Self {
-            params,
-        }
+impl ParamSlots {
+    pub fn new(slots: HashMap<Symbol, Variable>) -> Self {
+        Self { slots }
     }
 
-    pub fn load_params(&self, symbol: Symbol) -> Option<Variable> {
-        self.params.get(&symbol).copied()
+    pub fn get(&self, symbol: Symbol) -> Option<Variable> {
+        self.slots.get(&symbol).copied()
     }
 }
 

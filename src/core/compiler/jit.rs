@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use anyhow::bail;
 use cranelift::prelude::*;
@@ -11,14 +10,10 @@ use cranelift_module::Module;
 
 use crate::ast::Node;
 use crate::core::compiler::BuiltinFnPlugin;
-use crate::core::env::Environment;
-use crate::core::env::LexicalScope;
-use crate::core::env::ParamsMap;
-use crate::core::env::ParamsScope;
+use crate::core::env::{Environment, ParamSlots};
 use crate::core::string::LispString;
 use crate::core::symbol::Symbol;
 use crate::core::value::Value as RuntimeValue;
-use crate::gc::Gc;
 use anyhow::Result;
 
 pub struct JIT {
@@ -60,7 +55,7 @@ impl Default for JIT {
 }
 
 impl JIT {
-    pub fn compile_node(&mut self, node: &Node, env: ScopeCtx) -> Result<*const u8> {
+    pub fn compile_node(&mut self, node: &Node, env: CompileScope) -> Result<*const u8> {
         let mut sig = self.module.make_signature();
         // sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
@@ -91,7 +86,7 @@ impl JIT {
         &mut self,
         node: &Node,
         builder: &mut FunctionBuilder,
-        env: ScopeCtx,
+        env: CompileScope,
     ) -> anyhow::Result<Value> {
         match node {
             Node::Ident(ident) => {
@@ -192,7 +187,7 @@ impl JIT {
         name: &str,
         args: &[Node],
         body: &[Node],
-        env: ScopeCtx,
+        env: CompileScope,
     ) -> anyhow::Result<()> {
         let mut sig = self.module.make_signature();
         for _ in 0..args.len() {
@@ -229,7 +224,7 @@ impl JIT {
         }
 
         // create a Function Envrionment
-        let mut scope = ParamsCtx::new(variables, env);
+        let scope = FrameScope::new(variables, env);
         let func_env = (&scope).into();
 
         let res = body
@@ -249,58 +244,49 @@ impl JIT {
         todo!()
     }
 }
-#[derive(Clone)]
-pub struct ParamsCtx<'a> {
-    scope: Arc<ParamsScope>,
-    parent: ScopeCtx<'a>,
-}
-
 #[derive(Clone, Copy)]
-pub struct RootCtx {
+pub struct GlobalScope {
     env: *mut Environment,
 }
 
-impl RootCtx {
+impl GlobalScope {
     pub fn new(env: *mut Environment) -> Self {
         Self { env }
     }
 }
 
 #[derive(Clone)]
-pub struct LexicalCtx<'a> {
-    env: Gc<LexicalScope>,
-    parent: &'a ScopeCtx<'a>,
+pub struct FrameScope<'a> {
+    slots: ParamSlots,
+    parent: CompileScope<'a>,
 }
 
-// we don't want to trigger GC when compiling
 #[derive(Clone, Copy)]
-pub enum ScopeCtx<'a> {
-    Root(&'a RootCtx),
-    Lexical(&'a LexicalCtx<'a>),
-    Function(&'a ParamsCtx<'a>),
+pub enum CompileScope<'a> {
+    Global(&'a GlobalScope),
+    Frame(&'a FrameScope<'a>),
 }
 
-impl<'a> ParamsCtx<'a> {
-    pub fn new(vars: ParamsMap, parent: ScopeCtx<'a>) -> Self {
-        ParamsCtx {
-            scope: Arc::new(ParamsScope::new(vars)),
+impl<'a> FrameScope<'a> {
+    pub fn new(vars: HashMap<Symbol, Variable>, parent: CompileScope<'a>) -> Self {
+        FrameScope {
+            slots: ParamSlots::new(vars),
             parent,
         }
     }
 }
 
-impl<'a> From<&'a ParamsCtx<'a>> for ScopeCtx<'a> {
-    fn from(value: &'a ParamsCtx<'a>) -> Self {
-        ScopeCtx::Function(value)
+impl<'a> From<&'a FrameScope<'a>> for CompileScope<'a> {
+    fn from(value: &'a FrameScope<'a>) -> Self {
+        CompileScope::Frame(value)
     }
 }
 
-impl ScopeCtx<'_> {
+impl CompileScope<'_> {
     fn get_root(self) -> *mut Environment {
         match self {
-            ScopeCtx::Root(root_ctx) => root_ctx.env,
-            ScopeCtx::Lexical(lexical_ctx) => lexical_ctx.parent.get_root(),
-            ScopeCtx::Function(params_ctx) => params_ctx.parent.get_root(),
+            CompileScope::Global(root) => root.env,
+            CompileScope::Frame(frame) => frame.parent.get_root(),
         }
     }
 
@@ -321,39 +307,17 @@ impl ScopeCtx<'_> {
         same_func_scope: bool,
     ) -> Option<Value> {
         match self {
-            ScopeCtx::Root(root_ctx) => {
-                // Compile-time lookup through global symbol table; no env state required.
+            CompileScope::Global(_) => {
                 let val = Environment::default().load_symbol(symbol, load_function_cell)?;
-                let value = builder.ins().iconst(types::I64, val.0 as i64);
-                Some(value)
+                Some(builder.ins().iconst(types::I64, val.0 as i64))
             }
-            ScopeCtx::Lexical(lexical_ctx) => lexical_ctx
-                .env
-                .get()
-                .vars
-                .get(&symbol)
-                .and_then(|cell| {
-                    let data = cell.get().data();
-                    let val = if load_function_cell {
-                        data.func
-                    } else {
-                        data.value
-                    }?;
-                    Some(builder.ins().iconst(types::I64, val.0 as i64))
-                })
-                .or(lexical_ctx.parent.load_symbol_inner(
-                    symbol,
-                    load_function_cell,
-                    builder,
-                    same_func_scope,
-                )),
-            ScopeCtx::Function(params_ctx) => same_func_scope
+            CompileScope::Frame(frame) => same_func_scope
                 .then(|| {
-                    let var = params_ctx.scope.load_params(symbol)?;
+                    let var = frame.slots.get(symbol)?;
                     Some(builder.use_var(var))
                 })
                 .flatten()
-                .or(params_ctx.parent.load_symbol_inner(
+                .or(frame.parent.load_symbol_inner(
                     symbol,
                     load_function_cell,
                     builder,
