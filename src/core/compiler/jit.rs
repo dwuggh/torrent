@@ -65,7 +65,7 @@ impl JIT {
         let mut sig = self.module.make_signature();
         // sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
-        // let func_id = self.module.declare_anonymous_function(&sig)?;
+        let func_id = self.module.declare_anonymous_function(&sig)?;
         let mut fctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
         ctx.func.signature = sig;
@@ -80,7 +80,6 @@ impl JIT {
         println!("result: {res:?}");
         builder.ins().return_(&[res]);
         builder.finalize();
-        let func_id = self.module.declare_function("test", cranelift_module::Linkage::Export, &ctx.func.signature)?;
         self.module.define_function(func_id, &mut ctx)?;
 
         self.module.finalize_definitions()?;

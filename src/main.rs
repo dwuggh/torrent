@@ -20,13 +20,11 @@
 
 use chumsky::Parser;
 
-use crate::{ast::elisp_parser, core::{env::General, value::Value}, gc::Gc, runtime::{RootCtx, ScopeCtx, JIT}};
+use crate::{ast::elisp_parser, core::{env::General, value::Value}, gc::Gc, core::compiler::jit::{RootCtx, ScopeCtx, JIT}};
 
 pub mod ast;
-// mod compiler;
 pub mod gc;
 pub mod core;
-pub mod runtime;
 
 fn main() -> anyhow::Result<()> {
     let mut jit = JIT::default();
