@@ -25,3 +25,4 @@ impl BuiltinFnPlugin {
 
 mod codegen;
 pub mod jit;
+pub mod scope;

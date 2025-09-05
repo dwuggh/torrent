@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-use cranelift::prelude::Variable;
 
 use crate::core::{
     symbol::{Symbol, INTERNED_SYMBOLS},
@@ -28,19 +26,4 @@ impl Environment {
     }
 }
 
-
-#[derive(Debug, Clone)]
-pub struct ParamSlots {
-    slots: HashMap<Symbol, Variable>,
-}
-
-impl ParamSlots {
-    pub fn new(slots: HashMap<Symbol, Variable>) -> Self {
-        Self { slots }
-    }
-
-    pub fn get(&self, symbol: Symbol) -> Option<Variable> {
-        self.slots.get(&symbol).copied()
-    }
-}
 

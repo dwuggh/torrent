@@ -20,7 +20,7 @@
 
 use chumsky::Parser;
 
-use crate::{ast::elisp_parser, core::{env::Environment, value::Value}, core::compiler::jit::{GlobalScope, CompileScope, JIT}};
+use crate::{ast::elisp_parser, core::{compiler::{jit::JIT, scope::{CompileScope, GlobalScope}}, env::Environment, value::Value}};
 
 pub mod ast;
 pub mod gc;
@@ -30,9 +30,9 @@ fn main() -> anyhow::Result<()> {
     let mut jit = JIT::default();
     let text = "(+ 1 2)";
     // let text = "2";
-    let mut runtime_env = Environment::default();
-    let root = GlobalScope::new(&mut runtime_env as *mut _);
-    let ctx = CompileScope::Global(&root);
+    let runtime_env = Environment::default();
+    let root = GlobalScope::new(&runtime_env);
+    let ctx = CompileScope::Global(root);
 
     unsafe {
         let a: u64 = run_code(&mut jit, text, ctx, ()).unwrap();
@@ -49,7 +49,7 @@ unsafe fn run_code<I, O>(jit: &mut JIT, code: &str, ctx: CompileScope<'_>, input
     let nodes = elisp_parser().parse(code).unwrap();
     println!("{nodes:?}");
     let node = &nodes[0];
-    let f = jit.compile_node(node, ctx).unwrap();
+    let f = jit.compile_node(node, &ctx).unwrap();
     // Cast the raw pointer to a typed function pointer. This is unsafe, because
     // this is the critical point where you have to trust that the generated code
     // is safe to be called.

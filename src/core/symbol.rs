@@ -20,8 +20,6 @@ pub static INTERNED_SYMBOLS: LazyLock<SymbolMap> = LazyLock::new(|| {
     SymbolMap::with_capacity(100)
 });
 
-use indexmap::IndexMap;
-
 #[derive(Debug)]
 pub struct SymbolMap {
     map: DashMap<Spur, SymbolCell>,
