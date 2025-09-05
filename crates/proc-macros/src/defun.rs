@@ -45,16 +45,137 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     // Generate the actual function call
     let call_args = args.iter().map(|(ident, _, _)| quote! { #ident });
     
-    let wrapper_result = if function.fallible {
+    let ret_is_unit = matches!(function.ret_kind, RetKind::Unit);
+    let wrapper_ret_ty = if ret_is_unit {
+        quote! { ::std::result::Result<(), &'static str> }
+    } else {
+        quote! { ::std::result::Result<i64, &'static str> }
+    };
+
+    let wrapper_result = match &function.ret_kind {
+        RetKind::Unit => {
+            if function.fallible {
+                quote! {
+                    match result {
+                        Ok(()) => Ok(()),
+                        Err(_) => Err("call error"),
+                    }
+                }
+            } else {
+                quote! {
+                    let _ = result;
+                    Ok(())
+                }
+            }
+        }
+        RetKind::Value => {
+            if function.fallible {
+                quote! {
+                    match result {
+                        Ok(val) => Ok(val.0 as i64),
+                        Err(_) => Err("call error"),
+                    }
+                }
+            } else {
+                quote! { Ok(result.0 as i64) }
+            }
+        }
+        RetKind::IntoValue => {
+            if function.fallible {
+                quote! {
+                    match result {
+                        Ok(val) => {
+                            let v: crate::core::value::Value = ::std::convert::Into::into(val);
+                            Ok(v.0 as i64)
+                        }
+                        Err(_) => Err("call error"),
+                    }
+                }
+            } else {
+                quote! {
+                    let v: crate::core::value::Value = ::std::convert::Into::into(result);
+                    Ok(v.0 as i64)
+                }
+            }
+        }
+        RetKind::Option(inner) => {
+            let some_to_value = match inner.as_ref() {
+                RetKind::Value => quote! { v },
+                RetKind::IntoValue => quote! {{
+                    let vv: crate::core::value::Value = ::std::convert::Into::into(v);
+                    vv
+                }},
+                _ => quote! {{
+                    let vv: crate::core::value::Value = ::std::convert::Into::into(v);
+                    vv
+                }},
+            };
+            if function.fallible {
+                quote! {
+                    match result {
+                        Ok(opt) => {
+                            let ret = match opt {
+                                Some(v) => {
+                                    let __val = { #some_to_value };
+                                    __val.0 as i64
+                                }
+                                None => crate::core::value::NIL as i64,
+                            };
+                            Ok(ret)
+                        }
+                        Err(_) => Err("call error"),
+                    }
+                }
+            } else {
+                quote! {
+                    let ret = match result {
+                        Some(v) => {
+                            let __val = { #some_to_value };
+                            __val.0 as i64
+                        }
+                        None => crate::core::value::NIL as i64,
+                    };
+                    Ok(ret)
+                }
+            }
+        }
+        // Slice returns are recognized but not yet supported end-to-end here.
+        // They will require two return values in the Cranelift signature and a wrapper shape to match.
+        // For now, treat as unsupported to avoid silent ABI mismatches.
+        RetKind::Slice(_) | RetKind::Other => {
+            quote! {
+                // You tried to export a function with an unsupported return type.
+                // Please implement slice return ABI or change the return type.
+                return Err("unsupported return type");
+            }
+        }
+    };
+
+    let mut return_sigs: Vec<TokenStream> = Vec::new();
+    if !ret_is_unit {
+        return_sigs.push(quote! {
+            sig.returns.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64));
+        });
+    }
+
+    let extern_fn = if ret_is_unit {
         quote! {
-            match result {
-                Ok(val) => Ok(val.0 as i64),
-                Err(_) => Err("call error"),
+            #[automatically_derived]
+            #[doc(hidden)]
+            unsafe extern "C" fn #func_name(#(#c_params),*) {
+                let _ = #rust_wrapper_name(#(#c_param_idents),*);
             }
         }
     } else {
         quote! {
-            Ok(result.0 as i64)
+            #[automatically_derived]
+            #[doc(hidden)]
+            unsafe extern "C" fn #func_name(#(#c_params),*) -> i64 {
+                match #rust_wrapper_name(#(#c_param_idents),*) {
+                    Ok(v) => v,
+                    Err(_) => 0,
+                }
+            }
         }
     };
 
@@ -84,7 +205,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         fn #def_func_name<T: cranelift_module::Module>(module: &mut T) -> anyhow::Result<(String, cranelift_module::FuncId)> {
             let mut sig = module.make_signature();
             #(#signatures)*
-            sig.returns.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64));
+            #(#return_sigs)*
 
             let func_id = module.declare_function(#lisp_name, cranelift_module::Linkage::Import, &sig)?;
             let func_name = #lisp_name.to_string();
@@ -108,22 +229,13 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         #[inline(always)]
         unsafe fn #rust_wrapper_name(
             #(#c_params),*
-        ) -> ::std::result::Result<i64, &'static str> {
+        ) -> #wrapper_ret_ty {
             #(#arg_conversion)*
             let result = #subr(#(#call_args),*);
             #wrapper_result
         }
 
-        #[automatically_derived]
-        #[doc(hidden)]
-        unsafe extern "C" fn #func_name(
-            #(#c_params),*
-        ) -> i64 {
-            match #rust_wrapper_name(#(#c_param_idents),*) {
-                Ok(v) => v,
-                Err(_) => 0,
-            }
-        }
+        #extern_fn
 
         #body
     }
@@ -358,11 +470,22 @@ enum ArgKind {
     Other,
 }
 
+#[derive(PartialEq, Debug, Clone)]
+enum RetKind {
+    Unit,                 // no return
+    Value,                // crate::core::value::Value
+    IntoValue,            // types convertible into Value
+    Option(Box<RetKind>), // Option<...> where inner is Value or IntoValue
+    Slice(Box<RetKind>),  // &[T] or &mut [T]
+    Other,
+}
+
 pub(crate) struct Function {
     name: syn::Ident,
     body: syn::Item,
     args: Vec<(syn::Ident, syn::Type, ArgInfo)>,
     fallible: bool,
+    ret_kind: RetKind,
 }
 
 impl syn::parse::Parse for Function {
@@ -379,12 +502,13 @@ fn parse_fn(item: syn::Item) -> Result<Function, Error> {
                 Err(Error::new_spanned(sig, "lisp functions cannot be `unsafe`"))
             } else {
                 let args = parse_signature(sig)?;
-                let fallible = return_type_is_result(&sig.output);
+                let (fallible, ret_kind) = return_type_info(&sig.output);
                 Ok(Function {
                     name: sig.ident.clone(),
                     body: item,
                     args,
                     fallible,
+                    ret_kind,
                 })
             }
         }
@@ -427,6 +551,57 @@ fn return_type_is_result(output: &syn::ReturnType) -> bool {
             _ => false,
         },
         syn::ReturnType::Default => false,
+    }
+}
+
+fn return_type_info(output: &syn::ReturnType) -> (bool, RetKind) {
+    match output {
+        syn::ReturnType::Default => (false, RetKind::Unit),
+        syn::ReturnType::Type(_, ty) => {
+            match ty.as_ref() {
+                syn::Type::Tuple(t) if t.elems.is_empty() => (false, RetKind::Unit),
+                syn::Type::Path(path) => {
+                    let name = get_path_ident_name(path);
+                    if name == "Result" {
+                        let outer = path.path.segments.last().unwrap();
+                        let ok_ty = get_generic_param(outer).expect("Result must have Ok type");
+                        (true, classify_return_type(ok_ty))
+                    } else {
+                        (false, classify_return_type(ty))
+                    }
+                }
+                _ => (false, classify_return_type(ty)),
+            }
+        }
+    }
+}
+
+fn classify_return_type(ty: &syn::Type) -> RetKind {
+    match ty {
+        syn::Type::Tuple(t) if t.elems.is_empty() => RetKind::Unit,
+        syn::Type::Reference(r) => classify_return_type(r.elem.as_ref()),
+        syn::Type::Slice(s) => {
+            let inner = classify_return_type(s.elem.as_ref());
+            RetKind::Slice(Box::new(inner))
+        }
+        syn::Type::Path(path) => {
+            let name = get_path_ident_name(path);
+            match &*name {
+                "Option" => {
+                    let outer = path.path.segments.last().unwrap();
+                    let inner_ty = get_generic_param(outer).expect("Option must have inner type");
+                    let inner = classify_return_type(inner_ty);
+                    RetKind::Option(Box::new(inner))
+                }
+                // Exact Value-like
+                "Value" | "RuntimeValue" => RetKind::Value,
+                // Convertible into Value (align with get_object_kind FromValue set)
+                "LispString" | "Symbol" | "Vector" | "Cons" | "Function" | "i64" => RetKind::IntoValue,
+                // Fallback to requiring Into<Value> at compile-time
+                _ => RetKind::IntoValue,
+            }
+        }
+        _ => RetKind::IntoValue,
     }
 }
 
