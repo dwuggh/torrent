@@ -49,8 +49,8 @@ pub struct Lambda {
 
 #[derive(Debug, Clone)]
 pub struct Interactive {
-    arg_desc: Option<String>,
-    modes: Vec<Ident>
+    pub arg_desc: Option<String>,
+    pub modes: Vec<Ident>
 }
 
 #[derive(Debug, Clone)]

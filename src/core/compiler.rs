@@ -27,4 +27,5 @@ mod codegen;
 pub mod jit;
 pub mod scope;
 pub mod ir;
+pub mod ast_to_ir;
 pub mod error;
