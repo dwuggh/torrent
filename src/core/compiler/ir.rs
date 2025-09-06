@@ -7,17 +7,18 @@ use crate::core::{ident::Ident, value::Vector};
 #[derive(Clone, Debug)]
 pub enum Expr {
     Literal(Literal),
+    Symbol(Ident),
+    Vector(Vec<Expr>),
     Let(Let),
     If(If),
     Lambda(Lambda),
-    Apply(),
     Quote(Quote),
     And(Vec<Expr>),
     Or(Vec<Expr>),
-    Set(),
-    Fset(),
-    Vector(Vector),
-    Sexp(Vec<Expr>)
+    Set(Set),
+    Fset(Fset),
+    Call(Call),
+    Progn(Vec<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -35,27 +36,80 @@ pub struct If {
 
 #[derive(Debug, Clone)]
 pub struct Lambda {
-    pub Args: Vec<Arg>,
+    pub args: Vec<Arg>,
+    // NOTE if there's exactly 1 string after args and no other exprs,
+    // then this string should be placed in body.
+    // i.e. (lambda () "foo") should return "foo"
+    pub docstring: Option<String>,
+    pub interactive: Option<Interactive>,
+    pub declare: Option<Vec<Expr>>,
     pub body: Vec<Expr>,
+    pub captures: Vec<Ident>, // For closure analysis
+}
+
+#[derive(Debug, Clone)]
+pub struct Interactive {
+    arg_desc: Option<String>,
+    modes: Vec<Ident>
+}
+
+#[derive(Debug, Clone)]
+pub struct Call {
+    pub func: Box<Expr>,
+    pub args: Vec<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Set {
+    pub symbol: Ident,
+    pub value: Box<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Fset {
+    pub symbol: Ident,
+    pub function: Box<Expr>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Arg {
+    pub ty: ArgsType,
+    pub ident: Ident,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
-enum ArgsType {
+pub enum ArgsType {
     Normal,
     Optional,
     Rest,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Arg {
-    ty: ArgsType,
-    ident: Ident
+#[derive(Debug, Clone)]
+pub struct Quote {
+    pub kind: QuoteKind,
+    pub expr: QuotedData,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuoteKind {
+    Quote,      // 'expr
+    Backquote,  // `expr
 }
 
 #[derive(Debug, Clone)]
-pub struct Quote {
-}
+pub enum QuotedData {
+    // Simple literals that evaluate to themselves
+    Literal(Literal),
+    Symbol(Ident),
 
+    // Collections that may contain unquotes
+    List(Vec<QuotedData>),
+    Vector(Vec<QuotedData>),
+
+    // Unquoting (only valid inside backquotes)
+    Unquote(Box<Expr>),        // ,expr
+    UnquoteSplice(Box<Expr>),  // ,@expr
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Number {
