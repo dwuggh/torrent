@@ -97,14 +97,12 @@ impl AstToIrConverter {
                     // Special forms
                     "if" => Self::convert_if(args),
                     "lambda" => Self::convert_lambda(args),
-                    "defun" => Self::convert_defun(args),
                     "defvar" => Self::convert_defvar(args),
                     "set" => Self::convert_set(args),
                     "setq" => Self::convert_setq(args),
                     "setf" => Self::convert_setf(args),
                     "cond" => Self::convert_cond(args),
                     "let" => Self::convert_let(args),
-                    "progn" => Self::convert_progn(args),
                     "and" => Self::convert_and(args),
                     "or" => Self::convert_or(args),
                     "quote" => Self::convert_quote(args),
@@ -318,13 +316,6 @@ impl AstToIrConverter {
         }
     }
 
-    fn convert_progn(args: &[Node]) -> Result<Expr, ConversionError> {
-        let exprs = args.iter()
-            .map(|n| Self::node_to_expr(n.clone()))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Expr::Progn(exprs))
-    }
-
     fn convert_and(args: &[Node]) -> Result<Expr, ConversionError> {
         let exprs = args.iter()
             .map(|n| Self::node_to_expr(n.clone()))
@@ -417,31 +408,6 @@ impl AstToIrConverter {
         } else {
             Err(ConversionError::InvalidSyntax(
                 "fset requires a symbol as first argument".to_string()
-            ))
-        }
-    }
-
-    fn convert_defun(args: &[Node]) -> Result<Expr, ConversionError> {
-        if args.len() < 3 {
-            return Err(ConversionError::ArityMismatch { 
-                expected: 3, 
-                got: args.len() 
-            });
-        }
-
-        if let Node::Ident(name) = &args[0] {
-            // Convert defun to fset with lambda
-            let mut lambda_args = vec![args[1].clone()];
-            lambda_args.extend_from_slice(&args[2..]);
-            let lambda = Self::convert_lambda(&lambda_args)?;
-            
-            Ok(Expr::Fset(Fset {
-                symbol: *name,
-                function: Box::new(lambda),
-            }))
-        } else {
-            Err(ConversionError::InvalidSyntax(
-                "defun requires a symbol as function name".to_string()
             ))
         }
     }

@@ -18,7 +18,34 @@ pub enum Expr {
     Set(Set),
     Fset(Fset),
     Call(Call),
-    Progn(Vec<Expr>),
+    Progn(Vec<Expr>)
+}
+
+pub enum SpecialForm {
+    And,
+    Catch,
+    Cond,
+    ConditionCase,
+    Defconst,
+    Defvar,
+    Function,
+    If,
+    Interactive,
+    Lambda,
+    Let,
+    LetStar,
+    Or,
+    Prog1,
+    Prog2,
+    Progn,
+    Quote,
+    SaveCurrentBuffer,
+    SaveExcursion,
+    SaveRestriction,
+    Setq,
+    SetqDefault,
+    UnwindProtect,
+    While,
 }
 
 #[derive(Debug, Clone)]
