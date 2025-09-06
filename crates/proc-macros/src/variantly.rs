@@ -136,7 +136,9 @@ fn try_parse_variants(item_enum: &ItemEnum) -> Result<Vec<VariantParsed>> {
         .variants
         .iter()
         .map(|variant| {
-            VariantInput::from_variant(variant).map(VariantInput::into).map_err(Error::from)
+            VariantInput::from_variant(variant)
+                .map(VariantInput::into)
+                .map_err(Error::from)
         })
         .collect()
 }
@@ -154,10 +156,14 @@ fn validate_compare<F: Fn(&VariantParsed, &VariantParsed) -> Result<()>>(
         .enumerate()
         .try_for_each(|(index, variant_a)| -> Result<()> {
             // Iterate over variants not visited already by the primary iterator.
-            variants[(index + 1)..variants.len()].iter().try_for_each(|variant_b| {
-                // Run the current pair against all validation fns
-                validations.iter().try_for_each(|validation| validation(variant_a, variant_b))
-            })
+            variants[(index + 1)..variants.len()]
+                .iter()
+                .try_for_each(|variant_b| {
+                    // Run the current pair against all validation fns
+                    validations
+                        .iter()
+                        .try_for_each(|validation| validation(variant_a, variant_b))
+                })
         })
 }
 
@@ -248,12 +254,20 @@ fn handle_tuple_variant(
     _enum_name: &Ident,               // Name of the enum itself (e.g. FooEnum)
     enum_variant_path: &TokenStream2, // Full path to the enum variant (e.g. FooEnum::VariantName)
 ) {
-    let types: Vec<&Type> = variant.fields.fields.iter().map(|field| &field.ty).collect();
+    let types: Vec<&Type> = variant
+        .fields
+        .fields
+        .iter()
+        .map(|field| &field.ty)
+        .collect();
     // let ret_type = types.first().unwrap();
 
     let return_types_owned = quote! { (#( #types ),*) };
 
-    identify!(variant.used_name, [expect, unwrap_or_else, unwrap_or, unwrap]);
+    identify!(
+        variant.used_name,
+        [expect, unwrap_or_else, unwrap_or, unwrap]
+    );
 
     let var_fn_name = &variant.used_name;
     let var_or_fn_name = format_ident!("{}_or", var_fn_name);

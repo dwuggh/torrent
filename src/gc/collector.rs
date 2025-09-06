@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
 };
 
@@ -165,7 +165,6 @@ unsafe fn increment(s: OpaqueGcPtr) {
 
 unsafe fn decrement(s: OpaqueGcPtr) {
     unsafe {
-
         s.set_rc(s.rc() - 1);
         if s.rc() == 0 {
             release(s);

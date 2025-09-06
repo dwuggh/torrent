@@ -1,6 +1,6 @@
 #![allow(clippy::manual_unwrap_or_default)]
 use darling::FromMeta;
-use proc_macro2::{Literal, TokenStream, Ident};
+use proc_macro2::{Ident, Literal, TokenStream};
 use quote::{format_ident, quote};
 use syn::{Error, Type};
 
@@ -16,7 +16,6 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
 
     let args = function.args;
     let arg_conversion = get_arg_conversion(&args);
-
 
     // Generate the extern "C" function signature
     // let c_params = (0..args.len()).map(|i| quote! { arg_#i: i64 });
@@ -40,11 +39,9 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         }
     }
 
-    
-
     // Generate the actual function call
     let call_args = args.iter().map(|(ident, _, _)| quote! { #ident });
-    
+
     let ret_is_unit = matches!(function.ret_kind, RetKind::Unit);
     let wrapper_ret_ty = if ret_is_unit {
         quote! { ::std::result::Result<(), &'static str> }
@@ -444,7 +441,6 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
         .collect()
 }
 
-
 fn get_path_ident_name(type_path: &syn::TypePath) -> String {
     type_path.path.segments.last().unwrap().ident.to_string()
 }
@@ -452,7 +448,6 @@ fn get_path_ident_name(type_path: &syn::TypePath) -> String {
 fn map_function_name(name: &str) -> String {
     name.replace('_', "-")
 }
-
 
 struct ArgInfo {
     kind: ArgKind,
@@ -519,7 +514,6 @@ fn parse_fn(item: syn::Item) -> Result<Function, Error> {
     }
 }
 
-
 fn parse_signature(sig: &syn::Signature) -> Result<Vec<(syn::Ident, syn::Type, ArgInfo)>, Error> {
     let mut args = Vec::new();
     for input in &sig.inputs {
@@ -529,14 +523,19 @@ fn parse_signature(sig: &syn::Signature) -> Result<Vec<(syn::Ident, syn::Type, A
             }
             syn::FnArg::Typed(pat_type) => {
                 let ty = pat_type.ty.as_ref().clone();
-                let (arg_info,  ty) = get_arg_type(&ty)?;
-                
+                let (arg_info, ty) = get_arg_type(&ty)?;
+
                 // Extract the identifier from the pattern
                 let ident = match pat_type.pat.as_ref() {
                     syn::Pat::Ident(pat_ident) => pat_ident.ident.clone(),
-                    _ => return Err(Error::new_spanned(pat_type, "Only simple identifiers are supported as function arguments")),
+                    _ => {
+                        return Err(Error::new_spanned(
+                            pat_type,
+                            "Only simple identifiers are supported as function arguments",
+                        ));
+                    }
                 };
-                
+
                 args.push((ident, ty.to_owned(), arg_info));
             }
         }
@@ -557,22 +556,20 @@ fn return_type_is_result(output: &syn::ReturnType) -> bool {
 fn return_type_info(output: &syn::ReturnType) -> (bool, RetKind) {
     match output {
         syn::ReturnType::Default => (false, RetKind::Unit),
-        syn::ReturnType::Type(_, ty) => {
-            match ty.as_ref() {
-                syn::Type::Tuple(t) if t.elems.is_empty() => (false, RetKind::Unit),
-                syn::Type::Path(path) => {
-                    let name = get_path_ident_name(path);
-                    if name == "Result" {
-                        let outer = path.path.segments.last().unwrap();
-                        let ok_ty = get_generic_param(outer).expect("Result must have Ok type");
-                        (true, classify_return_type(ok_ty))
-                    } else {
-                        (false, classify_return_type(ty))
-                    }
+        syn::ReturnType::Type(_, ty) => match ty.as_ref() {
+            syn::Type::Tuple(t) if t.elems.is_empty() => (false, RetKind::Unit),
+            syn::Type::Path(path) => {
+                let name = get_path_ident_name(path);
+                if name == "Result" {
+                    let outer = path.path.segments.last().unwrap();
+                    let ok_ty = get_generic_param(outer).expect("Result must have Ok type");
+                    (true, classify_return_type(ok_ty))
+                } else {
+                    (false, classify_return_type(ty))
                 }
-                _ => (false, classify_return_type(ty)),
             }
-        }
+            _ => (false, classify_return_type(ty)),
+        },
     }
 }
 
@@ -596,7 +593,9 @@ fn classify_return_type(ty: &syn::Type) -> RetKind {
                 // Exact Value-like
                 "Value" | "RuntimeValue" => RetKind::Value,
                 // Convertible into Value (align with get_object_kind FromValue set)
-                "LispString" | "Symbol" | "Vector" | "Cons" | "Map" | "Function" | "i64" => RetKind::IntoValue,
+                "LispString" | "Symbol" | "Vector" | "Cons" | "Map" | "Function" | "i64" => {
+                    RetKind::IntoValue
+                }
                 // Fallback to requiring Into<Value> at compile-time
                 _ => RetKind::IntoValue,
             }
@@ -640,7 +639,14 @@ fn get_arg_type(ty: &syn::Type) -> Result<(ArgInfo, &syn::Type), Error> {
         _ => ArgKind::Other,
     };
 
-    Ok((ArgInfo { kind, is_mut, is_ref }, inner_ty))
+    Ok((
+        ArgInfo {
+            kind,
+            is_mut,
+            is_ref,
+        },
+        inner_ty,
+    ))
 }
 
 fn get_object_kind(type_path: &syn::TypePath) -> ArgKind {

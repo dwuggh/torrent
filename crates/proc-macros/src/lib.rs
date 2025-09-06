@@ -1,4 +1,4 @@
-use darling::{ast::NestedMeta, FromMeta, Error as DError};
+use darling::{Error as DError, FromMeta, ast::NestedMeta};
 use proc_macro::{self, TokenStream};
 use proc_macro2::{Literal, Span};
 use quote::{format_ident, quote};
@@ -93,9 +93,8 @@ fn derive_trace_struct(
     for param in params.iter_mut() {
         match param {
             GenericParam::Type(ty) => {
-                ty.bounds.push(syn::TypeParamBound::Verbatim(
-                    quote! { crate::gc::Trace },
-                ));
+                ty.bounds
+                    .push(syn::TypeParamBound::Verbatim(quote! { crate::gc::Trace }));
                 unbound_params.push(GenericParam::Type(syn::TypeParam::from(ty.ident.clone())));
             }
             param => unbound_params.push(param.clone()),
@@ -105,9 +104,7 @@ fn derive_trace_struct(
     let field_visits = fields
         .iter()
         .enumerate()
-        .filter(|(_, f)| {
-            !no_trace(&f.attrs)
-        })
+        .filter(|(_, f)| !no_trace(&f.attrs))
         .map(|(i, f)| {
             let ident = f.ident.clone().map_or_else(
                 || {
@@ -133,9 +130,7 @@ fn derive_trace_struct(
     let field_drops = fields
         .iter()
         .enumerate()
-        .filter(|(_, f)| {
-            !no_trace(&f.attrs)
-        })
+        .filter(|(_, f)| !no_trace(&f.attrs))
         .flat_map(|(i, f)| {
             let ident = f.ident.clone().map_or_else(
                 || {
@@ -271,9 +266,8 @@ fn derive_trace_enum(
     for param in params.iter_mut() {
         match param {
             GenericParam::Type(ty) => {
-                ty.bounds.push(syn::TypeParamBound::Verbatim(
-                    quote! { crate::gc::Trace },
-                ));
+                ty.bounds
+                    .push(syn::TypeParamBound::Verbatim(quote! { crate::gc::Trace }));
                 unbound_params.push(GenericParam::Type(syn::TypeParam::from(ty.ident.clone())));
             }
             param => unbound_params.push(param.clone()),

@@ -4,7 +4,6 @@ use proc_macros::Trace;
 
 use crate::core::value::{LispType, TaggedPtr, Value};
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LispString(Arc<String>);
 

@@ -74,8 +74,7 @@ unsafe impl<T: ?Sized + 'static> Trace for Gc<T> {
         visitor(self.as_opaque());
     }
 
-    unsafe fn finalize(&mut self) {
-    }
+    unsafe fn finalize(&mut self) {}
 }
 
 unsafe impl<T: Trace> Trace for Option<T> {
@@ -140,8 +139,7 @@ where
     }
 }
 
-unsafe impl<T> Trace for PhantomData<T>
-{
+unsafe impl<T> Trace for PhantomData<T> {
     unsafe fn trace(&self, _: Visitor) {}
 
     unsafe fn finalize(&mut self) {}

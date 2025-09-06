@@ -2,8 +2,10 @@ use std::collections::HashMap;
 
 use proc_macros::Trace;
 
-use crate::{core::value::{LispType, TaggedPtr, Value}, gc::{Gc, GcInner}};
-
+use crate::{
+    core::value::{LispType, TaggedPtr, Value},
+    gc::{Gc, GcInner},
+};
 
 #[derive(Clone, Trace, Debug)]
 pub struct Map(pub(crate) Gc<HashMap<Value, Value>>);

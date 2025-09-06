@@ -1,5 +1,5 @@
-use std::{marker::PhantomData, sync::Arc};
 use std::sync::{LazyLock, RwLock};
+use std::{marker::PhantomData, sync::Arc};
 
 // include!(concat!(env!("OUT_DIR"), "/sym.rs"));
 // use sym::BUILTIN_SYMBOLS;
@@ -17,9 +17,7 @@ use crate::{
 
 use super::value::LispType;
 
-pub static INTERNED_SYMBOLS: LazyLock<SymbolMap> = LazyLock::new(|| {
-    SymbolMap::with_capacity(100)
-});
+pub static INTERNED_SYMBOLS: LazyLock<SymbolMap> = LazyLock::new(|| SymbolMap::with_capacity(100));
 
 #[derive(Debug)]
 pub struct SymbolMap {
@@ -46,7 +44,7 @@ impl SymbolMap {
         Self { map }
     }
 
-    pub fn map(&self) -> &DashMap<Symbol, SymbolCell>  {
+    pub fn map(&self) -> &DashMap<Symbol, SymbolCell> {
         &self.map
     }
 

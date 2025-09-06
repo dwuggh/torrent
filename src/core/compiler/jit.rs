@@ -8,16 +8,16 @@ use cranelift_module::DataDescription;
 use cranelift_module::FuncId;
 use cranelift_module::Module;
 
+use super::scope::{CompileScope, FrameScope};
 use crate::ast::Node;
 use crate::core::compiler::codegen::Codegen;
 use crate::core::compiler::BuiltinFnPlugin;
-use super::scope::{CompileScope, FrameScope};
 use anyhow::Result;
 
 pub struct JIT {
     data_desc: DataDescription,
     module: JITModule,
-    builtin_funcs: HashMap<String, FuncId>
+    builtin_funcs: HashMap<String, FuncId>,
 }
 
 impl Default for JIT {
@@ -56,8 +56,14 @@ impl JIT {
     pub fn compile_node<'s>(&mut self, node: &Node, scope: &'s CompileScope) -> Result<*const u8> {
         let mut fctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
-        let (mut codegen, new_scope) =
-            Codegen::new(&mut self.module, &self.builtin_funcs, &mut fctx, &mut ctx, &[], scope)?;
+        let (mut codegen, new_scope) = Codegen::new(
+            &mut self.module,
+            &self.builtin_funcs,
+            &mut fctx,
+            &mut ctx,
+            &[],
+            scope,
+        )?;
 
         let val = codegen.translate_node(node, &new_scope)?;
 
@@ -70,6 +76,4 @@ impl JIT {
         self.module.clear_context(&mut ctx);
         Ok(f)
     }
-
 }
-

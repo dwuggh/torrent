@@ -1,16 +1,15 @@
 use std::{
     alloc::Layout,
     any::Any,
-    hash::Hash,
     cell::{Cell, UnsafeCell},
+    hash::Hash,
     marker::PhantomData,
     mem::ManuallyDrop,
     ptr::NonNull,
 };
 
-
-pub mod trace;
 pub mod collector;
+pub mod trace;
 
 use collector::{dec_rc, inc_rc};
 pub use trace::{Trace, Visitor};
@@ -21,12 +20,11 @@ pub use trace::{Trace, Visitor};
 /// here to enable coalesced reference counting
 pub struct GcSync<T: ?Sized> {
     data_ptr: Gc<T>,
-    log_ptr: Option<Gc<T>>
+    log_ptr: Option<Gc<T>>,
 }
 
 unsafe impl<T: ?Sized + Send> Send for GcSync<T> {}
 unsafe impl<T: ?Sized + Sync> Sync for GcSync<T> {}
-
 
 // NOTE ops to GcHeader is not thread safe
 unsafe impl<T: ?Sized + Send> Send for Gc<T> {}
@@ -107,7 +105,6 @@ impl<T: Trace> GcInner<T> {
             data: UnsafeCell::new(data),
         }
     }
-
 }
 
 impl<T: Trace> Gc<T> {

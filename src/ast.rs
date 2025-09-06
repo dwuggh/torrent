@@ -46,29 +46,54 @@ impl Node {
     pub fn is_atom(&self) -> bool {
         matches!(
             self,
-            Node::Ident(_) | Node::Integer(_) | Node::Float(_) | Node::Char(_) | Node::Str(_) | Node::Nil
+            Node::Ident(_)
+                | Node::Integer(_)
+                | Node::Float(_)
+                | Node::Char(_)
+                | Node::Str(_)
+                | Node::Nil
         )
     }
 
     // Accessors / as-views
     pub fn as_ident<'a>(&self) -> Option<&'a str> {
-        if let Node::Ident(ident) = self { Some(ident.text()) } else { None }
+        if let Node::Ident(ident) = self {
+            Some(ident.text())
+        } else {
+            None
+        }
     }
 
     pub fn as_integer(&self) -> Option<i64> {
-        if let Node::Integer(n) = self { Some(*n) } else { None }
+        if let Node::Integer(n) = self {
+            Some(*n)
+        } else {
+            None
+        }
     }
 
     pub fn as_float(&self) -> Option<f64> {
-        if let Node::Float(n) = self { Some(*n) } else { None }
+        if let Node::Float(n) = self {
+            Some(*n)
+        } else {
+            None
+        }
     }
 
     pub fn as_char(&self) -> Option<char> {
-        if let Node::Char(c) = self { Some(*c) } else { None }
+        if let Node::Char(c) = self {
+            Some(*c)
+        } else {
+            None
+        }
     }
 
     pub fn as_str(&self) -> Option<&str> {
-        if let Node::Str(s) = self { Some(s.as_str()) } else { None }
+        if let Node::Str(s) = self {
+            Some(s.as_str())
+        } else {
+            None
+        }
     }
 
     // Treat Nil as an empty list
@@ -81,7 +106,11 @@ impl Node {
     }
 
     pub fn as_vector(&self) -> Option<&[Node]> {
-        if let Node::Vector(v) = self { Some(v.as_slice()) } else { None }
+        if let Node::Vector(v) = self {
+            Some(v.as_slice())
+        } else {
+            None
+        }
     }
 
     pub fn len_list(&self) -> Option<usize> {
@@ -97,8 +126,12 @@ impl Node {
         self.as_list().and_then(|s| s.get(1..))
     }
 
-    pub fn first(&self) -> Option<&Node> { self.car() }
-    pub fn rest(&self) -> Option<&[Node]> { self.cdr() }
+    pub fn first(&self) -> Option<&Node> {
+        self.car()
+    }
+    pub fn rest(&self) -> Option<&[Node]> {
+        self.cdr()
+    }
 
     pub fn nth(&self, idx: usize) -> Option<&Node> {
         self.as_list().and_then(|s| s.get(idx))
@@ -244,13 +277,9 @@ pub fn elisp_parser<'a>() -> impl Parser<'a, &'a str, Vec<Node>, extra::Err<Rich
             .map(move |s: &str| Node::Ident(Ident::from_string(s)));
 
         // Combine all atomic parsers. Order matters here.
-        let atom = nil
-            .or(char_lit)
-            .or(number)
-            .or(string)
-            .or(symbol);
-            // Atoms can be padded by whitespace or comments.
-            // .padded_by(comments.or(text::whitespace()));
+        let atom = nil.or(char_lit).or(number).or(string).or(symbol);
+        // Atoms can be padded by whitespace or comments.
+        // .padded_by(comments.or(text::whitespace()));
 
         // --- Collection Parsers ---
         // A list is a sequence of nodes enclosed in parentheses.
@@ -319,20 +348,17 @@ pub fn elisp_parser<'a>() -> impl Parser<'a, &'a str, Vec<Node>, extra::Err<Rich
     node.repeated().collect::<Vec<_>>().then_ignore(end())
 }
 
-
 pub fn special_chars(c: char) -> bool {
     let chars = "#[]()\\\"\',";
     chars.contains(c)
 }
-
-
 
 // --- Test Module ---
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn parse_one(src: &str) -> Result<Node, Vec<Rich<'_, char>>>  {
+    fn parse_one(src: &str) -> Result<Node, Vec<Rich<'_, char>>> {
         elisp_parser()
             .parse(src)
             .into_result()
@@ -378,10 +404,7 @@ mod tests {
     fn test_nested_list() {
         let expected = Node::Sexp(vec![
             Node::Ident("a".into()),
-            Node::Sexp(vec![
-                Node::Ident("b".into()),
-                Node::Ident("c".into()),
-            ]),
+            Node::Sexp(vec![Node::Ident("b".into()), Node::Ident("c".into())]),
             Node::Ident("d".into()),
         ]);
         assert_eq!(parse_one("(a (b c) d)").unwrap(), expected);
@@ -415,31 +438,20 @@ mod tests {
     #[test]
     fn test_desugar_quotes() {
         // 'foo -> (quote foo)
-        let expected_quote = Node::Sexp(vec![
-            Node::Ident("quote".into()),
-            Node::Ident("foo".into()),
-        ]);
+        let expected_quote =
+            Node::Sexp(vec![Node::Ident("quote".into()), Node::Ident("foo".into())]);
         assert_eq!(parse_one("'foo").unwrap(), expected_quote);
 
         // `foo -> (backquote foo)
-        let expected_backquote = Node::Sexp(vec![
-            Node::Backquote,
-            Node::Ident("foo".into()),
-        ]);
+        let expected_backquote = Node::Sexp(vec![Node::Backquote, Node::Ident("foo".into())]);
         assert_eq!(parse_one("`foo").unwrap(), expected_backquote);
 
         // ,foo -> (unquote foo)
-        let expected_unquote = Node::Sexp(vec![
-            Node::Unquote,
-            Node::Ident("foo".into()),
-        ]);
+        let expected_unquote = Node::Sexp(vec![Node::Unquote, Node::Ident("foo".into())]);
         assert_eq!(parse_one(",foo").unwrap(), expected_unquote);
 
         // ,@foo -> (unquotesplice foo)
-        let expected_splice = Node::Sexp(vec![
-            Node::UnquoteSplice,
-            Node::Ident("foo".into()),
-        ]);
+        let expected_splice = Node::Sexp(vec![Node::UnquoteSplice, Node::Ident("foo".into())]);
         assert_eq!(parse_one(",@foo").unwrap(), expected_splice);
     }
 
@@ -452,13 +464,7 @@ mod tests {
         assert_eq!(ast[1], Node::Str("hello".to_string()));
         assert_eq!(
             ast[2],
-            Node::Sexp(vec![
-                Node::Ident("a".into()),
-                Node::Ident("b".into())
-            ])
+            Node::Sexp(vec![Node::Ident("a".into()), Node::Ident("b".into())])
         );
     }
 }
-
-
-

@@ -1,7 +1,6 @@
-
+use crate::core::map::Map;
 use cranelift_module::FuncId;
 use proc_macros::Trace;
-use crate::core::map::Map;
 
 use crate::core::env::Environment;
 use crate::core::symbol::Symbol;
@@ -57,7 +56,6 @@ pub struct FunctionSignature {
     pub min_arg_cnt: u8,
     /// whether this function accepts variable args, like `&rest`
     pub variable_arg: bool,
-
 }
 
 #[derive(Debug, Clone, Trace)]
@@ -102,16 +100,12 @@ impl Function {
 
     pub fn set_func_ptr(&self, func_ptr: *const u8) {
         match &mut self.inner.get_mut().func_type {
-            FunctionType::Subr(subr_fn) => {
-                unsafe {
-                    subr_fn.func = cast_func_ptr(func_ptr);
-                }
-            }
-            FunctionType::Lambda(lambda_fn) => {
-                unsafe {
-                    lambda_fn.func = cast_func_ptr(func_ptr);
-                }
-            }
+            FunctionType::Subr(subr_fn) => unsafe {
+                subr_fn.func = cast_func_ptr(func_ptr);
+            },
+            FunctionType::Lambda(lambda_fn) => unsafe {
+                lambda_fn.func = cast_func_ptr(func_ptr);
+            },
         }
     }
 

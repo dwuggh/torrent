@@ -1,8 +1,11 @@
 use std::{marker::PhantomData, mem::ManuallyDrop, ops::Deref, sync::Arc};
 
-use proc_macros::{Trace, defun};
+use proc_macros::{defun, Trace};
 
-use crate::{core::{function::Function, string::LispString, symbol::Symbol, map::Map}, gc::{Gc, GcInner, Trace}};
+use crate::{
+    core::{function::Function, map::Map, string::LispString, symbol::Symbol},
+    gc::{Gc, GcInner, Trace},
+};
 
 #[repr(transparent)]
 #[derive(PartialEq, PartialOrd, Eq, Copy, Debug)]
@@ -87,7 +90,10 @@ impl Value {
     }
 
     pub fn untag_ref(&self) -> LispValueRef<'_> {
-        LispValueRef {untagged: ManuallyDrop::new(self.untag()), phantom: PhantomData}
+        LispValueRef {
+            untagged: ManuallyDrop::new(self.untag()),
+            phantom: PhantomData,
+        }
     }
 
     pub fn get_tag(self) -> LispType {
@@ -121,12 +127,11 @@ impl Value {
                 LispValue::Map(map) => {
                     map.0.inc_ref_count();
                 }
-                _ => ()
+                _ => (),
             }
         }
         val
     }
-
 }
 
 impl Deref for LispValueRef<'_> {
@@ -149,9 +154,7 @@ pub trait TaggedPtr: Sized {
 
     /// Given the type, return a tagged version of it.
     fn tag(self) -> Value {
-        unsafe {
-            Value(self.get_untagged_data() << 8 | Self::TAG as u64)
-        }
+        unsafe { Value(self.get_untagged_data() << 8 | Self::TAG as u64) }
     }
 
     unsafe fn get_untagged_data(self) -> u64;
@@ -217,7 +220,6 @@ pub struct ConsInner {
 
 #[derive(Clone, Trace, Debug)]
 pub struct Vector(Gc<Vec<Value>>);
-
 
 macro_rules! impl_try_from_value_variant {
     ($($ty:ty => $variant:ident),+ $(,)?) => {

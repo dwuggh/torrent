@@ -1,4 +1,3 @@
-
 use crate::core::{
     symbol::{Symbol, INTERNED_SYMBOLS},
     value::Value,
@@ -20,10 +19,12 @@ impl Environment {
         let map = INTERNED_SYMBOLS.map();
         if let Some(cell) = map.get(&symbol) {
             let data = cell.data();
-            return if load_function_cell { data.func } else { data.value };
+            return if load_function_cell {
+                data.func
+            } else {
+                data.value
+            };
         }
         None
     }
 }
-
-

@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use crate::core::{ident::Ident, value::Vector};
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub enum Expr {
@@ -42,13 +42,13 @@ pub enum SpecialForm {
 #[derive(Debug, Clone)]
 pub struct Let {
     pub bindings: Vec<(Ident, Option<Expr>)>,
-    pub body: Vec<Expr>
+    pub body: Vec<Expr>,
 }
 
 #[derive(Debug, Clone)]
 pub struct LetStar {
     pub bindings: Vec<(Ident, Option<Expr>)>,
-    pub body: Vec<Expr>
+    pub body: Vec<Expr>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,7 +74,7 @@ pub struct Lambda {
 #[derive(Debug, Clone)]
 pub struct Interactive {
     pub arg_desc: Option<String>,
-    pub modes: Vec<Ident>
+    pub modes: Vec<Ident>,
 }
 
 #[derive(Debug, Clone)]
@@ -209,8 +209,8 @@ pub struct Quote {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuoteKind {
-    Quote,      // 'expr
-    Backquote,  // `expr
+    Quote,     // 'expr
+    Backquote, // `expr
 }
 
 #[derive(Debug, Clone)]
@@ -224,8 +224,8 @@ pub enum QuotedData {
     Vector(Vec<QuotedData>),
 
     // Unquoting (only valid inside backquotes)
-    Unquote(Box<Expr>),        // ,expr
-    UnquoteSplice(Box<Expr>),  // ,@expr
+    Unquote(Box<Expr>),       // ,expr
+    UnquoteSplice(Box<Expr>), // ,@expr
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -242,23 +242,3 @@ pub enum Literal {
     String(String),
 }
 
-
-// #[derive(Debug, Clone, PartialEq, PartialOrd)]
-// pub enum Node {
-//     Ident(Symbol),
-//     Sexp(Vec<Node>),
-//     Vector(Vec<Node>),
-//     // Value(Value),
-//     Integer(i64),
-//     Float(f64),
-//     Char(char),
-//     Str(String),
-//     Unquote,
-//     UnquoteSplice,
-//     Backquote,
-//     Nil,
-// }
-
-// pub struct Var {
-//     symbol: Symbol,
-// }

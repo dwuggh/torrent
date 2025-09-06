@@ -1,5 +1,9 @@
 use super::{env::Environment, function::Function};
-use crate::core::{function::FunctionType, symbol::Symbol, value::{TaggedPtr, Value}};
+use crate::core::{
+    function::FunctionType,
+    symbol::Symbol,
+    value::{TaggedPtr, Value},
+};
 use anyhow::{anyhow, Result};
 use proc_macros::defun;
 
@@ -41,5 +45,4 @@ fn store_symbol_function(symbol: Symbol, func: Value) {
     data_ref.value_mut().data().func = Some(func)
 }
 
-fn get_func_ptr(func: &Function) {
-}
+fn get_func_ptr(func: &Function) {}

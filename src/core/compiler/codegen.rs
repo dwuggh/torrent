@@ -209,7 +209,6 @@ impl<'a> Codegen<'a> {
                         self.builder.ins().stack_store(*val, slot, i as i32 * 8);
                     }
 
-
                     let args_ptr = self.builder.ins().stack_addr(types::I64, slot, 0);
                     // let args_ptr = self.builder.ins().iconst(types::I64, args_ptr as i64);
                     let args_len = self.builder.ins().iconst(types::I64, args.len() as i64);
