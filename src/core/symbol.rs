@@ -23,7 +23,6 @@ pub static INTERNED_SYMBOLS: LazyLock<SymbolMap> = LazyLock::new(|| {
 #[derive(Debug)]
 pub struct SymbolMap {
     map: DashMap<Spur, SymbolCell>,
-    string_interner: lasso::ThreadedRodeo,
 }
 
 unsafe impl Trace for SymbolMap {
@@ -43,27 +42,19 @@ unsafe impl Trace for SymbolMap {
 impl SymbolMap {
     pub fn with_capacity(size: usize) -> Self {
         let map = DashMap::with_capacity(size);
-        let string_interner = ThreadedRodeo::with_capacity(Capacity::for_strings(size));
-        Self { map, string_interner }
-    }
-
-    pub fn get(&self, name: &str) -> Option<Symbol> {
-        let key = self.string_interner.get(name)?;
-        Some(Symbol::new(key))
+        Self { map }
     }
 
     pub fn map(&self) -> &DashMap<Spur, SymbolCell>  {
         &self.map
     }
 
-    pub fn intern(&self, name: &str) -> Symbol {
-        let key = self.string_interner.get_or_intern(name);
+    pub fn intern(&self, symbol: Symbol, special: bool) -> Symbol {
         // Ensure the symbol cell exists in the map
-        if !self.map.contains_key(&key) {
-            let special = name.starts_with(':');
-            self.map.insert(key, SymbolCell::new(key, special));
+        if !self.map.contains_key(&symbol.name) {
+            self.map.insert(symbol.name, SymbolCell::new(symbol.name, special));
         }
-        Symbol::new(key)
+        symbol
     }
 }
 
@@ -83,12 +74,16 @@ impl Symbol {
         }
     }
 
-    pub fn from_string(ident: &str) -> Self {
-        INTERNED_SYMBOLS.intern(ident)
+    pub fn from_string(ident: &str, interner: &mut lasso::ThreadedRodeo) -> Self {
+        let spur = interner.get_or_intern(ident);
+        let symbol = Symbol::new(spur);
+        let special = ident.starts_with(':');
+        INTERNED_SYMBOLS.intern(symbol, special);
+        symbol
     }
 
-    pub fn name(&self) -> &str {
-        INTERNED_SYMBOLS.string_interner.resolve(&self.name)
+    pub fn name<'a>(&self, interner: &'a lasso::ThreadedRodeo) -> &'a str {
+        interner.resolve(&self.name)
     }
 
     // TODO

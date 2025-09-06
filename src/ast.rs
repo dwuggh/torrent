@@ -6,9 +6,11 @@ use chumsky::{
     text::{digits, Char},
 };
 
+use crate::core::ident::Ident;
+
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum Node {
-    Ident(String),
+    Ident(Ident),
     Sexp(Vec<Node>),
     Vector(Vec<Node>),
     // Value(Value),
@@ -49,8 +51,8 @@ impl Node {
     }
 
     // Accessors / as-views
-    pub fn as_ident(&self) -> Option<&str> {
-        if let Node::Ident(s) = self { Some(s.as_str()) } else { None }
+    pub fn as_ident<'a>(&self, interner: &'a lasso::ThreadedRodeo) -> Option<&'a str> {
+        if let Node::Ident(ident) = self { Some(ident.name(interner)) } else { None }
     }
 
     pub fn as_integer(&self) -> Option<i64> {
@@ -154,7 +156,9 @@ impl Node {
     }
 }
 
-pub fn elisp_parser<'a>() -> impl Parser<'a, &'a str, Vec<Node>, extra::Err<Rich<'a, char>>> {
+pub fn elisp_parser_with_interner<'a>(
+    interner: &'a mut lasso::ThreadedRodeo
+) -> impl Parser<'a, &'a str, Vec<Node>, extra::Err<Rich<'a, char>>> + 'a {
     // A parser for a single S-expression node.
     // It's recursive to handle nested lists and vectors.
     let node = recursive(|node| {
@@ -239,8 +243,7 @@ pub fn elisp_parser<'a>() -> impl Parser<'a, &'a str, Vec<Node>, extra::Err<Rich
             .repeated()
             .at_least(1)
             .to_slice()
-            .map(ToString::to_string)
-            .map(Node::Ident);
+            .map(move |s: &str| Node::Ident(Ident::from_string(s, interner)));
 
         // Combine all atomic parsers. Order matters here.
         let atom = nil
@@ -280,7 +283,7 @@ pub fn elisp_parser<'a>() -> impl Parser<'a, &'a str, Vec<Node>, extra::Err<Rich
         // These parsers "desugar" the quote syntax into a standard list form.
         let quote = just('\'')
             .ignore_then(node.clone())
-            .map(|n| Node::Sexp(vec![Node::Ident("quote".to_string()), n]));
+            .map(move |n| Node::Sexp(vec![Node::Ident(Ident::from_string("quote", interner)), n]));
 
         let backquote = just('`')
             .ignore_then(node.clone())

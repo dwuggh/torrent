@@ -19,6 +19,7 @@ use crate::core::env::Environment;
 use crate::core::function::Function;
 use crate::core::string::LispString;
 use crate::core::symbol::Symbol;
+use crate::core::ident::Ident;
 use crate::core::value::TaggedPtr;
 use crate::core::value::NIL;
 use crate::Value as RuntimeValue;
@@ -65,7 +66,10 @@ impl<'a> Codegen<'a> {
             let Node::Ident(arg) = arg else {
                 return Err(CodegenError::InvalidArgFormat);
             };
-            let sym = Symbol::from_string(arg);
+            // Note: This will need an interner parameter to be passed to this function
+            // For now, creating a temporary one - this should be refactored
+            let mut temp_interner = lasso::ThreadedRodeo::new();
+            let sym = Symbol::from_string(arg.name(&temp_interner), &mut temp_interner);
             let val = builder.block_params(entry_block)[i];
             let var = builder.declare_var(types::I64);
             variables.insert(sym, var);
@@ -165,7 +169,10 @@ impl<'a> Codegen<'a> {
     ) -> CodegenResult<Value> {
         match node {
             Node::Ident(ident) => {
-                let symbol = Symbol::from_string(ident);
+                // Note: This will need an interner parameter to be passed to this function
+                // For now, creating a temporary one - this should be refactored
+                let mut temp_interner = lasso::ThreadedRodeo::new();
+                let symbol = Symbol::from_string(ident.name(&temp_interner), &mut temp_interner);
                 let val = self.load_symbol(scope, symbol, false)?;
                 Ok(val)
             }
@@ -178,8 +185,13 @@ impl<'a> Codegen<'a> {
                 let arg_nodes = &nodes[1..];
 
                 if let Node::Ident(fn_name) = head {
+                    // Note: This will need an interner parameter to be passed to this function
+                    // For now, creating a temporary one - this should be refactored
+                    let mut temp_interner = lasso::ThreadedRodeo::new();
+                    let fn_name_str = fn_name.name(&temp_interner);
+                    
                     // Handle special forms that don't evaluate all their arguments upfront
-                    match fn_name.as_str() {
+                    match fn_name_str {
                         "let" => {
                             return self.translate_let(scope, arg_nodes);
                         }
@@ -189,7 +201,7 @@ impl<'a> Codegen<'a> {
                     // It is a regular function call or a builtin. Evaluate arguments.
                     let args = self.translate_arg_nodes(arg_nodes, scope)?;
 
-                    match fn_name.as_str() {
+                    match fn_name_str {
                         "+" => {
                             println!("rgs: {args:?}");
                             let res = self.builder.ins().iadd(args[0], args[1]);
@@ -198,7 +210,7 @@ impl<'a> Codegen<'a> {
                         _ => (), // Not a builtin, fall through to dynamic dispatch
                     }
 
-                    let fn_sym = Symbol::from_string(fn_name);
+                    let fn_sym = Symbol::from_string(fn_name_str, &mut temp_interner);
                     let func = self.load_symbol(scope, fn_sym, true)?;
 
                     let args_ptr = args.as_ptr();
@@ -317,11 +329,16 @@ impl<'a> Codegen<'a> {
         let mut new_vars = HashMap::new();
         let mut binding_values = Vec::new();
 
+        // Note: This will need an interner parameter to be passed to this function
+        // For now, creating a temporary one - this should be refactored
+        let mut temp_interner = lasso::ThreadedRodeo::new();
+        
         for binding in bindings {
             match binding {
                 // Case 1: Just a symbol (var) - bind to NIL
-                Node::Ident(ident_str) => {
-                    let sym = Symbol::from_string(ident_str);
+                Node::Ident(ident) => {
+                    let ident_str = ident.name(&temp_interner);
+                    let sym = Symbol::from_string(ident_str, &mut temp_interner);
                     let var = self.builder.declare_var(types::I64);
                     new_vars.insert(sym, var);
                     binding_values.push(self.nil());
@@ -333,11 +350,12 @@ impl<'a> Codegen<'a> {
                         _ => return Err(CodegenError::LetInvalidBindingFormat),
                     };
 
-                    let Node::Ident(ident_str) = ident_node else {
+                    let Node::Ident(ident) = ident_node else {
                         return Err(CodegenError::LetBindingNotSymbol);
                     };
 
-                    let sym = Symbol::from_string(ident_str);
+                    let ident_str = ident.name(&temp_interner);
+                    let sym = Symbol::from_string(ident_str, &mut temp_interner);
                     let var = self.builder.declare_var(types::I64);
                     new_vars.insert(sym, var);
 
@@ -356,10 +374,14 @@ impl<'a> Codegen<'a> {
             // This re-iterates `bindings` which is a bit inefficient but safe and simple.
             for (binding, value) in bindings.iter().zip(binding_values) {
                 let sym = match binding {
-                    Node::Ident(ident_str) => Symbol::from_string(ident_str),
+                    Node::Ident(ident) => {
+                        let ident_str = ident.name(&temp_interner);
+                        Symbol::from_string(ident_str, &mut temp_interner)
+                    }
                     Node::Sexp(pair) => {
-                        let Node::Ident(ident_str) = &pair[0] else { unreachable!() };
-                        Symbol::from_string(ident_str)
+                        let Node::Ident(ident) = &pair[0] else { unreachable!() };
+                        let ident_str = ident.name(&temp_interner);
+                        Symbol::from_string(ident_str, &mut temp_interner)
                     }
                     _ => unreachable!(),
                 };
