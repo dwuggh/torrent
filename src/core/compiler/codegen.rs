@@ -334,7 +334,7 @@ impl<'a> Codegen<'a> {
                 let Node::Ident(ident_str) = &pair[0] else { unreachable!() };
                 let sym = Symbol::from_string(ident_str);
 
-                let var = *frame.slots.get(sym).unwrap();
+                let var = frame.slots.get(sym).unwrap();
                 self.builder.def_var(var, value);
             }
         } else {
@@ -349,7 +349,7 @@ impl<'a> Codegen<'a> {
             if let Some(binds) = &frame.lexical_binds {
                 for (symbol, funcs) in binds.borrow().iter() {
                     let var = frame.slots.get(*symbol).unwrap();
-                    let value = self.builder.use_var(*var);
+                    let value = self.builder.use_var(var);
                     let sym = translate_value(&mut self.builder, symbol.tag());
                     for func in funcs.iter() {
                         let func_val = translate_value(&mut self.builder, *func);
