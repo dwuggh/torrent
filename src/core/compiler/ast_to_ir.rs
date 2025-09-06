@@ -1,5 +1,5 @@
 use crate::{
-    ast::{Node, Keyword},
+    ast::Node,
     core::{
         compiler::ir::*,
         ident::Ident,
@@ -92,19 +92,28 @@ impl AstToIrConverter {
             Node::Ident(ident) => {
                 let name = ident.text();
                 
-                // Try to parse as keyword
-                if let Ok(keyword) = Keyword::try_from(name) {
-                    Self::convert_keyword(keyword, args)
-                } else {
-                    // Check for special forms not in Keyword enum
-                    match name {
-                        "let" => Self::convert_let(args),
-                        "progn" => Self::convert_progn(args),
-                        "and" => Self::convert_and(args),
-                        "or" => Self::convert_or(args),
-                        "quote" => Self::convert_quote(args),
-                        _ => Self::convert_call(nodes),
-                    }
+                // Direct string matching instead of Keyword enum
+                match name {
+                    // Special forms
+                    "if" => Self::convert_if(args),
+                    "lambda" => Self::convert_lambda(args),
+                    "defun" => Self::convert_defun(args),
+                    "defvar" => Self::convert_defvar(args),
+                    "set" => Self::convert_set(args),
+                    "setq" => Self::convert_setq(args),
+                    "setf" => Self::convert_setf(args),
+                    "cond" => Self::convert_cond(args),
+                    "let" => Self::convert_let(args),
+                    "progn" => Self::convert_progn(args),
+                    "and" => Self::convert_and(args),
+                    "or" => Self::convert_or(args),
+                    "quote" => Self::convert_quote(args),
+                    "defmacro" => Err(ConversionError::UnsupportedConstruct(
+                        "defmacro should be handled at macro expansion phase".to_string()
+                    )),
+                    
+                    // Regular function call
+                    _ => Self::convert_call(nodes),
                 }
             }
             
@@ -119,21 +128,6 @@ impl AstToIrConverter {
         }
     }
 
-    fn convert_keyword(keyword: Keyword, args: &[Node]) -> Result<Expr, ConversionError> {
-        match keyword {
-            Keyword::If => Self::convert_if(args),
-            Keyword::Lambda => Self::convert_lambda(args),
-            Keyword::Defun => Self::convert_defun(args),
-            Keyword::Defvar => Self::convert_defvar(args),
-            Keyword::Set => Self::convert_set(args),
-            Keyword::Setq => Self::convert_setq(args),
-            Keyword::Setf => Self::convert_setf(args),
-            Keyword::Cond => Self::convert_cond(args),
-            Keyword::Defmacro => Err(ConversionError::UnsupportedConstruct(
-                "defmacro should be handled at macro expansion phase".to_string()
-            )),
-        }
-    }
 
     fn convert_if(args: &[Node]) -> Result<Expr, ConversionError> {
         match args.len() {

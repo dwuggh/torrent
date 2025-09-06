@@ -325,38 +325,6 @@ pub fn special_chars(c: char) -> bool {
     chars.contains(c)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Keyword {
-    If,
-    Cond,
-    Lambda,
-    Defun,
-    Defmacro,
-    Defvar,
-    Set,
-    Setq,
-    Setf,
-}
-
-impl TryFrom<&str> for Keyword {
-    type Error = ();
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let result = match value {
-            "if" => Self::If,
-            "cond" => Self::Cond,
-            "lambda" => Self::Lambda,
-            "defun" => Self::Defun,
-            "defmacro" => Self::Defmacro,
-            "defvar" => Self::Defvar,
-            "set" => Self::Set,
-            "setq" => Self::Setq,
-            "setf" => Self::Setf,
-            _ => return Err(())
-        };
-        Ok(result)
-    }
-}
 
 
 // --- Test Module ---
