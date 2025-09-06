@@ -1,7 +1,4 @@
-// use crate::core::symbol::Symbol;
-
 use std::sync::Arc;
-
 use crate::core::{ident::Ident, value::Vector};
 
 #[derive(Clone, Debug)]
@@ -9,47 +6,47 @@ pub enum Expr {
     Literal(Literal),
     Symbol(Ident),
     Vector(Vec<Expr>),
-    Let(Let),
-    If(If),
-    Lambda(Lambda),
-    Quote(Quote),
-    And(Vec<Expr>),
-    Or(Vec<Expr>),
-    Set(Set),
-    Fset(Fset),
     Call(Call),
-    Progn(Vec<Expr>)
+    SpecialForm(SpecialForm),
 }
 
+#[derive(Clone, Debug)]
 pub enum SpecialForm {
-    And,
-    Catch,
-    Cond,
-    ConditionCase,
-    Defconst,
-    Defvar,
-    Function,
-    If,
-    Interactive,
-    Lambda,
-    Let,
-    LetStar,
-    Or,
-    Prog1,
-    Prog2,
-    Progn,
-    Quote,
-    SaveCurrentBuffer,
-    SaveExcursion,
-    SaveRestriction,
-    Setq,
-    SetqDefault,
-    UnwindProtect,
-    While,
+    And(Vec<Expr>),
+    Catch(Catch),
+    Cond(Cond),
+    ConditionCase(ConditionCase),
+    Defconst(Defconst),
+    Defvar(Defvar),
+    Function(Function),
+    If(If),
+    Interactive(Interactive),
+    Lambda(Lambda),
+    Let(Let),
+    LetStar(LetStar),
+    Or(Vec<Expr>),
+    Prog1(Prog1),
+    Prog2(Prog2),
+    Progn(Vec<Expr>),
+    Quote(Quote),
+    SaveCurrentBuffer(SaveCurrentBuffer),
+    SaveExcursion(SaveExcursion),
+    SaveRestriction(SaveRestriction),
+    Set(Set),
+    Setq(Setq),
+    SetqDefault(SetqDefault),
+    UnwindProtect(UnwindProtect),
+    While(While),
 }
 
 #[derive(Debug, Clone)]
 pub struct Let {
+    pub bindings: Vec<(Ident, Option<Expr>)>,
+    pub body: Vec<Expr>
+}
+
+#[derive(Debug, Clone)]
+pub struct LetStar {
     pub bindings: Vec<(Ident, Option<Expr>)>,
     pub body: Vec<Expr>
 }
@@ -93,9 +90,102 @@ pub struct Set {
 }
 
 #[derive(Debug, Clone)]
-pub struct Fset {
+pub struct Setq {
+    pub assignments: Vec<(Ident, Expr)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Defvar {
     pub symbol: Ident,
-    pub function: Box<Expr>,
+    pub value: Option<Box<Expr>>,
+    pub docstring: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Defconst {
+    pub symbol: Ident,
+    pub value: Box<Expr>,
+    pub docstring: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Function {
+    pub name: Ident,
+}
+
+#[derive(Debug, Clone)]
+pub struct Cond {
+    pub clauses: Vec<CondClause>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CondClause {
+    pub condition: Expr,
+    pub body: Vec<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct While {
+    pub condition: Box<Expr>,
+    pub body: Vec<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Prog1 {
+    pub first: Box<Expr>,
+    pub rest: Vec<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Prog2 {
+    pub first: Box<Expr>,
+    pub second: Box<Expr>,
+    pub rest: Vec<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Catch {
+    pub tag: Box<Expr>,
+    pub body: Vec<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnwindProtect {
+    pub protected: Box<Expr>,
+    pub cleanup: Vec<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConditionCase {
+    pub var: Option<Ident>,
+    pub protected: Box<Expr>,
+    pub handlers: Vec<ConditionHandler>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConditionHandler {
+    pub condition: Expr,
+    pub body: Vec<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SaveCurrentBuffer {
+    pub body: Vec<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SaveExcursion {
+    pub body: Vec<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SaveRestriction {
+    pub body: Vec<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SetqDefault {
+    pub assignments: Vec<(Ident, Expr)>,
 }
 
 #[derive(Debug, Clone, Copy)]

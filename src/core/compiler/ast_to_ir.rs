@@ -92,20 +92,33 @@ impl AstToIrConverter {
             Node::Ident(ident) => {
                 let name = ident.text();
                 
-                // Direct string matching instead of Keyword enum
                 match name {
                     // Special forms
-                    "if" => Self::convert_if(args),
-                    "lambda" => Self::convert_lambda(args),
-                    "defvar" => Self::convert_defvar(args),
-                    "set" => Self::convert_set(args),
-                    "setq" => Self::convert_setq(args),
-                    "setf" => Self::convert_setf(args),
-                    "cond" => Self::convert_cond(args),
-                    "let" => Self::convert_let(args),
-                    "and" => Self::convert_and(args),
-                    "or" => Self::convert_or(args),
-                    "quote" => Self::convert_quote(args),
+                    "if" => Ok(Expr::SpecialForm(SpecialForm::If(Self::convert_if(args)?))),
+                    "lambda" => Ok(Expr::SpecialForm(SpecialForm::Lambda(Self::convert_lambda(args)?))),
+                    "defvar" => Ok(Expr::SpecialForm(SpecialForm::Defvar(Self::convert_defvar(args)?))),
+                    "defconst" => Ok(Expr::SpecialForm(SpecialForm::Defconst(Self::convert_defconst(args)?))),
+                    "set" => Ok(Expr::SpecialForm(SpecialForm::Set(Self::convert_set(args)?))),
+                    "setq" => Ok(Expr::SpecialForm(SpecialForm::Setq(Self::convert_setq(args)?))),
+                    "setq-default" => Ok(Expr::SpecialForm(SpecialForm::SetqDefault(Self::convert_setq_default(args)?))),
+                    "cond" => Ok(Expr::SpecialForm(SpecialForm::Cond(Self::convert_cond(args)?))),
+                    "let" => Ok(Expr::SpecialForm(SpecialForm::Let(Self::convert_let(args)?))),
+                    "let*" => Ok(Expr::SpecialForm(SpecialForm::LetStar(Self::convert_let_star(args)?))),
+                    "and" => Ok(Expr::SpecialForm(SpecialForm::And(Self::convert_and(args)?))),
+                    "or" => Ok(Expr::SpecialForm(SpecialForm::Or(Self::convert_or(args)?))),
+                    "progn" => Ok(Expr::SpecialForm(SpecialForm::Progn(Self::convert_progn(args)?))),
+                    "prog1" => Ok(Expr::SpecialForm(SpecialForm::Prog1(Self::convert_prog1(args)?))),
+                    "prog2" => Ok(Expr::SpecialForm(SpecialForm::Prog2(Self::convert_prog2(args)?))),
+                    "quote" => Ok(Expr::SpecialForm(SpecialForm::Quote(Self::convert_quote(args)?))),
+                    "function" => Ok(Expr::SpecialForm(SpecialForm::Function(Self::convert_function(args)?))),
+                    "while" => Ok(Expr::SpecialForm(SpecialForm::While(Self::convert_while(args)?))),
+                    "catch" => Ok(Expr::SpecialForm(SpecialForm::Catch(Self::convert_catch(args)?))),
+                    "unwind-protect" => Ok(Expr::SpecialForm(SpecialForm::UnwindProtect(Self::convert_unwind_protect(args)?))),
+                    "condition-case" => Ok(Expr::SpecialForm(SpecialForm::ConditionCase(Self::convert_condition_case(args)?))),
+                    "save-current-buffer" => Ok(Expr::SpecialForm(SpecialForm::SaveCurrentBuffer(Self::convert_save_current_buffer(args)?))),
+                    "save-excursion" => Ok(Expr::SpecialForm(SpecialForm::SaveExcursion(Self::convert_save_excursion(args)?))),
+                    "save-restriction" => Ok(Expr::SpecialForm(SpecialForm::SaveRestriction(Self::convert_save_restriction(args)?))),
+                    "interactive" => Ok(Expr::SpecialForm(SpecialForm::Interactive(Self::convert_interactive(args)?))),
                     "defmacro" => Err(ConversionError::UnsupportedConstruct(
                         "defmacro should be handled at macro expansion phase".to_string()
                     )),
@@ -115,7 +128,7 @@ impl AstToIrConverter {
                 }
             }
             
-            Node::Backquote => Self::convert_backquote(args),
+            Node::Backquote => Ok(Expr::SpecialForm(SpecialForm::Quote(Self::convert_backquote(args)?))),
             Node::Unquote => Self::convert_unquote(args),
             Node::UnquoteSplice => Self::convert_unquote_splice(args),
             
@@ -127,19 +140,19 @@ impl AstToIrConverter {
     }
 
 
-    fn convert_if(args: &[Node]) -> Result<Expr, ConversionError> {
+    fn convert_if(args: &[Node]) -> Result<If, ConversionError> {
         match args.len() {
             2 => {
                 let cond = Arc::new(Self::node_to_expr(args[0].clone())?);
                 let then_branch = Arc::new(Self::node_to_expr(args[1].clone())?);
-                let else_branch = vec![]; // No else clause
-                Ok(Expr::If(If { cond, then: then_branch, els: else_branch }))
+                let else_branch = vec![];
+                Ok(If { cond, then: then_branch, els: else_branch })
             }
             3 => {
                 let cond = Arc::new(Self::node_to_expr(args[0].clone())?);
                 let then_branch = Arc::new(Self::node_to_expr(args[1].clone())?);
                 let else_branch = vec![Self::node_to_expr(args[2].clone())?];
-                Ok(Expr::If(If { cond, then: then_branch, els: else_branch }))
+                Ok(If { cond, then: then_branch, els: else_branch })
             }
             _ => Err(ConversionError::ArityMismatch { 
                 expected: 2, 
@@ -148,7 +161,7 @@ impl AstToIrConverter {
         }
     }
 
-    fn convert_lambda(args: &[Node]) -> Result<Expr, ConversionError> {
+    fn convert_lambda(args: &[Node]) -> Result<Lambda, ConversionError> {
         if args.is_empty() {
             return Err(ConversionError::InvalidLambdaArgs);
         }
@@ -156,7 +169,6 @@ impl AstToIrConverter {
         let params = Self::parse_lambda_params(&args[0])?;
         let body_nodes = &args[1..];
         
-        // Check for docstring and interactive declarations
         let mut body_start = 0;
         let mut docstring = None;
         let mut interactive = None;
@@ -204,14 +216,14 @@ impl AstToIrConverter {
             return Err(ConversionError::EmptyExpression);
         }
 
-        Ok(Expr::Lambda(Lambda {
+        Ok(Lambda {
             args: params,
             docstring,
             interactive,
             declare,
             body,
-            captures: vec![], // Will be filled by closure analysis
-        }))
+            captures: vec![],
+        })
     }
 
     fn parse_lambda_params(node: &Node) -> Result<Vec<Arg>, ConversionError> {
@@ -258,7 +270,6 @@ impl AstToIrConverter {
             None
         };
 
-        // Parse mode specifications if present
         let mut modes = Vec::new();
         for arg in args.iter().skip(if arg_desc.is_some() { 1 } else { 0 }) {
             if let Node::Ident(ident) = arg {
@@ -269,7 +280,11 @@ impl AstToIrConverter {
         Ok(Interactive { arg_desc, modes })
     }
 
-    fn convert_let(args: &[Node]) -> Result<Expr, ConversionError> {
+    fn convert_interactive(args: &[Node]) -> Result<Interactive, ConversionError> {
+        Self::parse_interactive(args)
+    }
+
+    fn convert_let(args: &[Node]) -> Result<Let, ConversionError> {
         if args.len() < 2 {
             return Err(ConversionError::ArityMismatch { 
                 expected: 2, 
@@ -282,7 +297,23 @@ impl AstToIrConverter {
             .map(|n| Self::node_to_expr(n.clone()))
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(Expr::Let(Let { bindings, body }))
+        Ok(Let { bindings, body })
+    }
+
+    fn convert_let_star(args: &[Node]) -> Result<LetStar, ConversionError> {
+        if args.len() < 2 {
+            return Err(ConversionError::ArityMismatch { 
+                expected: 2, 
+                got: args.len() 
+            });
+        }
+
+        let bindings = Self::parse_let_bindings(&args[0])?;
+        let body = args[1..].iter()
+            .map(|n| Self::node_to_expr(n.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(LetStar { bindings, body })
     }
 
     fn parse_let_bindings(node: &Node) -> Result<Vec<(Ident, Option<Expr>)>, ConversionError> {
@@ -293,7 +324,6 @@ impl AstToIrConverter {
                 for binding_node in nodes {
                     match binding_node {
                         Node::Ident(ident) => {
-                            // Simple binding with no value (defaults to nil)
                             bindings.push((*ident, None));
                         }
                         Node::Sexp(binding_parts) => {
@@ -316,21 +346,52 @@ impl AstToIrConverter {
         }
     }
 
-    fn convert_and(args: &[Node]) -> Result<Expr, ConversionError> {
-        let exprs = args.iter()
+    fn convert_and(args: &[Node]) -> Result<Vec<Expr>, ConversionError> {
+        args.iter()
             .map(|n| Self::node_to_expr(n.clone()))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Expr::And(exprs))
+            .collect::<Result<Vec<_>, _>>()
     }
 
-    fn convert_or(args: &[Node]) -> Result<Expr, ConversionError> {
-        let exprs = args.iter()
+    fn convert_or(args: &[Node]) -> Result<Vec<Expr>, ConversionError> {
+        args.iter()
             .map(|n| Self::node_to_expr(n.clone()))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Expr::Or(exprs))
+            .collect::<Result<Vec<_>, _>>()
     }
 
-    fn convert_quote(args: &[Node]) -> Result<Expr, ConversionError> {
+    fn convert_progn(args: &[Node]) -> Result<Vec<Expr>, ConversionError> {
+        args.iter()
+            .map(|n| Self::node_to_expr(n.clone()))
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    fn convert_prog1(args: &[Node]) -> Result<Prog1, ConversionError> {
+        if args.is_empty() {
+            return Err(ConversionError::ArityMismatch { expected: 1, got: 0 });
+        }
+
+        let first = Box::new(Self::node_to_expr(args[0].clone())?);
+        let rest = args[1..].iter()
+            .map(|n| Self::node_to_expr(n.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Prog1 { first, rest })
+    }
+
+    fn convert_prog2(args: &[Node]) -> Result<Prog2, ConversionError> {
+        if args.len() < 2 {
+            return Err(ConversionError::ArityMismatch { expected: 2, got: args.len() });
+        }
+
+        let first = Box::new(Self::node_to_expr(args[0].clone())?);
+        let second = Box::new(Self::node_to_expr(args[1].clone())?);
+        let rest = args[2..].iter()
+            .map(|n| Self::node_to_expr(n.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Prog2 { first, second, rest })
+    }
+
+    fn convert_quote(args: &[Node]) -> Result<Quote, ConversionError> {
         if args.len() != 1 {
             return Err(ConversionError::ArityMismatch { 
                 expected: 1, 
@@ -339,13 +400,27 @@ impl AstToIrConverter {
         }
 
         let quoted_data = Self::node_to_quoted_data(&args[0], false)?;
-        Ok(Expr::Quote(Quote {
+        Ok(Quote {
             kind: QuoteKind::Quote,
             expr: quoted_data,
-        }))
+        })
     }
 
-    fn convert_set(args: &[Node]) -> Result<Expr, ConversionError> {
+    fn convert_function(args: &[Node]) -> Result<Function, ConversionError> {
+        if args.len() != 1 {
+            return Err(ConversionError::ArityMismatch { expected: 1, got: args.len() });
+        }
+
+        if let Node::Ident(ident) = &args[0] {
+            Ok(Function { name: *ident })
+        } else {
+            Err(ConversionError::InvalidSyntax(
+                "function requires a symbol".to_string()
+            ))
+        }
+    }
+
+    fn convert_set(args: &[Node]) -> Result<Set, ConversionError> {
         if args.len() != 2 {
             return Err(ConversionError::ArityMismatch { 
                 expected: 2, 
@@ -355,7 +430,7 @@ impl AstToIrConverter {
 
         if let Node::Ident(ident) = &args[0] {
             let value = Box::new(Self::node_to_expr(args[1].clone())?);
-            Ok(Expr::Set(Set { symbol: *ident, value }))
+            Ok(Set { symbol: *ident, value })
         } else {
             Err(ConversionError::InvalidSyntax(
                 "set requires a symbol as first argument".to_string()
@@ -363,23 +438,18 @@ impl AstToIrConverter {
         }
     }
 
-    fn convert_setq(args: &[Node]) -> Result<Expr, ConversionError> {
-        // setq can handle multiple symbol-value pairs
+    fn convert_setq(args: &[Node]) -> Result<Setq, ConversionError> {
         if args.len() % 2 != 0 {
             return Err(ConversionError::InvalidSyntax(
                 "setq requires an even number of arguments (symbol-value pairs)".to_string()
             ));
         }
 
-        if args.is_empty() {
-            return Ok(Expr::Literal(Literal::Boolean(false))); // nil
-        }
-
         let mut assignments = Vec::new();
         for chunk in args.chunks(2) {
             if let Node::Ident(ident) = &chunk[0] {
-                let value = Box::new(Self::node_to_expr(chunk[1].clone())?);
-                assignments.push(Expr::Set(Set { symbol: *ident, value }));
+                let value = Self::node_to_expr(chunk[1].clone())?;
+                assignments.push((*ident, value));
             } else {
                 return Err(ConversionError::InvalidSyntax(
                     "setq requires symbols as variable names".to_string()
@@ -387,32 +457,32 @@ impl AstToIrConverter {
             }
         }
 
-        if assignments.len() == 1 {
-            Ok(assignments.into_iter().next().unwrap())
-        } else {
-            Ok(Expr::Progn(assignments))
-        }
+        Ok(Setq { assignments })
     }
 
-    fn convert_setf(args: &[Node]) -> Result<Expr, ConversionError> {
-        if args.len() != 2 {
-            return Err(ConversionError::ArityMismatch { 
-                expected: 2, 
-                got: args.len() 
-            });
+    fn convert_setq_default(args: &[Node]) -> Result<SetqDefault, ConversionError> {
+        if args.len() % 2 != 0 {
+            return Err(ConversionError::InvalidSyntax(
+                "setq-default requires an even number of arguments".to_string()
+            ));
         }
 
-        if let Node::Ident(ident) = &args[0] {
-            let function = Box::new(Self::node_to_expr(args[1].clone())?);
-            Ok(Expr::Fset(Fset { symbol: *ident, function }))
-        } else {
-            Err(ConversionError::InvalidSyntax(
-                "fset requires a symbol as first argument".to_string()
-            ))
+        let mut assignments = Vec::new();
+        for chunk in args.chunks(2) {
+            if let Node::Ident(ident) = &chunk[0] {
+                let value = Self::node_to_expr(chunk[1].clone())?;
+                assignments.push((*ident, value));
+            } else {
+                return Err(ConversionError::InvalidSyntax(
+                    "setq-default requires symbols as variable names".to_string()
+                ));
+            }
         }
+
+        Ok(SetqDefault { assignments })
     }
 
-    fn convert_defvar(args: &[Node]) -> Result<Expr, ConversionError> {
+    fn convert_defvar(args: &[Node]) -> Result<Defvar, ConversionError> {
         if args.is_empty() || args.len() > 3 {
             return Err(ConversionError::ArityMismatch { 
                 expected: 1, 
@@ -422,13 +492,22 @@ impl AstToIrConverter {
 
         if let Node::Ident(name) = &args[0] {
             let value = if args.len() > 1 {
-                Box::new(Self::node_to_expr(args[1].clone())?)
+                Some(Box::new(Self::node_to_expr(args[1].clone())?))
             } else {
-                Box::new(Expr::Literal(Literal::Boolean(false))) // nil
+                None
             };
 
-            // TODO: Handle optional docstring in args[2]
-            Ok(Expr::Set(Set { symbol: *name, value }))
+            let docstring = if args.len() > 2 {
+                if let Node::Str(s) = &args[2] {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            Ok(Defvar { symbol: *name, value, docstring })
         } else {
             Err(ConversionError::InvalidSyntax(
                 "defvar requires a symbol as variable name".to_string()
@@ -436,39 +515,49 @@ impl AstToIrConverter {
         }
     }
 
-    fn convert_cond(args: &[Node]) -> Result<Expr, ConversionError> {
-        // Convert cond to nested if expressions
-        if args.is_empty() {
-            return Ok(Expr::Literal(Literal::Boolean(false))); // nil
+    fn convert_defconst(args: &[Node]) -> Result<Defconst, ConversionError> {
+        if args.len() < 2 || args.len() > 3 {
+            return Err(ConversionError::ArityMismatch { 
+                expected: 2, 
+                got: args.len() 
+            });
         }
 
-        let mut result = Expr::Literal(Literal::Boolean(false)); // default nil
+        if let Node::Ident(name) = &args[0] {
+            let value = Box::new(Self::node_to_expr(args[1].clone())?);
+            let docstring = if args.len() > 2 {
+                if let Node::Str(s) = &args[2] {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
-        // Process clauses in reverse order
-        for clause_node in args.iter().rev() {
+            Ok(Defconst { symbol: *name, value, docstring })
+        } else {
+            Err(ConversionError::InvalidSyntax(
+                "defconst requires a symbol as variable name".to_string()
+            ))
+        }
+    }
+
+    fn convert_cond(args: &[Node]) -> Result<Cond, ConversionError> {
+        let mut clauses = Vec::new();
+        
+        for clause_node in args {
             if let Node::Sexp(clause) = clause_node {
                 if clause.is_empty() {
                     continue;
                 }
 
                 let condition = Self::node_to_expr(clause[0].clone())?;
-                let body = if clause.len() > 1 {
-                    if clause.len() == 2 {
-                        Self::node_to_expr(clause[1].clone())?
-                    } else {
-                        Expr::Progn(clause[1..].iter()
-                            .map(|n| Self::node_to_expr(n.clone()))
-                            .collect::<Result<Vec<_>, _>>()?)
-                    }
-                } else {
-                    condition.clone() // If no body, return the condition value
-                };
+                let body = clause[1..].iter()
+                    .map(|n| Self::node_to_expr(n.clone()))
+                    .collect::<Result<Vec<_>, _>>()?;
 
-                result = Expr::If(If {
-                    cond: Arc::new(condition),
-                    then: Arc::new(body),
-                    els: vec![result],
-                });
+                clauses.push(CondClause { condition, body });
             } else {
                 return Err(ConversionError::InvalidSyntax(
                     "cond clauses must be lists".to_string()
@@ -476,7 +565,109 @@ impl AstToIrConverter {
             }
         }
 
-        Ok(result)
+        Ok(Cond { clauses })
+    }
+
+    fn convert_while(args: &[Node]) -> Result<While, ConversionError> {
+        if args.is_empty() {
+            return Err(ConversionError::ArityMismatch { expected: 1, got: 0 });
+        }
+
+        let condition = Box::new(Self::node_to_expr(args[0].clone())?);
+        let body = args[1..].iter()
+            .map(|n| Self::node_to_expr(n.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(While { condition, body })
+    }
+
+    fn convert_catch(args: &[Node]) -> Result<Catch, ConversionError> {
+        if args.is_empty() {
+            return Err(ConversionError::ArityMismatch { expected: 1, got: 0 });
+        }
+
+        let tag = Box::new(Self::node_to_expr(args[0].clone())?);
+        let body = args[1..].iter()
+            .map(|n| Self::node_to_expr(n.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Catch { tag, body })
+    }
+
+    fn convert_unwind_protect(args: &[Node]) -> Result<UnwindProtect, ConversionError> {
+        if args.is_empty() {
+            return Err(ConversionError::ArityMismatch { expected: 1, got: 0 });
+        }
+
+        let protected = Box::new(Self::node_to_expr(args[0].clone())?);
+        let cleanup = args[1..].iter()
+            .map(|n| Self::node_to_expr(n.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(UnwindProtect { protected, cleanup })
+    }
+
+    fn convert_condition_case(args: &[Node]) -> Result<ConditionCase, ConversionError> {
+        if args.len() < 2 {
+            return Err(ConversionError::ArityMismatch { expected: 2, got: args.len() });
+        }
+
+        let var = if let Node::Ident(ident) = &args[0] {
+            Some(*ident)
+        } else if let Node::Nil = &args[0] {
+            None
+        } else {
+            return Err(ConversionError::InvalidSyntax(
+                "condition-case var must be a symbol or nil".to_string()
+            ));
+        };
+
+        let protected = Box::new(Self::node_to_expr(args[1].clone())?);
+        
+        let mut handlers = Vec::new();
+        for handler_node in &args[2..] {
+            if let Node::Sexp(handler) = handler_node {
+                if handler.len() < 2 {
+                    return Err(ConversionError::InvalidSyntax(
+                        "condition-case handler must have condition and body".to_string()
+                    ));
+                }
+
+                let condition = Self::node_to_expr(handler[0].clone())?;
+                let body = handler[1..].iter()
+                    .map(|n| Self::node_to_expr(n.clone()))
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                handlers.push(ConditionHandler { condition, body });
+            } else {
+                return Err(ConversionError::InvalidSyntax(
+                    "condition-case handlers must be lists".to_string()
+                ));
+            }
+        }
+
+        Ok(ConditionCase { var, protected, handlers })
+    }
+
+    fn convert_save_current_buffer(args: &[Node]) -> Result<SaveCurrentBuffer, ConversionError> {
+        let body = args.iter()
+            .map(|n| Self::node_to_expr(n.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SaveCurrentBuffer { body })
+    }
+
+    fn convert_save_excursion(args: &[Node]) -> Result<SaveExcursion, ConversionError> {
+        let body = args.iter()
+            .map(|n| Self::node_to_expr(n.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SaveExcursion { body })
+    }
+
+    fn convert_save_restriction(args: &[Node]) -> Result<SaveRestriction, ConversionError> {
+        let body = args.iter()
+            .map(|n| Self::node_to_expr(n.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SaveRestriction { body })
     }
 
     fn convert_call(nodes: Vec<Node>) -> Result<Expr, ConversionError> {
@@ -492,7 +683,7 @@ impl AstToIrConverter {
         Ok(Expr::Call(Call { func, args }))
     }
 
-    fn convert_backquote(args: &[Node]) -> Result<Expr, ConversionError> {
+    fn convert_backquote(args: &[Node]) -> Result<Quote, ConversionError> {
         if args.len() != 1 {
             return Err(ConversionError::ArityMismatch { 
                 expected: 1, 
@@ -501,10 +692,10 @@ impl AstToIrConverter {
         }
 
         let quoted_data = Self::node_to_quoted_data(&args[0], true)?;
-        Ok(Expr::Quote(Quote {
+        Ok(Quote {
             kind: QuoteKind::Backquote,
             expr: quoted_data,
-        }))
+        })
     }
 
     fn convert_unquote(_args: &[Node]) -> Result<Expr, ConversionError> {
@@ -609,7 +800,7 @@ mod tests {
             Node::Integer(2),
         ]);
         let expr = ast_to_ir(node).unwrap();
-        assert!(matches!(expr, Expr::If(_)));
+        assert!(matches!(expr, Expr::SpecialForm(SpecialForm::If(_))));
     }
 
     #[test]
@@ -625,7 +816,7 @@ mod tests {
             Node::Ident("x".into()),
         ]);
         let expr = ast_to_ir(node).unwrap();
-        assert!(matches!(expr, Expr::Let(_)));
+        assert!(matches!(expr, Expr::SpecialForm(SpecialForm::Let(_))));
     }
 
     #[test]
@@ -636,7 +827,7 @@ mod tests {
             Node::Ident("x".into()),
         ]);
         let expr = ast_to_ir(node).unwrap();
-        assert!(matches!(expr, Expr::Lambda(_)));
+        assert!(matches!(expr, Expr::SpecialForm(SpecialForm::Lambda(_))));
     }
 
     #[test]
@@ -646,7 +837,7 @@ mod tests {
             Node::Ident("symbol".into()),
         ]);
         let expr = ast_to_ir(node).unwrap();
-        assert!(matches!(expr, Expr::Quote(Quote { kind: QuoteKind::Quote, .. })));
+        assert!(matches!(expr, Expr::SpecialForm(SpecialForm::Quote(Quote { kind: QuoteKind::Quote, .. }))));
     }
 
     #[test]
@@ -662,7 +853,7 @@ mod tests {
             ]),
         ]);
         let expr = ast_to_ir(node).unwrap();
-        assert!(matches!(expr, Expr::Quote(Quote { kind: QuoteKind::Backquote, .. })));
+        assert!(matches!(expr, Expr::SpecialForm(SpecialForm::Quote(Quote { kind: QuoteKind::Backquote, .. }))));
     }
 
     #[test]
@@ -675,7 +866,7 @@ mod tests {
             Node::Integer(2),
         ]);
         let expr = ast_to_ir(node).unwrap();
-        assert!(matches!(expr, Expr::Progn(_)));
+        assert!(matches!(expr, Expr::SpecialForm(SpecialForm::Setq(_))));
     }
 
     #[test]
@@ -692,6 +883,6 @@ mod tests {
             ]),
         ]);
         let expr = ast_to_ir(node).unwrap();
-        assert!(matches!(expr, Expr::If(_)));
+        assert!(matches!(expr, Expr::SpecialForm(SpecialForm::Cond(_))));
     }
 }
