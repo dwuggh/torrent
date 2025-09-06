@@ -184,6 +184,9 @@ impl<'a> Codegen<'a> {
                 match head {
                     Node::Ident(fn_name) => {
                         match fn_name.as_str() {
+                            "let" => {
+                                return self.translate_let(scope, &args);
+                            }
                             "+" => {
                                 println!("rgs: {args:?}");
                                 let res = self.builder.ins().iadd(args[0], args[1]);
@@ -280,29 +283,83 @@ impl<'a> Codegen<'a> {
         Ok(closure)
     }
 
-    pub fn translate_let<'s>(&mut self, parent_scope: &CompileScope<'s>, body: &[Node]) -> Result<()> {
-        let mut variables = HashMap::new();
-        let new_scope = FrameScope::new(variables, parent_scope, true, false);
+    pub fn translate_let<'s>(
+        &mut self,
+        parent_scope: &CompileScope<'s>,
+        args: &[Node],
+    ) -> Result<Value> {
+        if args.is_empty() {
+            anyhow::bail!("let requires bindings and a body");
+        }
+        let bindings_node = &args[0];
+        let body = &args[1..];
 
-        // translate the define variable blocks
-        todo!()
+        let Node::Sexp(bindings) = bindings_node else {
+            anyhow::bail!("let bindings must be a list");
+        };
+
+        let mut new_vars = HashMap::new();
+        let mut binding_values = Vec::new();
+
+        for binding in bindings {
+            let Node::Sexp(pair) = binding else {
+                anyhow::bail!("invalid let binding format, expected (symbol value)");
+            };
+            if pair.len() != 2 {
+                anyhow::bail!(
+                    "invalid let binding format, expecting (symbol value), got {:?}",
+                    pair
+                );
+            }
+            let Node::Ident(ident_str) = &pair[0] else {
+                anyhow::bail!("let binding must have a symbol as the first element");
+            };
+
+            let sym = Symbol::from_string(ident_str);
+            let var = self.builder.declare_var(types::I64);
+            new_vars.insert(sym, var);
+
+            let value_expr = &pair[1];
+            // The values are evaluated in the *parent* scope.
+            let value = self.translate_node(value_expr, parent_scope)?;
+            binding_values.push(value);
+        }
+
+        let new_scope = FrameScope::new(new_vars, parent_scope, true, false).into();
+
+        // Define the variables with their evaluated values
+        if let CompileScope::Frame(frame) = &new_scope {
+            for (binding, value) in bindings.iter().zip(binding_values) {
+                let Node::Sexp(pair) = binding else { unreachable!() };
+                let Node::Ident(ident_str) = &pair[0] else { unreachable!() };
+                let sym = Symbol::from_string(ident_str);
+
+                let var = *frame.slots.get(sym).unwrap();
+                self.builder.def_var(var, value);
+            }
+        } else {
+            unreachable!();
+        }
 
         // translate body
-        todo!();
+        let result = self.translate_nodes(body, &new_scope)?;
 
-        // resolve bindings
-        let binds = new_scope.lexical_binds.unwrap();
-        for (symbol, funcs) in binds.borrow().iter() {
-            let var = new_scope.slots.get(*symbol).unwrap();
-            let value = self.builder.use_var(var);
-            let sym = translate_value(&mut self.builder, symbol.tag());
-            for func in funcs.iter() {
-                let func_val = translate_value(&mut self.builder, *func);
-                self.call("--store-lexical", &[sym, value, func_val]);
+        // resolve bindings for closures capturing let-bound variables
+        if let CompileScope::Frame(frame) = &new_scope {
+            if let Some(binds) = &frame.lexical_binds {
+                for (symbol, funcs) in binds.borrow().iter() {
+                    let var = frame.slots.get(*symbol).unwrap();
+                    let value = self.builder.use_var(*var);
+                    let sym = translate_value(&mut self.builder, symbol.tag());
+                    for func in funcs.iter() {
+                        let func_val = translate_value(&mut self.builder, *func);
+                        self.call("__store_lexical", &[sym, value, func_val]);
+                    }
+                }
             }
         }
 
-        todo!()
+        Ok(result)
     }
 
 }
