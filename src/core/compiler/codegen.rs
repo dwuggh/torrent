@@ -284,8 +284,12 @@ impl<'a> Codegen<'a> {
         let mut variables = HashMap::new();
         let new_scope = FrameScope::new(variables, parent_scope, true, false);
 
+        // translate the define variable blocks
+        todo!()
+
         // translate body
         todo!();
+
         // resolve bindings
         let binds = new_scope.lexical_binds.unwrap();
         for (symbol, funcs) in binds.borrow().iter() {
