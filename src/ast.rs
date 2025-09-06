@@ -321,6 +321,29 @@ pub fn elisp_parser_with_interner<'a>(
     node.repeated().collect::<Vec<_>>().then_ignore(end())
 }
 
+pub fn elisp_parser<'a>() -> impl Parser<'a, &'a str, Vec<Node>, extra::Err<Rich<'a, char>>> {
+    let mut interner = lasso::ThreadedRodeo::new();
+    elisp_parser_with_interner(&mut interner)
+}
+
+pub struct ParseContext {
+    pub interner: lasso::ThreadedRodeo,
+}
+
+impl ParseContext {
+    pub fn new() -> Self {
+        Self {
+            interner: lasso::ThreadedRodeo::new(),
+        }
+    }
+
+    pub fn parse(&mut self, source: &str) -> Result<Vec<Node>, Vec<Rich<'_, char>>> {
+        elisp_parser_with_interner(&mut self.interner)
+            .parse(source)
+            .into_result()
+    }
+}
+
 pub fn special_chars(c: char) -> bool {
     let chars = "#[]()\\\"\',";
     chars.contains(c)
