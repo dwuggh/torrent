@@ -278,9 +278,7 @@ impl<'a> Codegen<'a> {
         })?;
         let body = &args[1..];
 
-        let bindings = if let Node::Sexp(bindings) = bindings_node {
-            bindings
-        } else {
+        let Node::Sexp(bindings) = bindings_node else {
             return Err(CodegenError::InvalidLetSyntax(
                 "`let` bindings must be a list".to_string(),
             ));
@@ -290,9 +288,7 @@ impl<'a> Codegen<'a> {
         let mut binding_values = Vec::new();
 
         for binding in bindings {
-            let pair = if let Node::Sexp(p) = binding {
-                p
-            } else {
+            let Node::Sexp(pair) = binding else {
                 return Err(CodegenError::InvalidLetSyntax(
                     "each `let` binding must be a list of (symbol value)".to_string(),
                 ));
@@ -308,9 +304,7 @@ impl<'a> Codegen<'a> {
                 }
             };
 
-            let ident_str = if let Node::Ident(s) = ident_node {
-                s
-            } else {
+            let Node::Ident(ident_str) = ident_node else {
                 return Err(CodegenError::InvalidLetSyntax(
                     "`let` binding must have a symbol as the first element".to_string(),
                 ));
