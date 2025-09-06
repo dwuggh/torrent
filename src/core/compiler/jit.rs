@@ -53,13 +53,12 @@ impl Default for JIT {
 }
 
 impl JIT {
-    pub fn compile_node(&mut self, node: &Node, scope: &CompileScope) -> Result<*const u8> {
+    pub fn compile_node<'s>(&mut self, node: &Node, scope: &'s CompileScope) -> Result<*const u8> {
         let mut fctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
-        let (mut codegen, arg_vars) =
-            Codegen::new(&mut self.module, &self.builtin_funcs, &mut fctx, &mut ctx, &[])?;
+        let (mut codegen, new_scope) =
+            Codegen::new(&mut self.module, &self.builtin_funcs, &mut fctx, &mut ctx, &[], scope)?;
 
-        let new_scope = FrameScope::new(arg_vars, scope, false, true).into();
         let val = codegen.translate_node(node, &new_scope)?;
 
         let func_id = codegen.func_id;

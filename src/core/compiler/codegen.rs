@@ -25,20 +25,21 @@ use crate::Value as RuntimeValue;
 pub struct Codegen<'a> {
     module: &'a mut JITModule,
     builder: FunctionBuilder<'a>,
-    closure: Option<Value>,
+    closure: Value,
     func: RuntimeValue,
-    func_id: FuncId,
+    pub func_id: FuncId,
     builtin_funcs: &'a HashMap<String, FuncId>,
 }
 
 impl<'a> Codegen<'a> {
-    pub fn new(
+    pub fn new<'s>(
         module: &'a mut JITModule,
         builtin_funcs: &'a HashMap<String, FuncId>,
         fctx: &'a mut FunctionBuilderContext,
         ctx: &'a mut Context,
         args: &[Node],
-    ) -> Result<(Self, HashMap<Symbol, Variable>)> {
+        parent_scope: &'s CompileScope,
+    ) -> Result<(Self, CompileScope<'s>)> {
         // make signature
 
         let sig = &mut ctx.func.signature;
@@ -70,6 +71,8 @@ impl<'a> Codegen<'a> {
             builder.def_var(var, val);
         }
 
+        let new_scope = FrameScope::new(variables, parent_scope, false, true).into();
+
         let func_runtime_val = Function::new_closure(0 as *const u8, func_id).tag();
         let closure_val = translate_value(&mut builder, func_runtime_val);
 
@@ -78,11 +81,11 @@ impl<'a> Codegen<'a> {
             builtin_funcs,
             builder,
             func: func_runtime_val,
-            closure: Some(closure_val),
+            closure: closure_val,
             func_id,
         };
 
-        Ok((codegen, variables))
+        Ok((codegen, new_scope))
     }
 
     fn nil(&mut self) -> Value {
@@ -133,7 +136,7 @@ impl<'a> Codegen<'a> {
                     let inst = self
                         .builder
                         .ins()
-                        .call(load, &[sym, self.closure.unwrap()]);
+                        .call(load, &[sym, self.closure]);
                     self.builder.inst_results(inst)[0]
                 }
             })
@@ -254,15 +257,15 @@ impl<'a> Codegen<'a> {
         let mut fctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
 
-        let (mut codegen, arg_vars) = Codegen::new(
+        let (mut codegen, new_scope) = Codegen::new(
             self.module,
             self.builtin_funcs,
             &mut fctx,
             &mut ctx,
             args,
+            scope,
         )?;
 
-        let new_scope = FrameScope::new(arg_vars, scope, false, true).into();
         let result = codegen.translate_nodes(body, &new_scope)?;
 
         let func_id = codegen.func_id;
