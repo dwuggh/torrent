@@ -70,13 +70,6 @@ impl CompileScope<'_> {
         builder: &mut FunctionBuilder,
     ) -> Option<Val> {
         self.load_symbol_inner(symbol, load_function_cell, caller, builder, true)
-        // .map(|value| {
-        //     if same_func_scope {
-        //         Val::Value(value)
-        //     } else {
-        //         Val::Symbol(symbol)
-        //     }
-        // })
     }
 
     fn load_symbol_inner(

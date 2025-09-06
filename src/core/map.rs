@@ -6,7 +6,7 @@ use crate::{core::value::{LispType, TaggedPtr, Value}, gc::{Gc, GcInner}};
 
 
 #[derive(Clone, Trace, Debug)]
-pub struct Map(Gc<HashMap<Value, Value>>);
+pub struct Map(pub(crate) Gc<HashMap<Value, Value>>);
 
 impl TaggedPtr for Map {
     const TAG: LispType = LispType::Map;

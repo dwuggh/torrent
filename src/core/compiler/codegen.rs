@@ -238,7 +238,6 @@ impl<'a> Codegen<'a> {
     pub fn translate_defun<'s>(
         &mut self,
         scope: &CompileScope<'s>,
-        _name: &str,
         args: &[Node],
         body: &[Node],
     ) -> CodegenResult<Function> {
@@ -266,6 +265,41 @@ impl<'a> Codegen<'a> {
 
         self.module.clear_context(&mut ctx);
         Ok(closure)
+    }
+
+    pub fn translate_if<'s>(
+        &mut self,
+        scope: &CompileScope<'s>,
+        cond: &Node,
+        then: &Node,
+        els: &[Node],
+    ) -> CodegenResult<Value> {
+        let cond_val = self.translate_node(cond, scope)?;
+        let nil = self.nil();
+        let cond = self.builder.ins().icmp(IntCC::NotEqual, cond_val, nil);
+        let then_block = self.builder.create_block();
+        let else_block = self.builder.create_block();
+        let merge_block = self.builder.create_block();
+
+
+        self.builder.append_block_param(merge_block, types::I64);
+
+        self.builder.ins().brif(cond, then_block, &[], else_block, &[]);
+
+        self.builder.switch_to_block(then_block);
+        self.builder.seal_block(then_block);
+        let then_return = self.translate_node(then, scope)?;
+        self.builder.ins().jump(merge_block, &[then_return.into()]);
+
+        self.builder.switch_to_block(else_block);
+        self.builder.seal_block(else_block);
+        let else_return = self.translate_nodes(els, scope)?;
+        self.builder.ins().jump(merge_block, &[else_return.into()]);
+
+        self.builder.switch_to_block(merge_block);
+        self.builder.seal_block(merge_block);
+        let phi = self.builder.block_params(merge_block)[0];
+        Ok(phi)
     }
 
     pub fn translate_let<'s>(

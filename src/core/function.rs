@@ -1,10 +1,5 @@
 
-use cranelift::prelude::types;
-use cranelift::prelude::AbiParam;
-use cranelift_jit::JITBuilder;
-use cranelift_jit::JITModule;
 use cranelift_module::FuncId;
-use cranelift_module::Module;
 use proc_macros::Trace;
 use crate::core::map::Map;
 
@@ -22,7 +17,6 @@ pub(crate) type BuiltInFn =
 #[derive(Debug, Clone, Copy)]
 pub struct SubrFn {
     pub func: BuiltInFn,
-    argcnt: usize,
 }
 
 pub(crate) type Closure =
@@ -54,6 +48,16 @@ pub struct FunctionInner {
     pub func_id: FuncId,
     #[no_trace]
     pub func_type: FunctionType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FunctionSignature {
+    pub func_id: FuncId,
+    /// minial argument number required
+    pub min_arg_cnt: u8,
+    /// whether this function accepts variable args, like `&rest`
+    pub variable_arg: bool,
+
 }
 
 #[derive(Debug, Clone, Trace)]
@@ -117,35 +121,6 @@ impl Function {
             FunctionType::Lambda(lambda_fn) => (lambda_fn.func)(args.as_ptr(), env),
         }
     }
-
-    pub fn declare_subr(
-        subr_fn: SubrFn,
-        module: &mut JITModule,
-        name: &str,
-    ) -> anyhow::Result<Self> {
-        let mut sig = module.make_signature();
-        for i in 0..subr_fn.argcnt {
-            sig.params.push(AbiParam::new(types::I64));
-        }
-        sig.returns.push(AbiParam::new(types::I64));
-        let func_id = module.declare_function(name, cranelift_module::Linkage::Import, &sig)?;
-
-        Ok(Self {
-            inner: Gc::new(FunctionInner {
-                func_id,
-                func_type: FunctionType::Subr(subr_fn),
-            }),
-        })
-        // module.define_function(, ctx)
-    }
-
-    pub fn subr_import_to_jit(subr_fn: SubrFn, builder: &mut JITBuilder, name: &str) {
-        builder.symbol(name, subr_fn.func as *const u8);
-    }
-    // pub fn eval(&self, args: &[Value], env: &mut Env) -> anyhow::Result<Value> {
-    //     let func = self.inner.get();
-    //     (func.func)(args, env)
-    // }
 }
 
 impl TaggedPtr for Function {

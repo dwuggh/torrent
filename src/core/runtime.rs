@@ -40,3 +40,6 @@ fn store_symbol_function(symbol: Symbol, func: Value) {
     let mut data_ref = symbol.get_or_init();
     data_ref.value_mut().data().func = Some(func)
 }
+
+fn get_func_ptr(func: &Function) {
+}
