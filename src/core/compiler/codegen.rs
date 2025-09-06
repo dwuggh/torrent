@@ -26,8 +26,8 @@ pub struct Codegen<'a, 's> {
     module: &'a mut JITModule,
     builder: FunctionBuilder<'a>,
     scope: CompileScope<'s>,
-    captures: HashSet<Symbol>,
     closure: Value,
+    func: RuntimeValue,
     func_id: FuncId,
     builtin_funcs: &'a HashMap<String, FuncId>,
 }
@@ -51,9 +51,7 @@ impl<'a, 's> Codegen<'a, 's> {
         sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
 
-        let func_id = module.declare_anonymous_function(
-            &ctx.func.signature,
-        )?;
+        let func_id = module.declare_anonymous_function(&ctx.func.signature)?;
         let mut builder = FunctionBuilder::new(&mut ctx.func, fctx);
 
         let entry_block = builder.create_block();
@@ -74,17 +72,16 @@ impl<'a, 's> Codegen<'a, 's> {
             builder.def_var(var, val);
         }
 
-        let captures = HashSet::new();
-        let closure = Function::new_closure(0 as *const u8, func_id).tag();
-        let closure = load_value(&mut builder, closure);
+        let func = Function::new_closure(0 as *const u8, func_id).tag();
+        let closure = translate_value(&mut builder, func);
 
-        let scope = FrameScope::new(variables, prev_scope, false).into();
+        let scope = FrameScope::new(variables, prev_scope, false, true).into();
 
         Ok(Self {
             module,
             builtin_funcs,
             builder,
-            captures,
+            func,
             closure,
             func_id,
             scope,
@@ -103,22 +100,30 @@ impl<'a, 's> Codegen<'a, 's> {
             .unwrap_or(Ok(self.nil()))
     }
 
-    pub fn finalize(mut self, val: Value) {
+    pub fn finalize(mut self, val: Value) -> RuntimeValue {
         self.builder.ins().return_(&[val]);
         self.builder.finalize();
+        self.func
     }
 
-    pub fn load_symbol(&mut self, symbol: Symbol) -> Result<Value> {
+    fn call(&mut self, func_name: &str, args: &[Value]) -> &[Value] {
+        let func_id = *self.builtin_funcs.get(func_name).unwrap();
+        let func_ref = self.module.declare_func_in_func(func_id, self.builder.func);
+        let inst = self.builder.ins().call(func_ref, args);
+        self.builder.inst_results(inst)
+    }
+
+    pub fn load_symbol(&mut self, symbol: Symbol, load_function_cell: bool) -> Result<Value> {
         self.scope
-            .load_symbol(symbol, false, &mut self.builder)
+            .load_symbol(symbol, load_function_cell, self.func, &mut self.builder)
             .ok_or(anyhow::anyhow!("symbol not found"))
             .map(|val| match val {
                 Val::Value(value) => value,
                 Val::Symbol(symbol) => {
-                    self.captures.insert(symbol);
-                    // self.builder.ins().call(FN, args);
+                    // this value is captured, we load it from the map for captured values
+                    // through compiler, so it gets loaded at runtime
                     let func_id = *self.builtin_funcs.get("--load-captured").unwrap();
-                    let sym = load_value(&mut self.builder, symbol.tag());
+                    let sym = translate_value(&mut self.builder, symbol.tag());
 
                     let load = self.module.declare_func_in_func(func_id, self.builder.func);
                     let inst = self.builder.ins().call(load, &[sym, self.closure]);
@@ -127,12 +132,18 @@ impl<'a, 's> Codegen<'a, 's> {
             })
     }
 
+    pub fn resolve_captured(&mut self) {
+        // TODO should be called inside a lexical binding
+        // a lexical bind scope has a symbol map for local vars
+        // look them up and store
+        // self.resolved;
+    }
+
     pub fn translate_node(&mut self, node: &Node) -> anyhow::Result<Value> {
         match node {
             Node::Ident(ident) => {
                 let symbol = Symbol::from_string(ident);
-                let val = self
-                    .load_symbol(symbol)?;
+                let val = self.load_symbol(symbol, false)?;
                 Ok(val)
             }
             Node::Sexp(nodes) => {
@@ -167,17 +178,10 @@ impl<'a, 's> Codegen<'a, 's> {
                             _ => (),
                         }
                         let fn_sym = Symbol::from_string(fn_name);
-                        let func = self
-                            .scope
-                            .load_symbol(fn_sym, true, &mut self.builder)
-                            .unwrap();
-                        // let LispValue::Function(func) = value.untag() else {
-                        //     bail!("not a function in func cell");
-                        // };
-                        // let func_id = def_apply(&mut self.module);
-                        let func_id = *self.builtin_funcs.get("apply").unwrap();
+                        let func = self.load_symbol(fn_sym, true)?;
 
-                        let apply = self.module.declare_func_in_func(func_id, self.builder.func);
+                        // let func_id = *self.builtin_funcs.get("apply").unwrap();
+                        // let apply = self.module.declare_func_in_func(func_id, self.builder.func);
 
                         // collect evaled args: Iter<Item=Result<Value>> -> Result<Vec<Value>>
                         let argcnt = args.len();
@@ -186,11 +190,13 @@ impl<'a, 's> Codegen<'a, 's> {
                         let args_len = self.builder.ins().iconst(types::I64, args.len() as i64);
                         let env_ptr = self.scope.get_root() as *const Environment;
                         let env_ptr = self.builder.ins().iconst(types::I64, env_ptr as i64);
-                        let result = self
-                            .builder
-                            .ins()
-                            .call(apply, &[func, args_ptr, args_len, env_ptr]);
-                        let res = self.builder.inst_results(result)[0];
+
+                        // let result = self
+                        //     .builder
+                        //     .ins()
+                        //     .call(apply, &[func, args_ptr, args_len, env_ptr]);
+                        // let res = self.builder.inst_results(result)[0];
+                        let res = self.call("apply", &[func, args_ptr, args_len, env_ptr])[0];
                         // let a = builder.ins().return_(&[res]);
                         Ok(res)
                     }
@@ -246,29 +252,55 @@ impl<'a, 's> Codegen<'a, 's> {
         )?;
 
         let result = codegen.translate_nodes(body)?;
-        codegen.finalize(result);
-
+        let func_id = codegen.func_id;
+        let func = codegen.finalize(result);
         // translator.builder.ins().return_(&[result]);
         // translator.builder.finalize();
 
-        let func_id = self.module.declare_function(
-            name,
-            cranelift_module::Linkage::Export,
-            &ctx.func.signature,
-        )?;
+        // let func_id = self.module.declare_function(
+        //     name,
+        //     cranelift_module::Linkage::Export,
+        //     &ctx.func.signature,
+        // )?;
 
         self.module.define_function(func_id, &mut ctx)?;
-        self.module.clear_context(&mut ctx);
         let func_ptr = self.module.get_finalized_function(func_id);
-        let closure = Function::new_closure(func_ptr, func_id);
+        let closure: Function = func.try_into().unwrap();
+        closure.set_func_ptr(func_ptr);
+
+        self.module.clear_context(&mut ctx);
+        // let closure = Function::new_closure(func_ptr, func_id);
         Ok(closure)
     }
 
     pub fn translate_let(&mut self, body: &[Node]) -> Result<()> {
+        let mut variables = HashMap::new();
+        let scope = FrameScope::new(variables, &self.scope, true, false);
+
+        // translate body
+        todo!();
+        // resolve bindings
+        let binds = scope.lexical_binds.unwrap();
+        for (symbol, funcs) in binds.borrow().iter() {
+            let var = scope.slots.get(*symbol).unwrap();
+            let value = self.builder.use_var(var);
+            let sym = translate_value(&mut self.builder, symbol.tag());
+            for func in funcs.iter() {
+                let func_val = translate_value(&mut self.builder, *func);
+                self.call("--store-lexical", &[sym, value, func_val]);
+            }
+        }
+
         todo!()
+    }
+
+    fn with_new_frame<F: FnOnce()>(&mut self, new_frame: FrameScope, job: F) {
+        let old_scope = self.scope;
+        let new_scope = CompileScope::Frame(new_frame);
+        self.scope = new_scope;
     }
 }
 
-fn load_value(builder: &mut FunctionBuilder, val: RuntimeValue) -> Value {
+fn translate_value(builder: &mut FunctionBuilder, val: RuntimeValue) -> Value {
     builder.ins().iconst(types::I64, val.0 as i64)
 }
