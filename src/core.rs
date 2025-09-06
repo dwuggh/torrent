@@ -1,6 +1,7 @@
 
 pub mod value;
 pub mod string;
+pub mod map;
 pub mod symbol;
 pub mod env;
 pub mod function;

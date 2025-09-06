@@ -6,7 +6,7 @@ use cranelift_jit::JITModule;
 use cranelift_module::FuncId;
 use cranelift_module::Module;
 use proc_macros::Trace;
-use crate::core::value::Map;
+use crate::core::map::Map;
 
 use crate::core::env::Environment;
 use crate::core::symbol::Symbol;
@@ -27,6 +27,10 @@ pub struct SubrFn {
 
 pub(crate) type Closure =
     for<'a> fn(args: *const Value, env: *mut Environment) -> anyhow::Result<Value>;
+
+pub unsafe fn cast_func_ptr(ptr: *const u8) -> Closure {
+    std::mem::transmute(ptr)
+}
 
 // TODO closures
 #[derive(Debug, Clone, Trace)]
@@ -70,7 +74,7 @@ impl FunctionType {
 impl Function {
     pub fn new_closure(func: *const u8, func_id: FuncId) -> Self {
         unsafe {
-            let func = func as Closure;
+            let func = cast_func_ptr(func);
             let closure = LambdaFn {
                 captures: Map::new(),
                 func,
@@ -90,6 +94,21 @@ impl Function {
 
     pub fn get_func_type_mut(&self) -> &mut FunctionType {
         &mut self.inner.get_mut().func_type
+    }
+
+    pub fn set_func_ptr(&self, func_ptr: *const u8) {
+        match &mut self.inner.get_mut().func_type {
+            FunctionType::Subr(subr_fn) => {
+                unsafe {
+                    subr_fn.func = cast_func_ptr(func_ptr);
+                }
+            }
+            FunctionType::Lambda(lambda_fn) => {
+                unsafe {
+                    lambda_fn.func = cast_func_ptr(func_ptr);
+                }
+            }
+        }
     }
 
     pub fn run(&self, args: &[Value], env: &mut Environment) -> anyhow::Result<Value> {

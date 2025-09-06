@@ -1,5 +1,7 @@
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 
+use crate::core::value::Value as RuntimeValue;
 use cranelift::prelude::*;
 
 use crate::core::{env::Environment, symbol::Symbol};
@@ -17,8 +19,9 @@ impl<'a> GlobalScope<'a> {
 
 #[derive(Clone)]
 pub struct FrameScope<'a> {
-    slots: ParamSlots,
-    lexical_binding: bool,
+    pub slots: ParamSlots,
+    pub lexical_binds: Option<RefCell<HashMap<Symbol, HashSet<RuntimeValue>>>>,
+    is_func: bool,
     parent: &'a CompileScope<'a>,
 }
 
@@ -33,10 +36,13 @@ impl<'a> FrameScope<'a> {
         vars: HashMap<Symbol, Variable>,
         parent: &'a CompileScope<'a>,
         lexical_binding: bool,
+        is_func: bool,
     ) -> Self {
+        let lexical_binds = lexical_binding.then_some(Default::default());
         FrameScope {
             slots: ParamSlots::new(vars),
-            lexical_binding,
+            lexical_binds,
+            is_func,
             parent,
         }
     }
@@ -60,43 +66,54 @@ impl CompileScope<'_> {
         &self,
         symbol: Symbol,
         load_function_cell: bool,
+        caller: RuntimeValue,
         builder: &mut FunctionBuilder,
     ) -> Option<Val> {
-        let mut same_func_scope = true;
-        self.load_symbol_inner(symbol, load_function_cell, builder, &mut same_func_scope)
-            .map(|value| {
-                if same_func_scope {
-                    Val::Value(value)
-                } else {
-                    Val::Symbol(symbol)
-                }
-            })
+        self.load_symbol_inner(symbol, load_function_cell, caller, builder, true)
+        // .map(|value| {
+        //     if same_func_scope {
+        //         Val::Value(value)
+        //     } else {
+        //         Val::Symbol(symbol)
+        //     }
+        // })
     }
 
     fn load_symbol_inner(
         &self,
         symbol: Symbol,
         load_function_cell: bool,
+        caller: RuntimeValue,
         builder: &mut FunctionBuilder,
-        same_func_scope: &mut bool,
-    ) -> Option<Value> {
+        same_func_scope: bool,
+    ) -> Option<Val> {
         match self {
             CompileScope::Global(_) => {
                 let val = Environment::default().load_symbol(symbol, load_function_cell)?;
-                Some(builder.ins().iconst(types::I64, val.0 as i64))
+                let val = builder.ins().iconst(types::I64, val.0 as i64);
+                Some(Val::Value(val))
             }
-            CompileScope::Frame(frame) => (*same_func_scope || frame.lexical_binding)
-                .then(|| {
-                    let var = frame.slots.get(symbol)?;
-                    Some(builder.use_var(var))
-                })
-                .flatten()
-                .or(frame.parent.load_symbol_inner(
+            CompileScope::Frame(frame) => match frame.slots.get(symbol) {
+                Some(var) => {
+                    if same_func_scope {
+                        Some(Val::Value(builder.use_var(var)))
+                    } else {
+                        if let Some(lexical_binds) = frame.lexical_binds.as_ref() {
+                            lexical_binds.borrow_mut().get_mut(&symbol).map(|captured| {
+                                captured.insert(caller);
+                            });
+                        }
+                        Some(Val::Symbol(symbol))
+                    }
+                }
+                None => frame.parent.load_symbol_inner(
                     symbol,
                     load_function_cell,
+                    caller,
                     builder,
-                    same_func_scope,
-                )),
+                    same_func_scope && frame.is_func,
+                ),
+            },
         }
     }
 }

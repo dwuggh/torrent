@@ -1,5 +1,5 @@
 use super::{env::Environment, function::Function};
-use crate::core::{function::FunctionType, symbol::Symbol, value::Value};
+use crate::core::{function::FunctionType, symbol::Symbol, value::{TaggedPtr, Value}};
 use anyhow::{anyhow, Result};
 use proc_macros::defun;
 

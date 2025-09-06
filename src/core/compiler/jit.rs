@@ -56,7 +56,7 @@ impl JIT {
     pub fn compile_node(&mut self, node: &Node, scope: &CompileScope) -> Result<*const u8> {
         let mut fctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
-        let mut codegen = Codegen::new(&mut self.module, &self.builtin_funcs, &mut fctx, &mut ctx, &[], scope)?;
+        let mut codegen = Codegen::new(&mut self.module, &self.builtin_funcs, &mut fctx, &mut ctx, &[])?;
         let val = codegen.translate_node(node)?;
         codegen.finalize(val);
 

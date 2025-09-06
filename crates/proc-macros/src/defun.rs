@@ -596,7 +596,7 @@ fn classify_return_type(ty: &syn::Type) -> RetKind {
                 // Exact Value-like
                 "Value" | "RuntimeValue" => RetKind::Value,
                 // Convertible into Value (align with get_object_kind FromValue set)
-                "LispString" | "Symbol" | "Vector" | "Cons" | "Function" | "i64" => RetKind::IntoValue,
+                "LispString" | "Symbol" | "Vector" | "Cons" | "Map" | "Function" | "i64" => RetKind::IntoValue,
                 // Fallback to requiring Into<Value> at compile-time
                 _ => RetKind::IntoValue,
             }
