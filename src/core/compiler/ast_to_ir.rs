@@ -6,37 +6,40 @@ use crate::{
     },
 };
 use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug, Clone)]
+#[derive(Error, Debug, Clone)]
 pub enum ConversionError {
+    #[error("Invalid syntax: {0}")]
     InvalidSyntax(String),
+    
+    #[error("Unsupported construct: {0}")]
     UnsupportedConstruct(String),
+    
+    #[error("Arity mismatch: expected {expected}, got {got}")]
     ArityMismatch { expected: usize, got: usize },
+    
+    #[error("Empty expression")]
     EmptyExpression,
+    
+    #[error("Invalid let binding")]
     InvalidLetBinding,
+    
+    #[error("Invalid lambda arguments")]
     InvalidLambdaArgs,
+    
+    #[error("Invalid quote expression")]
     InvalidQuote,
+    
+    #[error("Unexpected node: {0}")]
     UnexpectedNode(String),
+    
+    #[error("Missing keyword: {0}")]
+    MissingKeyword(String),
+    
+    #[error("Invalid argument type in position {position}")]
+    InvalidArgumentType { position: usize },
 }
-
-impl std::fmt::Display for ConversionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConversionError::InvalidSyntax(msg) => write!(f, "Invalid syntax: {}", msg),
-            ConversionError::UnsupportedConstruct(msg) => write!(f, "Unsupported construct: {}", msg),
-            ConversionError::ArityMismatch { expected, got } => {
-                write!(f, "Arity mismatch: expected {}, got {}", expected, got)
-            }
-            ConversionError::EmptyExpression => write!(f, "Empty expression"),
-            ConversionError::InvalidLetBinding => write!(f, "Invalid let binding"),
-            ConversionError::InvalidLambdaArgs => write!(f, "Invalid lambda arguments"),
-            ConversionError::InvalidQuote => write!(f, "Invalid quote expression"),
-            ConversionError::UnexpectedNode(msg) => write!(f, "Unexpected node: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for ConversionError {}
 
 pub struct AstToIrConverter;
 
@@ -93,8 +96,15 @@ impl AstToIrConverter {
                 if let Ok(keyword) = Keyword::try_from(name) {
                     Self::convert_keyword(keyword, args)
                 } else {
-                    // Regular function call
-                    Self::convert_call(nodes)
+                    // Check for special forms not in Keyword enum
+                    match name {
+                        "let" => Self::convert_let(args),
+                        "progn" => Self::convert_progn(args),
+                        "and" => Self::convert_and(args),
+                        "or" => Self::convert_or(args),
+                        "quote" => Self::convert_quote(args),
+                        _ => Self::convert_call(nodes),
+                    }
                 }
             }
             
@@ -256,11 +266,15 @@ impl AstToIrConverter {
             None
         };
 
-        // For now, just return basic interactive
-        Ok(Interactive {
-            arg_desc,
-            modes: vec![], // TODO: parse mode specifications
-        })
+        // Parse mode specifications if present
+        let mut modes = Vec::new();
+        for arg in args.iter().skip(if arg_desc.is_some() { 1 } else { 0 }) {
+            if let Node::Ident(ident) = arg {
+                modes.push(*ident);
+            }
+        }
+
+        Ok(Interactive { arg_desc, modes })
     }
 
     fn convert_let(args: &[Node]) -> Result<Expr, ConversionError> {
@@ -310,6 +324,42 @@ impl AstToIrConverter {
         }
     }
 
+    fn convert_progn(args: &[Node]) -> Result<Expr, ConversionError> {
+        let exprs = args.iter()
+            .map(|n| Self::node_to_expr(n.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Expr::Progn(exprs))
+    }
+
+    fn convert_and(args: &[Node]) -> Result<Expr, ConversionError> {
+        let exprs = args.iter()
+            .map(|n| Self::node_to_expr(n.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Expr::And(exprs))
+    }
+
+    fn convert_or(args: &[Node]) -> Result<Expr, ConversionError> {
+        let exprs = args.iter()
+            .map(|n| Self::node_to_expr(n.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Expr::Or(exprs))
+    }
+
+    fn convert_quote(args: &[Node]) -> Result<Expr, ConversionError> {
+        if args.len() != 1 {
+            return Err(ConversionError::ArityMismatch { 
+                expected: 1, 
+                got: args.len() 
+            });
+        }
+
+        let quoted_data = Self::node_to_quoted_data(&args[0], false)?;
+        Ok(Expr::Quote(Quote {
+            kind: QuoteKind::Quote,
+            expr: quoted_data,
+        }))
+    }
+
     fn convert_set(args: &[Node]) -> Result<Expr, ConversionError> {
         if args.len() != 2 {
             return Err(ConversionError::ArityMismatch { 
@@ -329,8 +379,34 @@ impl AstToIrConverter {
     }
 
     fn convert_setq(args: &[Node]) -> Result<Expr, ConversionError> {
-        // setq is like set but quotes the first argument
-        Self::convert_set(args)
+        // setq can handle multiple symbol-value pairs
+        if args.len() % 2 != 0 {
+            return Err(ConversionError::InvalidSyntax(
+                "setq requires an even number of arguments (symbol-value pairs)".to_string()
+            ));
+        }
+
+        if args.is_empty() {
+            return Ok(Expr::Literal(Literal::Boolean(false))); // nil
+        }
+
+        let mut assignments = Vec::new();
+        for chunk in args.chunks(2) {
+            if let Node::Ident(ident) = &chunk[0] {
+                let value = Box::new(Self::node_to_expr(chunk[1].clone())?);
+                assignments.push(Expr::Set(Set { symbol: *ident, value }));
+            } else {
+                return Err(ConversionError::InvalidSyntax(
+                    "setq requires symbols as variable names".to_string()
+                ));
+            }
+        }
+
+        if assignments.len() == 1 {
+            Ok(assignments.into_iter().next().unwrap())
+        } else {
+            Ok(Expr::Progn(assignments))
+        }
     }
 
     fn convert_setf(args: &[Node]) -> Result<Expr, ConversionError> {
@@ -386,14 +462,13 @@ impl AstToIrConverter {
 
         if let Node::Ident(name) = &args[0] {
             let value = if args.len() > 1 {
-                Some(Box::new(Self::node_to_expr(args[1].clone())?))
+                Box::new(Self::node_to_expr(args[1].clone())?)
             } else {
-                None
+                Box::new(Expr::Literal(Literal::Boolean(false))) // nil
             };
 
-            Ok(Expr::Set(Set { symbol: *name, value: value.unwrap_or_else(|| {
-                Box::new(Expr::Literal(Literal::Boolean(false))) // nil
-            })}))
+            // TODO: Handle optional docstring in args[2]
+            Ok(Expr::Set(Set { symbol: *name, value }))
         } else {
             Err(ConversionError::InvalidSyntax(
                 "defvar requires a symbol as variable name".to_string()
@@ -472,13 +547,13 @@ impl AstToIrConverter {
         }))
     }
 
-    fn convert_unquote(args: &[Node]) -> Result<Expr, ConversionError> {
+    fn convert_unquote(_args: &[Node]) -> Result<Expr, ConversionError> {
         Err(ConversionError::InvalidSyntax(
             "unquote outside of backquote context".to_string()
         ))
     }
 
-    fn convert_unquote_splice(args: &[Node]) -> Result<Expr, ConversionError> {
+    fn convert_unquote_splice(_args: &[Node]) -> Result<Expr, ConversionError> {
         Err(ConversionError::InvalidSyntax(
             "unquote-splice outside of backquote context".to_string()
         ))
@@ -572,6 +647,89 @@ mod tests {
             Node::Ident("condition".into()),
             Node::Integer(1),
             Node::Integer(2),
+        ]);
+        let expr = ast_to_ir(node).unwrap();
+        assert!(matches!(expr, Expr::If(_)));
+    }
+
+    #[test]
+    fn test_let_expression() {
+        let node = Node::Sexp(vec![
+            Node::Ident("let".into()),
+            Node::Sexp(vec![
+                Node::Sexp(vec![
+                    Node::Ident("x".into()),
+                    Node::Integer(42),
+                ]),
+            ]),
+            Node::Ident("x".into()),
+        ]);
+        let expr = ast_to_ir(node).unwrap();
+        assert!(matches!(expr, Expr::Let(_)));
+    }
+
+    #[test]
+    fn test_lambda_expression() {
+        let node = Node::Sexp(vec![
+            Node::Ident("lambda".into()),
+            Node::Sexp(vec![Node::Ident("x".into())]),
+            Node::Ident("x".into()),
+        ]);
+        let expr = ast_to_ir(node).unwrap();
+        assert!(matches!(expr, Expr::Lambda(_)));
+    }
+
+    #[test]
+    fn test_quote_expression() {
+        let node = Node::Sexp(vec![
+            Node::Ident("quote".into()),
+            Node::Ident("symbol".into()),
+        ]);
+        let expr = ast_to_ir(node).unwrap();
+        assert!(matches!(expr, Expr::Quote(Quote { kind: QuoteKind::Quote, .. })));
+    }
+
+    #[test]
+    fn test_backquote_with_unquote() {
+        let node = Node::Sexp(vec![
+            Node::Backquote,
+            Node::Sexp(vec![
+                Node::Ident("list".into()),
+                Node::Sexp(vec![
+                    Node::Unquote,
+                    Node::Ident("x".into()),
+                ]),
+            ]),
+        ]);
+        let expr = ast_to_ir(node).unwrap();
+        assert!(matches!(expr, Expr::Quote(Quote { kind: QuoteKind::Backquote, .. })));
+    }
+
+    #[test]
+    fn test_setq_multiple_pairs() {
+        let node = Node::Sexp(vec![
+            Node::Ident("setq".into()),
+            Node::Ident("x".into()),
+            Node::Integer(1),
+            Node::Ident("y".into()),
+            Node::Integer(2),
+        ]);
+        let expr = ast_to_ir(node).unwrap();
+        assert!(matches!(expr, Expr::Progn(_)));
+    }
+
+    #[test]
+    fn test_cond_expression() {
+        let node = Node::Sexp(vec![
+            Node::Ident("cond".into()),
+            Node::Sexp(vec![
+                Node::Ident("condition1".into()),
+                Node::Integer(1),
+            ]),
+            Node::Sexp(vec![
+                Node::Ident("condition2".into()),
+                Node::Integer(2),
+            ]),
         ]);
         let expr = ast_to_ir(node).unwrap();
         assert!(matches!(expr, Expr::If(_)));
