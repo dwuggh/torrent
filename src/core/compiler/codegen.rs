@@ -273,50 +273,46 @@ impl<'a> Codegen<'a> {
         parent_scope: &CompileScope<'s>,
         args: &[Node],
     ) -> CodegenResult<Value> {
-        let bindings_node = args.get(0).ok_or_else(|| {
-            CodegenError::InvalidLetSyntax("`let` requires bindings and a body".to_string())
-        })?;
+        let bindings_node = args.get(0).ok_or(CodegenError::LetMissingBindingsAndBody)?;
         let body = &args[1..];
 
         let Node::Sexp(bindings) = bindings_node else {
-            return Err(CodegenError::InvalidLetSyntax(
-                "`let` bindings must be a list".to_string(),
-            ));
+            return Err(CodegenError::LetBindingsNotList);
         };
 
         let mut new_vars = HashMap::new();
         let mut binding_values = Vec::new();
 
         for binding in bindings {
-            let Node::Sexp(pair) = binding else {
-                return Err(CodegenError::InvalidLetSyntax(
-                    "each `let` binding must be a list of (symbol value)".to_string(),
-                ));
-            };
-
-            let (ident_node, value_expr) = match pair.as_slice() {
-                [id, val] => (id, val),
-                _ => {
-                    return Err(CodegenError::InvalidLetSyntax(format!(
-                        "invalid `let` binding format, expecting (symbol value), got a list with {} elements",
-                        pair.len()
-                    )));
+            match binding {
+                // Case 1: Just a symbol (var) - bind to NIL
+                Node::Ident(ident_str) => {
+                    let sym = Symbol::from_string(ident_str);
+                    let var = self.builder.declare_var(types::I64);
+                    new_vars.insert(sym, var);
+                    binding_values.push(self.nil());
                 }
-            };
+                // Case 2: (var value) pair
+                Node::Sexp(pair) => {
+                    let (ident_node, value_expr) = match pair.as_slice() {
+                        [id, val] => (id, val),
+                        _ => return Err(CodegenError::LetInvalidBindingFormat),
+                    };
 
-            let Node::Ident(ident_str) = ident_node else {
-                return Err(CodegenError::InvalidLetSyntax(
-                    "`let` binding must have a symbol as the first element".to_string(),
-                ));
-            };
+                    let Node::Ident(ident_str) = ident_node else {
+                        return Err(CodegenError::LetBindingNotSymbol);
+                    };
 
-            let sym = Symbol::from_string(ident_str);
-            let var = self.builder.declare_var(types::I64);
-            new_vars.insert(sym, var);
+                    let sym = Symbol::from_string(ident_str);
+                    let var = self.builder.declare_var(types::I64);
+                    new_vars.insert(sym, var);
 
-            // The values are evaluated in the *parent* scope.
-            let value = self.translate_node(value_expr, parent_scope)?;
-            binding_values.push(value);
+                    // The values are evaluated in the *parent* scope.
+                    let value = self.translate_node(value_expr, parent_scope)?;
+                    binding_values.push(value);
+                }
+                _ => return Err(CodegenError::LetInvalidBindingFormat),
+            }
         }
 
         let new_scope = FrameScope::new(new_vars, parent_scope, true, false).into();
@@ -325,9 +321,14 @@ impl<'a> Codegen<'a> {
         if let CompileScope::Frame(frame) = &new_scope {
             // This re-iterates `bindings` which is a bit inefficient but safe and simple.
             for (binding, value) in bindings.iter().zip(binding_values) {
-                let Node::Sexp(pair) = binding else { unreachable!() };
-                let Node::Ident(ident_str) = &pair[0] else { unreachable!() };
-                let sym = Symbol::from_string(ident_str);
+                let sym = match binding {
+                    Node::Ident(ident_str) => Symbol::from_string(ident_str),
+                    Node::Sexp(pair) => {
+                        let Node::Ident(ident_str) = &pair[0] else { unreachable!() };
+                        Symbol::from_string(ident_str)
+                    }
+                    _ => unreachable!(),
+                };
 
                 let var = frame.slots.get(sym).unwrap();
                 self.builder.def_var(var, value);

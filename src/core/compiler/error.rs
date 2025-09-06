@@ -8,8 +8,17 @@ pub enum CodegenError {
     #[error("Invalid function argument format")]
     InvalidArgFormat,
 
-    #[error("Invalid let syntax: {0}")]
-    InvalidLetSyntax(String),
+    #[error("Let requires bindings and body")]
+    LetMissingBindingsAndBody,
+
+    #[error("Let bindings must be a list")]
+    LetBindingsNotList,
+
+    #[error("Let binding must be symbol or (symbol value)")]
+    LetInvalidBindingFormat,
+
+    #[error("Let binding symbol must be an identifier")]
+    LetBindingNotSymbol,
 
     #[error("Invalid s-expression head. Expected symbol, got: {0:?}")]
     InvalidSexpHead(Node),
