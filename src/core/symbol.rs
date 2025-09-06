@@ -5,9 +5,10 @@ use std::sync::{LazyLock, RwLock};
 // use sym::BUILTIN_SYMBOLS;
 
 use dashmap::DashMap;
-use lasso::{Capacity, Key, Spur, ThreadedRodeo};
+use lasso::{Key, Spur};
 use proc_macros::Trace;
 
+use crate::core::ident::Ident;
 use crate::gc::Trace;
 use crate::{
     core::value::{TaggedPtr, Value},
@@ -22,7 +23,7 @@ pub static INTERNED_SYMBOLS: LazyLock<SymbolMap> = LazyLock::new(|| {
 
 #[derive(Debug)]
 pub struct SymbolMap {
-    map: DashMap<Spur, SymbolCell>,
+    map: DashMap<Symbol, SymbolCell>,
 }
 
 unsafe impl Trace for SymbolMap {
@@ -45,14 +46,14 @@ impl SymbolMap {
         Self { map }
     }
 
-    pub fn map(&self) -> &DashMap<Spur, SymbolCell>  {
+    pub fn map(&self) -> &DashMap<Symbol, SymbolCell>  {
         &self.map
     }
 
     pub fn intern(&self, symbol: Symbol, special: bool) -> Symbol {
         // Ensure the symbol cell exists in the map
-        if !self.map.contains_key(&symbol.name) {
-            self.map.insert(symbol.name, SymbolCell::new(symbol.name, special));
+        if !self.map.contains_key(&symbol) {
+            self.map.insert(symbol, SymbolCell::new(symbol, special));
         }
         symbol
     }
@@ -62,37 +63,49 @@ impl SymbolMap {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Trace)]
 pub struct Symbol {
     #[no_trace]
-    pub name: Spur,
+    pub name: Ident,
     phantom: PhantomData<SymbolCell>,
 }
 
+impl From<Ident> for Symbol {
+    fn from(value: Ident) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<&Ident> for Symbol {
+    fn from(value: &Ident) -> Self {
+        Self::new(*value)
+    }
+}
+
 impl Symbol {
-    pub fn new(name: Spur) -> Self {
+    pub fn new(name: Ident) -> Self {
         Self {
             name,
             phantom: PhantomData,
         }
     }
 
-    pub fn from_string(ident: &str, interner: &mut lasso::ThreadedRodeo) -> Self {
-        let spur = interner.get_or_intern(ident);
-        let symbol = Symbol::new(spur);
+    pub fn from_string(ident: &str) -> Self {
         let special = ident.starts_with(':');
+        let ident = ident.into();
+        let symbol = Symbol::new(ident);
         INTERNED_SYMBOLS.intern(symbol, special);
         symbol
     }
 
-    pub fn name<'a>(&self, interner: &'a lasso::ThreadedRodeo) -> &'a str {
-        interner.resolve(&self.name)
+    pub fn name<'a>(&self) -> &'a str {
+        self.name.text()
     }
 
     // TODO
-    pub(crate) fn get(&self) -> Option<dashmap::mapref::one::Ref<'_, Spur, SymbolCell>> {
-        INTERNED_SYMBOLS.map.get(&self.name)
+    pub(crate) fn get(&self) -> Option<dashmap::mapref::one::Ref<'_, Symbol, SymbolCell>> {
+        INTERNED_SYMBOLS.map.get(&self)
     }
 
-    pub fn get_or_init(&self) -> dashmap::mapref::one::RefMut<'_, Spur, SymbolCell> {
-        INTERNED_SYMBOLS.map.get_mut(&self.name).unwrap()
+    pub fn get_or_init(&self) -> dashmap::mapref::one::RefMut<'_, Symbol, SymbolCell> {
+        INTERNED_SYMBOLS.map.get_mut(&self).unwrap()
     }
 }
 
@@ -100,22 +113,21 @@ impl TaggedPtr for Symbol {
     const TAG: LispType = LispType::Symbol;
 
     unsafe fn cast(val: u64) -> Self {
-        let key = val as usize;
         Symbol {
-            name: Spur::try_from_usize(key).unwrap(),
+            name: val.into(),
             phantom: PhantomData,
         }
     }
 
     unsafe fn get_untagged_data(self) -> u64 {
-        self.name.into_usize() as u64
+        self.name.into()
     }
 }
 
 #[derive(Debug, Trace, Clone, Copy)]
 pub struct SymbolCellData {
     #[no_trace]
-    pub name: Spur,
+    pub name: Symbol,
     #[no_trace]
     pub interned: bool,
     #[no_trace]
@@ -128,7 +140,7 @@ pub struct SymbolCellData {
 pub struct SymbolCell(pub Gc<SymbolCellData>);
 
 impl SymbolCellData {
-    fn new(name: Spur, special: bool) -> Self {
+    fn new(name: Symbol, special: bool) -> Self {
         Self {
             name,
             interned: true,
@@ -140,7 +152,7 @@ impl SymbolCellData {
 }
 
 impl SymbolCell {
-    pub fn new(name: Spur, special: bool) -> Self {
+    pub fn new(name: Symbol, special: bool) -> Self {
         SymbolCell(Gc::new(SymbolCellData::new(name, special)))
     }
 

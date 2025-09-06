@@ -51,8 +51,8 @@ impl Node {
     }
 
     // Accessors / as-views
-    pub fn as_ident<'a>(&self, interner: &'a lasso::ThreadedRodeo) -> Option<&'a str> {
-        if let Node::Ident(ident) = self { Some(ident.name(interner)) } else { None }
+    pub fn as_ident<'a>(&self) -> Option<&'a str> {
+        if let Node::Ident(ident) = self { Some(ident.text()) } else { None }
     }
 
     pub fn as_integer(&self) -> Option<i64> {
@@ -156,9 +156,7 @@ impl Node {
     }
 }
 
-pub fn elisp_parser_with_interner<'a>(
-    interner: &'a mut lasso::ThreadedRodeo
-) -> impl Parser<'a, &'a str, Vec<Node>, extra::Err<Rich<'a, char>>> + 'a {
+pub fn elisp_parser<'a>() -> impl Parser<'a, &'a str, Vec<Node>, extra::Err<Rich<'a, char>>> + 'a {
     // A parser for a single S-expression node.
     // It's recursive to handle nested lists and vectors.
     let node = recursive(|node| {
@@ -243,7 +241,7 @@ pub fn elisp_parser_with_interner<'a>(
             .repeated()
             .at_least(1)
             .to_slice()
-            .map(move |s: &str| Node::Ident(Ident::from_string(s, interner)));
+            .map(move |s: &str| Node::Ident(Ident::from_string(s)));
 
         // Combine all atomic parsers. Order matters here.
         let atom = nil
@@ -283,7 +281,7 @@ pub fn elisp_parser_with_interner<'a>(
         // These parsers "desugar" the quote syntax into a standard list form.
         let quote = just('\'')
             .ignore_then(node.clone())
-            .map(move |n| Node::Sexp(vec![Node::Ident(Ident::from_string("quote", interner)), n]));
+            .map(move |n| Node::Sexp(vec![Node::Ident(Ident::from_string("quote")), n]));
 
         let backquote = just('`')
             .ignore_then(node.clone())
@@ -321,28 +319,6 @@ pub fn elisp_parser_with_interner<'a>(
     node.repeated().collect::<Vec<_>>().then_ignore(end())
 }
 
-pub fn elisp_parser<'a>() -> impl Parser<'a, &'a str, Vec<Node>, extra::Err<Rich<'a, char>>> {
-    let mut interner = lasso::ThreadedRodeo::new();
-    elisp_parser_with_interner(&mut interner)
-}
-
-pub struct ParseContext {
-    pub interner: lasso::ThreadedRodeo,
-}
-
-impl ParseContext {
-    pub fn new() -> Self {
-        Self {
-            interner: lasso::ThreadedRodeo::new(),
-        }
-    }
-
-    pub fn parse(&mut self, source: &str) -> Result<Vec<Node>, Vec<Rich<'_, char>>> {
-        elisp_parser_with_interner(&mut self.interner)
-            .parse(source)
-            .into_result()
-    }
-}
 
 pub fn special_chars(c: char) -> bool {
     let chars = "#[]()\\\"\',";
@@ -404,9 +380,9 @@ mod tests {
         assert_eq!(parse_one("nil").unwrap(), Node::Nil);
         assert_eq!(
             parse_one("my-symbol").unwrap(),
-            Node::Ident("my-symbol".to_string())
+            Node::Ident("my-symbol".into())
         );
-        assert_eq!(parse_one("+").unwrap(), Node::Ident("+".to_string()));
+        assert_eq!(parse_one("+").unwrap(), Node::Ident("+".into()));
         assert_eq!(
             parse_one(r#""hello world""#).unwrap(),
             Node::Str("hello world".to_string())
@@ -423,8 +399,8 @@ mod tests {
     fn test_parse_list_and_nil() {
         assert_eq!(parse_one("()").unwrap(), Node::Nil);
         let expected = Node::Sexp(vec![
-            Node::Ident("a".to_string()),
-            Node::Ident("b".to_string()),
+            Node::Ident("a".into()),
+            Node::Ident("b".into()),
             Node::Integer(123),
         ]);
         assert_eq!(parse_one("(a b 123)").unwrap(), expected);
@@ -433,12 +409,12 @@ mod tests {
     #[test]
     fn test_nested_list() {
         let expected = Node::Sexp(vec![
-            Node::Ident("a".to_string()),
+            Node::Ident("a".into()),
             Node::Sexp(vec![
-                Node::Ident("b".to_string()),
-                Node::Ident("c".to_string()),
+                Node::Ident("b".into()),
+                Node::Ident("c".into()),
             ]),
-            Node::Ident("d".to_string()),
+            Node::Ident("d".into()),
         ]);
         assert_eq!(parse_one("(a (b c) d)").unwrap(), expected);
     }
@@ -448,7 +424,7 @@ mod tests {
         let expected = Node::Vector(vec![
             Node::Integer(1),
             Node::Float(2.0),
-            Node::Str("three".to_string()),
+            Node::Str("three".into()),
         ]);
         assert_eq!(parse_one("[1 2.0 \"three\"]").unwrap(), expected);
     }
@@ -461,9 +437,9 @@ mod tests {
               c) ; final comment
         "#;
         let expected = Node::Sexp(vec![
-            Node::Ident("a".to_string()),
-            Node::Ident("b".to_string()),
-            Node::Ident("c".to_string()),
+            Node::Ident("a".into()),
+            Node::Ident("b".into()),
+            Node::Ident("c".into()),
         ]);
         assert_eq!(parse_one(src).unwrap(), expected);
     }
@@ -472,29 +448,29 @@ mod tests {
     fn test_desugar_quotes() {
         // 'foo -> (quote foo)
         let expected_quote = Node::Sexp(vec![
-            Node::Ident("quote".to_string()),
-            Node::Ident("foo".to_string()),
+            Node::Ident("quote".into()),
+            Node::Ident("foo".into()),
         ]);
         assert_eq!(parse_one("'foo").unwrap(), expected_quote);
 
         // `foo -> (backquote foo)
         let expected_backquote = Node::Sexp(vec![
             Node::Backquote,
-            Node::Ident("foo".to_string()),
+            Node::Ident("foo".into()),
         ]);
         assert_eq!(parse_one("`foo").unwrap(), expected_backquote);
 
         // ,foo -> (unquote foo)
         let expected_unquote = Node::Sexp(vec![
             Node::Unquote,
-            Node::Ident("foo".to_string()),
+            Node::Ident("foo".into()),
         ]);
         assert_eq!(parse_one(",foo").unwrap(), expected_unquote);
 
         // ,@foo -> (unquotesplice foo)
         let expected_splice = Node::Sexp(vec![
             Node::UnquoteSplice,
-            Node::Ident("foo".to_string()),
+            Node::Ident("foo".into()),
         ]);
         assert_eq!(parse_one(",@foo").unwrap(), expected_splice);
     }
@@ -509,8 +485,8 @@ mod tests {
         assert_eq!(
             ast[2],
             Node::Sexp(vec![
-                Node::Ident("a".to_string()),
-                Node::Ident("b".to_string())
+                Node::Ident("a".into()),
+                Node::Ident("b".into())
             ])
         );
     }

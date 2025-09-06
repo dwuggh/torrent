@@ -17,9 +17,9 @@ use crate::core::compiler::scope::FrameScope;
 use crate::core::compiler::scope::Val;
 use crate::core::env::Environment;
 use crate::core::function::Function;
+use crate::core::ident::Ident;
 use crate::core::string::LispString;
 use crate::core::symbol::Symbol;
-use crate::core::ident::Ident;
 use crate::core::value::TaggedPtr;
 use crate::core::value::NIL;
 use crate::Value as RuntimeValue;
@@ -66,10 +66,7 @@ impl<'a> Codegen<'a> {
             let Node::Ident(arg) = arg else {
                 return Err(CodegenError::InvalidArgFormat);
             };
-            // Note: This will need an interner parameter to be passed to this function
-            // For now, creating a temporary one - this should be refactored
-            let mut temp_interner = lasso::ThreadedRodeo::new();
-            let sym = Symbol::from_string(arg.name(&temp_interner), &mut temp_interner);
+            let sym = arg.into();
             let val = builder.block_params(entry_block)[i];
             let var = builder.declare_var(types::I64);
             variables.insert(sym, var);
@@ -97,7 +94,11 @@ impl<'a> Codegen<'a> {
         self.builder.ins().iconst(types::I64, NIL)
     }
 
-    pub fn translate_nodes<'s>(&mut self, nodes: &[Node], scope: &CompileScope<'s>) -> CodegenResult<Value> {
+    pub fn translate_nodes<'s>(
+        &mut self,
+        nodes: &[Node],
+        scope: &CompileScope<'s>,
+    ) -> CodegenResult<Value> {
         nodes
             .iter()
             .map(|n| self.translate_node(n, scope))
@@ -135,23 +136,11 @@ impl<'a> Codegen<'a> {
                     let func_id = *self.builtin_funcs.get("--load-captured").unwrap();
                     let sym = translate_value(&mut self.builder, symbol.tag());
 
-                    let load = self
-                        .module
-                        .declare_func_in_func(func_id, self.builder.func);
-                    let inst = self
-                        .builder
-                        .ins()
-                        .call(load, &[sym, self.closure]);
+                    let load = self.module.declare_func_in_func(func_id, self.builder.func);
+                    let inst = self.builder.ins().call(load, &[sym, self.closure]);
                     self.builder.inst_results(inst)[0]
                 }
             })
-    }
-
-    pub fn resolve_captured(&mut self) {
-        // TODO should be called inside a lexical binding
-        // a lexical bind scope has a symbol map for local vars
-        // look them up and store
-        // self.resolved;
     }
 
     fn translate_arg_nodes<'s>(
@@ -159,7 +148,10 @@ impl<'a> Codegen<'a> {
         nodes: &[Node],
         scope: &CompileScope<'s>,
     ) -> CodegenResult<Vec<Value>> {
-        nodes.iter().map(|n| self.translate_node(n, scope)).collect()
+        nodes
+            .iter()
+            .map(|n| self.translate_node(n, scope))
+            .collect()
     }
 
     pub fn translate_node<'s>(
@@ -169,10 +161,7 @@ impl<'a> Codegen<'a> {
     ) -> CodegenResult<Value> {
         match node {
             Node::Ident(ident) => {
-                // Note: This will need an interner parameter to be passed to this function
-                // For now, creating a temporary one - this should be refactored
-                let mut temp_interner = lasso::ThreadedRodeo::new();
-                let symbol = Symbol::from_string(ident.name(&temp_interner), &mut temp_interner);
+                let symbol = ident.into();
                 let val = self.load_symbol(scope, symbol, false)?;
                 Ok(val)
             }
@@ -185,11 +174,8 @@ impl<'a> Codegen<'a> {
                 let arg_nodes = &nodes[1..];
 
                 if let Node::Ident(fn_name) = head {
-                    // Note: This will need an interner parameter to be passed to this function
-                    // For now, creating a temporary one - this should be refactored
-                    let mut temp_interner = lasso::ThreadedRodeo::new();
-                    let fn_name_str = fn_name.name(&temp_interner);
-                    
+                    let fn_name_str = fn_name.text();
+
                     // Handle special forms that don't evaluate all their arguments upfront
                     match fn_name_str {
                         "let" => {
@@ -210,11 +196,22 @@ impl<'a> Codegen<'a> {
                         _ => (), // Not a builtin, fall through to dynamic dispatch
                     }
 
-                    let fn_sym = Symbol::from_string(fn_name_str, &mut temp_interner);
+                    let fn_sym = fn_name.into();
                     let func = self.load_symbol(scope, fn_sym, true)?;
 
-                    let args_ptr = args.as_ptr();
-                    let args_ptr = self.builder.ins().iconst(types::I64, args_ptr as i64);
+                    let slot = self.builder.create_sized_stack_slot(StackSlotData {
+                        kind: StackSlotKind::ExplicitSlot,
+                        size: 8 * args.len() as u32,
+                        align_shift: 0,
+                    });
+
+                    for (i, val) in args.iter().enumerate() {
+                        self.builder.ins().stack_store(*val, slot, i as i32 * 8);
+                    }
+
+
+                    let args_ptr = self.builder.ins().stack_addr(types::I64, slot, 0);
+                    // let args_ptr = self.builder.ins().iconst(types::I64, args_ptr as i64);
                     let args_len = self.builder.ins().iconst(types::I64, args.len() as i64);
                     let env_ptr = scope.get_root() as *const Environment;
                     let env_ptr = self.builder.ins().iconst(types::I64, env_ptr as i64);
@@ -293,10 +290,11 @@ impl<'a> Codegen<'a> {
         let else_block = self.builder.create_block();
         let merge_block = self.builder.create_block();
 
-
         self.builder.append_block_param(merge_block, types::I64);
 
-        self.builder.ins().brif(cond, then_block, &[], else_block, &[]);
+        self.builder
+            .ins()
+            .brif(cond, then_block, &[], else_block, &[]);
 
         self.builder.switch_to_block(then_block);
         self.builder.seal_block(then_block);
@@ -329,16 +327,12 @@ impl<'a> Codegen<'a> {
         let mut new_vars = HashMap::new();
         let mut binding_values = Vec::new();
 
-        // Note: This will need an interner parameter to be passed to this function
-        // For now, creating a temporary one - this should be refactored
-        let mut temp_interner = lasso::ThreadedRodeo::new();
-        
         for binding in bindings {
             match binding {
                 // Case 1: Just a symbol (var) - bind to NIL
                 Node::Ident(ident) => {
-                    let ident_str = ident.name(&temp_interner);
-                    let sym = Symbol::from_string(ident_str, &mut temp_interner);
+                    let ident_str = ident.text();
+                    let sym = Symbol::from_string(ident_str);
                     let var = self.builder.declare_var(types::I64);
                     new_vars.insert(sym, var);
                     binding_values.push(self.nil());
@@ -354,8 +348,8 @@ impl<'a> Codegen<'a> {
                         return Err(CodegenError::LetBindingNotSymbol);
                     };
 
-                    let ident_str = ident.name(&temp_interner);
-                    let sym = Symbol::from_string(ident_str, &mut temp_interner);
+                    let ident_str = ident.text();
+                    let sym = Symbol::from_string(ident_str);
                     let var = self.builder.declare_var(types::I64);
                     new_vars.insert(sym, var);
 
@@ -375,13 +369,15 @@ impl<'a> Codegen<'a> {
             for (binding, value) in bindings.iter().zip(binding_values) {
                 let sym = match binding {
                     Node::Ident(ident) => {
-                        let ident_str = ident.name(&temp_interner);
-                        Symbol::from_string(ident_str, &mut temp_interner)
+                        let ident_str = ident.text();
+                        Symbol::from_string(ident_str)
                     }
                     Node::Sexp(pair) => {
-                        let Node::Ident(ident) = &pair[0] else { unreachable!() };
-                        let ident_str = ident.name(&temp_interner);
-                        Symbol::from_string(ident_str, &mut temp_interner)
+                        let Node::Ident(ident) = &pair[0] else {
+                            unreachable!()
+                        };
+                        let ident_str = ident.text();
+                        Symbol::from_string(ident_str)
                     }
                     _ => unreachable!(),
                 };
@@ -413,7 +409,6 @@ impl<'a> Codegen<'a> {
 
         Ok(result)
     }
-
 }
 
 fn translate_value(builder: &mut FunctionBuilder, val: RuntimeValue) -> Value {

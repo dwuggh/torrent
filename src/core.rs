@@ -7,3 +7,4 @@ pub mod env;
 pub mod function;
 pub mod compiler;
 pub mod runtime;
+pub mod ident;

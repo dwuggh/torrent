@@ -18,7 +18,7 @@ impl Environment {
     // Global lookup using INTERNED_SYMBOLS; no per-env state yet.
     pub fn load_symbol(&self, symbol: Symbol, load_function_cell: bool) -> Option<Value> {
         let map = INTERNED_SYMBOLS.map();
-        if let Some(cell) = map.get(&symbol.name) {
+        if let Some(cell) = map.get(&symbol) {
             let data = cell.data();
             return if load_function_cell { data.func } else { data.value };
         }
