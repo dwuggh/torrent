@@ -70,12 +70,15 @@ impl<'a> Codegen<'a> {
             builder.def_var(var, val);
         }
 
+        let func_runtime_val = Function::new_closure(0 as *const u8, func_id).tag();
+        let closure_val = translate_value(&mut builder, func_runtime_val);
+
         let codegen = Self {
             module,
             builtin_funcs,
             builder,
-            func: RuntimeValue(0),
-            closure: None,
+            func: func_runtime_val,
+            closure: Some(closure_val),
             func_id,
         };
 
@@ -258,11 +261,6 @@ impl<'a> Codegen<'a> {
             &mut ctx,
             args,
         )?;
-
-        let func_runtime_val = Function::new_closure(0 as *const u8, codegen.func_id).tag();
-        let closure_val = translate_value(&mut codegen.builder, func_runtime_val);
-        codegen.func = func_runtime_val;
-        codegen.closure = Some(closure_val);
 
         let new_scope = FrameScope::new(arg_vars, scope, false, true).into();
         let result = codegen.translate_nodes(body, &new_scope)?;
