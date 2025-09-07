@@ -49,8 +49,9 @@ impl<'a> Codegen<'a> {
         args: &[Arg],
         parent_scope: &'s CompileScope,
     ) -> CodegenResult<(Self, CompileScope<'s>)> {
+        tracing::debug!("Creating new codegen with {} args", args.len());
+        
         // make signature
-
         let sig = &mut ctx.func.signature;
         // args_ptr: pointer to arguments array
         sig.params.push(AbiParam::new(types::I64));
@@ -60,7 +61,12 @@ impl<'a> Codegen<'a> {
         sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
 
+        tracing::debug!("Function signature created with {} params, {} returns", 
+                       sig.params.len(), sig.returns.len());
+
         let func_id = module.declare_anonymous_function(&ctx.func.signature)?;
+        tracing::debug!("Declared anonymous function with id: {:?}", func_id);
+        
         let mut builder = FunctionBuilder::new(&mut ctx.func, fctx);
 
         let entry_block = builder.create_block();
@@ -70,6 +76,8 @@ impl<'a> Codegen<'a> {
         // builder.block_params(entry_block);
 
         let block_params = builder.block_params(entry_block);
+        tracing::debug!("Entry block has {} parameters", block_params.len());
+        
         let args_ptr = block_params[0];
         let args_cnt = block_params[1];
         let env = block_params[2];
@@ -81,6 +89,8 @@ impl<'a> Codegen<'a> {
             let var = builder.declare_var(types::I64);
             variables.insert(sym, var);
 
+            tracing::debug!("Loading argument {} ({})", i, arg.text());
+            
             // Load argument from the arguments array
             let offset = builder.ins().iconst(types::I64, (i * 8) as i64);
             let arg_addr = builder.ins().iadd(args_ptr, offset);
@@ -139,11 +149,21 @@ impl<'a> Codegen<'a> {
     }
 
     fn call(&mut self, func_name: &str, args: &[Value]) -> &[Value] {
-        debug!("calling apply");
-        let func_id = *self.builtin_funcs.get(func_name).unwrap();
+        tracing::debug!("calling function: {}", func_name);
+        tracing::debug!("function args count: {}", args.len());
+        
+        let func_id = *self.builtin_funcs.get(func_name)
+            .unwrap_or_else(|| panic!("Function '{}' not found in builtin_funcs", func_name));
+        
+        tracing::debug!("function id: {:?}", func_id);
+        
         let func_ref = self.module.declare_func_in_func(func_id, self.builder.func);
         let inst = self.builder.ins().call(func_ref, args);
-        self.builder.inst_results(inst)
+        let results = self.builder.inst_results(inst);
+        
+        tracing::debug!("function '{}' returned {} results", func_name, results.len());
+        
+        results
     }
 
     pub fn load_symbol<'s>(
@@ -152,12 +172,18 @@ impl<'a> Codegen<'a> {
         symbol: Symbol,
         load_function_cell: bool,
     ) -> CodegenResult<Value> {
+        tracing::debug!("Loading symbol: {} (function_cell: {})", symbol.name.text(), load_function_cell);
+        
         scope
             .load_symbol(symbol, load_function_cell, self.func, &mut self.builder)
             .ok_or(CodegenError::SymbolNotFound(symbol))
             .map(|val| match val {
-                Val::Value(value) => value,
+                Val::Value(value) => {
+                    tracing::debug!("Symbol loaded as direct value");
+                    value
+                },
                 Val::Ident(ident) => {
+                    tracing::debug!("Symbol is captured, loading from closure: {}", ident.text());
                     // this value is captured, we load it from the map for captured values
                     // through compiler, so it gets loaded at runtime
                     let func_id = *self.builtin_funcs.get("load_captured").unwrap();
@@ -239,10 +265,12 @@ impl<'a> Codegen<'a> {
         call: &Call,
         scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
+        tracing::debug!("Translating function call with {} arguments", call.args.len());
 
         let func = self.translate_expr(call.func.as_ref(), scope, true)?;
         let args = self.translate_arg_exprs(&call.args, scope)?;
 
+        tracing::debug!("Creating stack slot for {} arguments", args.len());
         let slot = self.builder.create_sized_stack_slot(StackSlotData {
             kind: StackSlotKind::ExplicitSlot,
             size: 8 * args.len() as u32,
@@ -250,13 +278,16 @@ impl<'a> Codegen<'a> {
         });
 
         for (i, val) in args.iter().enumerate() {
+            tracing::debug!("Storing argument {} to stack", i);
             self.builder.ins().stack_store(*val, slot, i as i32 * 8);
         }
 
         let args_ptr = self.builder.ins().stack_addr(types::I64, slot, 0);
         let args_cnt = self.builder.ins().iconst(types::I64, args.len() as i64);
 
+        tracing::debug!("Calling apply function");
         let res = self.call("apply", &[func, args_ptr, args_cnt, self.env])[0];
+        tracing::debug!("Apply function returned successfully");
         Ok(res)
     }
 
@@ -490,7 +521,7 @@ impl<'a> Codegen<'a> {
         lambda: &Lambda,
         scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
-        tracing::info!("{lambda:?}");
+        tracing::info!("Translating lambda with {} args: {lambda:?}", lambda.args.len());
         let mut fctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
 
@@ -503,6 +534,7 @@ impl<'a> Codegen<'a> {
             scope,
         )?;
 
+        tracing::debug!("Translating lambda body with {} expressions", lambda.body.len());
         let result = codegen.translate_exprs(&lambda.body, &new_scope)?;
 
         let func_id = codegen.func_id;
@@ -510,16 +542,18 @@ impl<'a> Codegen<'a> {
         let closure_val = codegen.closure;
         let func = codegen.finalize(result);
 
+        tracing::debug!("Defining lambda function with id: {:?}", func_id);
         self.module.define_function(func_id, &mut ctx)?;
         self.module.clear_context(&mut ctx);
 
+        tracing::debug!("Finalizing lambda function definitions");
         self.module.finalize_definitions()?;
         let func_ptr = self.module.get_finalized_function(func_id);
         let closure: Function = func.try_into().unwrap();
         closure.set_func_ptr(func_ptr);
 
         let c = closure.inner.get();
-        tracing::info!("func: {c:?}");
+        tracing::info!("Lambda function created: {c:?}");
 
         Ok(closure_val)
     }
