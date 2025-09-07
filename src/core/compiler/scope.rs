@@ -63,53 +63,6 @@ impl CompileScope<'_> {
     //     }
     // }
 
-    pub fn load_symbol(
-        &self,
-        symbol: Symbol,
-        load_function_cell: bool,
-        caller: RuntimeValue,
-        builder: &mut FunctionBuilder,
-    ) -> Option<Val> {
-        self.load_symbol_inner(symbol, load_function_cell, caller, builder, true)
-    }
-
-    fn load_symbol_inner(
-        &self,
-        symbol: Symbol,
-        load_function_cell: bool,
-        caller: RuntimeValue,
-        builder: &mut FunctionBuilder,
-        same_func_scope: bool,
-    ) -> Option<Val> {
-        match self {
-            CompileScope::Global(_) => {
-                let val = Environment::default().load_symbol(symbol, load_function_cell)?;
-                let val = builder.ins().iconst(types::I64, val.0 as i64);
-                Some(Val::Value(val))
-            }
-            CompileScope::Frame(frame) => match frame.slots.get(symbol.name) {
-                Some(var) => {
-                    if same_func_scope {
-                        Some(Val::Value(builder.use_var(var)))
-                    } else {
-                        if let Some(lexical_binds) = frame.lexical_binds.as_ref() {
-                            if let Some(captured) = lexical_binds
-                                .borrow_mut()
-                                .get_mut(&symbol.into()) { captured.insert(caller); }
-                        }
-                        Some(Val::Ident(symbol.into()))
-                    }
-                }
-                None => frame.parent.load_symbol_inner(
-                    symbol,
-                    load_function_cell,
-                    caller,
-                    builder,
-                    same_func_scope && frame.is_func,
-                ),
-            },
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

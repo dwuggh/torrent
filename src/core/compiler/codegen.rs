@@ -14,6 +14,7 @@ use crate::core::compiler::ir::{
 use crate::core::compiler::scope::CompileScope;
 use crate::core::compiler::scope::FrameScope;
 use crate::core::compiler::scope::Val;
+use crate::core::env::Environment;
 use crate::core::function::Function;
 use crate::core::string::LispString;
 use crate::core::symbol::Symbol;
@@ -179,8 +180,7 @@ impl<'a> Codegen<'a> {
             load_function_cell
         );
 
-        scope
-            .load_symbol(symbol, load_function_cell, self.func, &mut self.builder)
+        self.load_symbol_inner(scope, symbol, load_function_cell, true)
             .ok_or(CodegenError::SymbolNotFound(symbol))
             .map(|val| match val {
                 Val::Value(value) => {
@@ -202,6 +202,42 @@ impl<'a> Codegen<'a> {
                     self.builder.inst_results(inst)[0]
                 }
             })
+    }
+
+    fn load_symbol_inner<'s>(
+        &mut self,
+        scope: &CompileScope<'s>,
+        symbol: Symbol,
+        load_function_cell: bool,
+        same_func_scope: bool,
+    ) -> Option<Val> {
+        match scope {
+            CompileScope::Global(_) => {
+                let val = Environment::default().load_symbol(symbol, load_function_cell)?;
+                let val = self.builder.ins().iconst(types::I64, val.0 as i64);
+                Some(Val::Value(val))
+            }
+            CompileScope::Frame(frame) => match frame.slots.get(symbol.name) {
+                Some(var) => {
+                    if same_func_scope {
+                        Some(Val::Value(self.builder.use_var(var)))
+                    } else {
+                        if let Some(lexical_binds) = frame.lexical_binds.as_ref() {
+                            if let Some(captured) = lexical_binds
+                                .borrow_mut()
+                                .get_mut(&symbol.into()) { captured.insert(self.func); }
+                        }
+                        Some(Val::Ident(symbol.into()))
+                    }
+                }
+                None => self.load_symbol_inner(
+                    frame.parent,
+                    symbol,
+                    load_function_cell,
+                    same_func_scope && frame.is_func,
+                ),
+            },
+        }
     }
 
     fn translate_arg_exprs<'s>(
