@@ -9,6 +9,7 @@ use syn::{
 };
 
 mod defun;
+mod defun_internal;
 mod variantly;
 
 /// ## `#[defun]`
@@ -43,6 +44,19 @@ pub fn defun(attr_ts: TokenStream, fn_ts: TokenStream) -> TokenStream {
     match NestedMeta::parse_meta_list(attr_ts.into()) {
         Ok(args) => match defun::Spec::from_list(&args) {
             Ok(spec) => defun::expand(function, spec).into(),
+            Err(e) => TokenStream::from(e.write_errors()),
+        },
+        Err(e) => TokenStream::from(DError::from(e).write_errors()),
+    }
+}
+
+#[proc_macro_attribute]
+pub fn internal_fn(attr_ts: TokenStream, fn_ts: TokenStream) -> TokenStream {
+    let function = parse_macro_input!(fn_ts as defun::Function);
+
+    match NestedMeta::parse_meta_list(attr_ts.into()) {
+        Ok(args) => match defun_internal::Spec::from_list(&args) {
+            Ok(spec) => defun_internal::expand(function, spec).into(),
             Err(e) => TokenStream::from(e.write_errors()),
         },
         Err(e) => TokenStream::from(DError::from(e).write_errors()),
