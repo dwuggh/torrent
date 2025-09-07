@@ -9,6 +9,7 @@ use cranelift_jit::JITModule;
 use cranelift_module::DataDescription;
 use cranelift_module::FuncId;
 use cranelift_module::Module;
+use tracing::debug;
 
 use crate::core::compiler::error::{CodegenError, CodegenResult};
 use crate::core::compiler::ir::Arg;
@@ -138,6 +139,7 @@ impl<'a> Codegen<'a> {
     }
 
     fn call(&mut self, func_name: &str, args: &[Value]) -> &[Value] {
+        debug!("calling apply");
         let func_id = *self.builtin_funcs.get(func_name).unwrap();
         let func_ref = self.module.declare_func_in_func(func_id, self.builder.func);
         let inst = self.builder.ins().call(func_ref, args);
@@ -158,7 +160,7 @@ impl<'a> Codegen<'a> {
                 Val::Ident(ident) => {
                     // this value is captured, we load it from the map for captured values
                     // through compiler, so it gets loaded at runtime
-                    let func_id = *self.builtin_funcs.get("load-captured").unwrap();
+                    let func_id = *self.builtin_funcs.get("load_captured").unwrap();
                     let ident_val = self
                         .builder
                         .ins()
@@ -237,21 +239,6 @@ impl<'a> Codegen<'a> {
         call: &Call,
         scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
-        // if let Expr::Symbol(fn_name) = call.func.as_ref() {
-        //     // TODO retrive function from environment
-        //     let fn_name_str = fn_name.text();
-
-        //     match fn_name_str {
-        //         "+" => {
-        //             let args = self.translate_arg_exprs(&call.args, scope)?;
-        //             if args.len() >= 2 {
-        //                 let res = self.builder.ins().iadd(args[0], args[1]);
-        //                 return Ok(res);
-        //             }
-        //         }
-        //         _ => (), // Not a builtin, fall through to dynamic dispatch
-        //     }
-        // }
 
         let func = self.translate_expr(call.func.as_ref(), scope, true)?;
         let args = self.translate_arg_exprs(&call.args, scope)?;
@@ -503,6 +490,7 @@ impl<'a> Codegen<'a> {
         lambda: &Lambda,
         scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
+        tracing::info!("{lambda:?}");
         let mut fctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
 
@@ -523,11 +511,16 @@ impl<'a> Codegen<'a> {
         let func = codegen.finalize(result);
 
         self.module.define_function(func_id, &mut ctx)?;
+        self.module.clear_context(&mut ctx);
+
+        self.module.finalize_definitions()?;
         let func_ptr = self.module.get_finalized_function(func_id);
         let closure: Function = func.try_into().unwrap();
         closure.set_func_ptr(func_ptr);
 
-        self.module.clear_context(&mut ctx);
+        let c = closure.inner.get();
+        tracing::info!("func: {c:?}");
+
         Ok(closure_val)
     }
 
@@ -577,7 +570,7 @@ impl<'a> Codegen<'a> {
                     let sym = translate_value(&mut self.builder, symbol.tag());
                     for func in funcs.iter() {
                         let func_val = translate_value(&mut self.builder, *func);
-                        self.call("store-captured", &[sym, value, func_val]);
+                        self.call("store_captured", &[sym, value, func_val]);
                     }
                 }
             }
