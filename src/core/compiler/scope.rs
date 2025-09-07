@@ -7,28 +7,17 @@ use cranelift::prelude::*;
 
 use crate::core::{env::Environment, symbol::Symbol};
 
-#[derive(Clone, Copy)]
-pub struct GlobalScope<'a> {
-    env: &'a Environment,
-}
-
-impl<'a> GlobalScope<'a> {
-    pub fn new(env: &'a Environment) -> Self {
-        Self { env }
-    }
-}
-
 #[derive(Clone)]
 pub struct FrameScope<'a> {
     pub slots: ParamSlots,
     pub lexical_binds: Option<RefCell<HashMap<Ident, HashSet<RuntimeValue>>>>,
-    is_func: bool,
-    parent: &'a CompileScope<'a>,
+    pub is_func: bool,
+    pub parent: &'a CompileScope<'a>,
 }
 
 #[derive(Clone)]
 pub enum CompileScope<'a> {
-    Global(GlobalScope<'a>),
+    Global,
     Frame(FrameScope<'a>),
 }
 
@@ -56,12 +45,10 @@ impl<'a> From<FrameScope<'a>> for CompileScope<'a> {
 }
 
 impl CompileScope<'_> {
-    // pub fn get_root(&self) -> &Environment {
-    //     match self {
-    //         CompileScope::Global(root) => root.env,
-    //         CompileScope::Frame(frame) => frame.parent.get_root(),
-    //     }
-    // }
+
+    pub fn global() -> Self {
+        Self::Global
+    }
 
 }
 

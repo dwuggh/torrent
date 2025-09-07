@@ -1,7 +1,9 @@
 use proc_macros::Trace;
 
-use crate::{core::value::{Value, TaggedPtr, LispType}, gc::Gc};
-
+use crate::{
+    core::value::{LispType, TaggedPtr, Value},
+    gc::Gc,
+};
 
 #[derive(Clone, Trace, Debug)]
 pub struct Cons(pub Gc<ConsInner>);
@@ -39,15 +41,10 @@ impl Cons {
 
     /// Check if this cons cell is a proper list (ends with nil)
     pub fn is_proper_list(&self) -> bool {
-        let mut current = *self;
-        loop {
-            match current.cdr().untag() {
-                crate::core::value::LispValue::Nil => return true,
-                crate::core::value::LispValue::Cons(next_cons) => {
-                    current = next_cons;
-                }
-                _ => return false, // Improper list (dotted pair)
-            }
+        match self.cdr().untag() {
+            crate::core::value::LispValue::Nil => true,
+            crate::core::value::LispValue::Cons(ref next_cons) => next_cons.is_proper_list(),
+            _ => false, // Improper list (dotted pair)
         }
     }
 
@@ -59,7 +56,7 @@ impl Cons {
 
         let mut count = 1;
         let mut current = *self;
-        
+
         loop {
             match current.cdr().untag() {
                 crate::core::value::LispValue::Nil => return Some(count),
@@ -80,7 +77,7 @@ impl Cons {
 
         let mut result = Vec::new();
         let mut current = *self;
-        
+
         loop {
             result.push(current.car());
             match current.cdr().untag() {
@@ -100,11 +97,11 @@ impl Cons {
         }
 
         let mut result = Cons::new(values[values.len() - 1], Value::nil());
-        
+
         for value in values.iter().rev().skip(1) {
             result = Cons::new(*value, result.tag());
         }
-        
+
         Some(result)
     }
 
@@ -112,12 +109,12 @@ impl Cons {
     pub fn nth(&self, index: usize) -> Option<Value> {
         let mut current = *self;
         let mut i = 0;
-        
+
         loop {
             if i == index {
                 return Some(current.car());
             }
-            
+
             match current.cdr().untag() {
                 crate::core::value::LispValue::Nil => return None,
                 crate::core::value::LispValue::Cons(next_cons) => {
@@ -132,9 +129,7 @@ impl Cons {
     /// Append another list to this one (creates a new list)
     pub fn append(&self, other: Value) -> Self {
         match self.cdr().untag() {
-            crate::core::value::LispValue::Nil => {
-                Cons::new(self.car(), other)
-            }
+            crate::core::value::LispValue::Nil => Cons::new(self.car(), other),
             crate::core::value::LispValue::Cons(cdr_cons) => {
                 Cons::new(self.car(), cdr_cons.append(other).tag())
             }
@@ -151,17 +146,5 @@ impl Cons {
         let mut reversed = values;
         reversed.reverse();
         Self::from_vec(reversed)
-    }
-}
-
-impl TaggedPtr for Cons {
-    const TAG: LispType = LispType::Cons;
-
-    unsafe fn cast(val: u64) -> Self {
-        Cons(Gc::from_raw(val as *mut crate::gc::GcInner<ConsInner>))
-    }
-
-    unsafe fn get_untagged_data(self) -> u64 {
-        Gc::into_raw(self.0) as u64
     }
 }

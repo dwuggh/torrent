@@ -6,7 +6,7 @@ use crate::{
         compiler::{
             ast_to_ir::node_to_ir,
             jit::JIT,
-            scope::{CompileScope, GlobalScope},
+            scope::CompileScope,
         },
         env::Environment,
         value::Value,
@@ -27,11 +27,10 @@ fn main() -> anyhow::Result<()> {
     // let text = "(let ((x 5)) x)";
     // let text = "2";
     let runtime_env = Box::new(Environment::default());
-    let root = GlobalScope::new(&runtime_env);
     let ptr = runtime_env.as_ref() as *const Environment;
     // let runtime_env = Box::new(Environment::default());
 
-    let ctx = CompileScope::Global(root);
+    let ctx = CompileScope::global();
 
     unsafe {
         let a: u64 = run_code(&mut jit, text, ctx, ptr).unwrap();

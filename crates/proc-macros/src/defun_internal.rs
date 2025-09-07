@@ -1,8 +1,8 @@
 #![allow(clippy::manual_unwrap_or_default)]
 use darling::FromMeta;
-use proc_macro2::{Ident, Literal, TokenStream};
+use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
-use syn::{Error, Type};
+use syn::Type;
 
 use crate::defun::{ArgInfo, ArgKind, Function, RetKind};
 
@@ -23,7 +23,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let c_params: Vec<TokenStream> = args
         .iter()
         .enumerate()
-        .map(|(i, (ident, ty, arg_info))| match &arg_info.kind {
+        .map(|(_i, (ident, _ty, arg_info))| match &arg_info.kind {
             ArgKind::Env => quote! { env: i64 },
             _ => quote! { #ident: i64 },
         })
@@ -32,7 +32,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let c_param_idents: Vec<Ident> = args
         .iter()
         .enumerate()
-        .map(|(i, (ident, _, arg_info))| match &arg_info.kind {
+        .map(|(_i, (ident, _, arg_info))| match &arg_info.kind {
             ArgKind::Env => format_ident!("env"),
             _ => ident.clone(),
         })
@@ -319,10 +319,6 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
     }
 
     conversions
-}
-
-fn map_function_name(name: &str) -> String {
-    name.replace('_', "-")
 }
 
 #[derive(Default, PartialEq, Debug, FromMeta)]

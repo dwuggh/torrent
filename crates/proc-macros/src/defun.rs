@@ -1,6 +1,6 @@
 #![allow(clippy::manual_unwrap_or_default)]
 use darling::FromMeta;
-use proc_macro2::{Ident, Literal, TokenStream};
+use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 use syn::{Error, Type};
 
@@ -249,24 +249,17 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     }
 }
 
-fn param_name(i: usize) -> Ident {
-    let param_name = format_ident!("arg_{}", i);
-    param_name
-}
-
 fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
     let mut conversions = Vec::new();
 
     // Find the minimum required arguments (non-optional, non-slice)
     let mut required_args: usize = 0;
     let mut has_slice = false;
-    let mut slice_start_idx = None;
 
-    for (i, (_, _, arg_info)) in args.iter().enumerate() {
+    for (_i, (_, _, arg_info)) in args.iter().enumerate() {
         match &arg_info.kind {
             ArgKind::Slice(_) => {
                 has_slice = true;
-                slice_start_idx = Some(i);
                 break; // Slice must be last
             }
             ArgKind::Option(_) => {
@@ -651,16 +644,6 @@ fn parse_signature(sig: &syn::Signature) -> Result<Vec<(syn::Ident, syn::Type, A
         }
     }
     Ok(args)
-}
-
-fn return_type_is_result(output: &syn::ReturnType) -> bool {
-    match output {
-        syn::ReturnType::Type(_, ty) => match ty.as_ref() {
-            syn::Type::Path(path) => get_path_ident_name(path) == "Result",
-            _ => false,
-        },
-        syn::ReturnType::Default => false,
-    }
 }
 
 fn return_type_info(output: &syn::ReturnType) -> (bool, RetKind) {

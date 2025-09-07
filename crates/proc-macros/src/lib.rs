@@ -1,11 +1,9 @@
 use darling::{Error as DError, FromMeta, ast::NestedMeta};
 use proc_macro::{self, TokenStream};
-use proc_macro2::{Literal, Span};
-use quote::{format_ident, quote};
+use proc_macro2::Span;
+use quote::quote;
 use syn::{
-    DataEnum, DataStruct, DeriveInput, Error, Fields, FnArg, GenericParam, Generics, Ident, ItemFn,
-    LitStr, Member, Pat, PatIdent, PatType, Token, Type, TypePath, TypeReference, Visibility,
-    parse_macro_input, punctuated::Punctuated,
+    DataEnum, DataStruct, DeriveInput, Fields, GenericParam, Generics, Ident, Member, Token, Type, parse_macro_input, punctuated::Punctuated,
 };
 
 mod defun;

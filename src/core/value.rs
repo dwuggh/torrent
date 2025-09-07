@@ -4,13 +4,23 @@ use proc_macros::Trace;
 
 use crate::{
     ast::Node,
-    core::{function::Function, map::Map, string::LispString, symbol::Symbol},
+    core::{cons::{Cons, ConsInner}, function::Function, map::Map, string::LispString, symbol::Symbol},
     gc::{Gc, GcInner, Trace},
 };
 
 #[repr(transparent)]
 #[derive(PartialEq, PartialOrd, Eq, Copy, Debug)]
 pub struct Value(pub u64);
+
+impl Default for Value {
+    fn default() -> Self {
+        Self(NIL as u64)
+    }
+}
+
+pub fn nil() -> Value {
+    Value::default()
+}
 
 impl ::std::hash::Hash for Value {
     fn hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
@@ -126,11 +136,8 @@ impl Value {
         unsafe {
             match untagged {
                 LispValue::String(string) => string.inc_strong_rc(),
-                LispValue::Symbol(symbol) => {
-                    if let Some(cell) = symbol.get() {
-                        cell.value().0.inc_ref_count();
-                    }
-                }
+                // as long as the obarray is traced, its traced
+                LispValue::Symbol(_) => {},
                 LispValue::Vector(vector) => {
                     vector.0.inc_ref_count();
                 }
@@ -236,14 +243,6 @@ impl TaggedPtr for Vector {
     }
 }
 
-#[derive(Clone, Trace, Debug)]
-pub struct Cons(Gc<ConsInner>);
-
-#[derive(Clone, Trace, Debug)]
-pub struct ConsInner {
-    car: Value,
-    cdr: Value,
-}
 
 #[derive(Clone, Trace, Debug)]
 pub struct Vector(Gc<Vec<Value>>);
@@ -304,7 +303,7 @@ impl From<Node> for LispValue {
                 let vals = nodes.into_iter().map(Into::into).collect::<Vec<_>>();
                 LispValue::MacroItem(MacroItem::List(vals))
             }
-            Node::Vector(nodes) => todo!(),
+            Node::Vector(_nodes) => todo!(),
             Node::Integer(_) => todo!(),
             Node::Float(_) => todo!(),
             Node::Char(_) => todo!(),

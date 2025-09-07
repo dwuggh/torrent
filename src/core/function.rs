@@ -7,7 +7,7 @@ use proc_macros::Trace;
 use crate::core::env::Environment;
 use crate::{
     core::value::{LispType, TaggedPtr, Value},
-    gc::{Gc, GcInner, Trace},
+    gc::{Gc, GcInner},
 };
 
 #[derive(Debug, Clone, Copy)]

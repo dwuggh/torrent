@@ -7,7 +7,9 @@ use std::marker::PhantomData;
 use dashmap::DashMap;
 use proc_macros::Trace;
 
+use crate::core::compiler::scope::Val;
 use crate::core::ident::Ident;
+use crate::core::value::nil;
 use crate::gc::Trace;
 use crate::{
     core::value::{TaggedPtr, Value},
@@ -18,7 +20,7 @@ use super::value::LispType;
 
 pub static INTERNED_SYMBOLS: LazyLock<SymbolMap> = LazyLock::new(|| SymbolMap::with_capacity(100));
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct SymbolMap {
     map: DashMap<Symbol, SymbolCell>,
 }
@@ -84,25 +86,8 @@ impl Symbol {
         }
     }
 
-    pub fn from_string(ident: &str) -> Self {
-        let special = ident.starts_with(':');
-        let ident = ident.into();
-        let symbol = Symbol::new(ident);
-        INTERNED_SYMBOLS.intern(symbol, special);
-        symbol
-    }
-
     pub fn name<'a>(&self) -> &'a str {
         self.name.text()
-    }
-
-    // TODO
-    pub(crate) fn get(&self) -> Option<dashmap::mapref::one::Ref<'_, Symbol, SymbolCell>> {
-        INTERNED_SYMBOLS.map.get(self)
-    }
-
-    pub fn get_or_init(&self) -> dashmap::mapref::one::RefMut<'_, Symbol, SymbolCell> {
-        INTERNED_SYMBOLS.map.get_mut(self).unwrap()
     }
 }
 
@@ -129,8 +114,8 @@ pub struct SymbolCellData {
     pub interned: bool,
     #[no_trace]
     pub special: bool,
-    pub func: Option<Value>,
-    pub value: Option<Value>,
+    pub func: Value,
+    pub value: Value,
 }
 
 #[derive(Debug, Trace, Clone)]
@@ -141,16 +126,16 @@ impl SymbolCellData {
         Self {
             name,
             interned: true,
-            func: None,
-            value: None,
+            func: nil(),
+            value: nil(),
             special,
         }
     }
 }
 
 impl SymbolCell {
-    pub fn new(name: Symbol, special: bool) -> Self {
-        SymbolCell(Gc::new(SymbolCellData::new(name, special)))
+    pub fn new(sym: Symbol, special: bool) -> Self {
+        SymbolCell(Gc::new(SymbolCellData::new(sym, special)))
     }
 
     pub fn data(&self) -> &mut SymbolCellData {

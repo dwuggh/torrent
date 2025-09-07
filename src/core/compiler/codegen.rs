@@ -212,9 +212,14 @@ impl<'a> Codegen<'a> {
         same_func_scope: bool,
     ) -> Option<Val> {
         match scope {
-            CompileScope::Global(_) => {
-                let val = Environment::default().load_symbol(symbol, load_function_cell)?;
-                let val = self.builder.ins().iconst(types::I64, val.0 as i64);
+            CompileScope::Global => {
+                // let val = Environment::default().load_symbol(symbol, load_function_cell)?;
+                let sym_val = self.translate_value(symbol.tag());
+                let load_function_cell = self
+                    .builder
+                    .ins()
+                    .iconst(types::I64, if load_function_cell { 1 } else { 0 });
+                let val = self.call("load_symbol_value", &[sym_val, load_function_cell, self.env])[0];
                 Some(Val::Value(val))
             }
             CompileScope::Frame(frame) => match frame.slots.get(symbol.name) {
@@ -223,9 +228,11 @@ impl<'a> Codegen<'a> {
                         Some(Val::Value(self.builder.use_var(var)))
                     } else {
                         if let Some(lexical_binds) = frame.lexical_binds.as_ref() {
-                            if let Some(captured) = lexical_binds
-                                .borrow_mut()
-                                .get_mut(&symbol.into()) { captured.insert(self.func); }
+                            if let Some(captured) =
+                                lexical_binds.borrow_mut().get_mut(&symbol.into())
+                            {
+                                captured.insert(self.func);
+                            }
                         }
                         Some(Val::Ident(symbol.into()))
                     }
@@ -251,8 +258,8 @@ impl<'a> Codegen<'a> {
             .collect()
     }
 
-    fn translate_value(&mut self, val: RuntimeValue) -> CodegenResult<Value> {
-        Ok(translate_value(&mut self.builder, val))
+    fn translate_value(&mut self, val: RuntimeValue) -> Value {
+        translate_value(&mut self.builder, val)
     }
 
     pub fn translate_expr<'s>(
@@ -410,10 +417,7 @@ impl<'a> Codegen<'a> {
         // Create blocks for each expression
         let blocks = exprs
             .iter()
-            .map(|_| {
-                
-                self.builder.create_block()
-            })
+            .map(|_| self.builder.create_block())
             .collect::<Vec<_>>();
 
         // Start with the first expression
@@ -479,10 +483,7 @@ impl<'a> Codegen<'a> {
         // Create blocks for each expression
         let blocks = exprs
             .iter()
-            .map(|_| {
-                
-                self.builder.create_block()
-            })
+            .map(|_| self.builder.create_block())
             .collect::<Vec<_>>();
 
         // Start with the first expression
@@ -609,7 +610,7 @@ impl<'a> Codegen<'a> {
         let closure: Function = func.try_into().unwrap();
         closure.set_func_ptr(func_ptr);
 
-        let result = self.translate_value(func)?;
+        let result = self.translate_value(func);
         Ok(result)
     }
 

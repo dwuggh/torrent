@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::{
     alloc::Layout,
     any::Any,
@@ -14,27 +16,16 @@ pub mod trace;
 use collector::{dec_rc, inc_rc};
 pub use trace::{Trace, Visitor};
 
-/// NOTE Gc is not thread safe, but when performing concurrent GC,
-/// only header can be changed, and only on the GC thread. So we
-/// create another wrapper for it. We can also put the log pointer
-/// here to enable coalesced reference counting
-pub struct GcSync<T: ?Sized> {
-    data_ptr: Gc<T>,
-    log_ptr: Option<Gc<T>>,
-}
-
-unsafe impl<T: ?Sized + Send> Send for GcSync<T> {}
-unsafe impl<T: ?Sized + Sync> Sync for GcSync<T> {}
-
-// NOTE ops to GcHeader is not thread safe
-unsafe impl<T: ?Sized + Send> Send for Gc<T> {}
-unsafe impl<T: ?Sized + Sync> Sync for Gc<T> {}
 
 #[derive(Debug)]
 pub struct Gc<T: ?Sized> {
     ptr: NonNull<GcInner<T>>,
     phantom: PhantomData<GcInner<T>>,
 }
+
+// NOTE ops to GcHeader is not thread safe
+unsafe impl<T: ?Sized + Send> Send for Gc<T> {}
+unsafe impl<T: ?Sized + Sync> Sync for Gc<T> {}
 
 #[derive(Debug)]
 pub struct GcInner<T: ?Sized> {
