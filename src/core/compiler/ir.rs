@@ -237,8 +237,6 @@ pub enum Number {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
     Number(Number),
-    Boolean(bool),
     Character(char),
     String(String),
 }
-

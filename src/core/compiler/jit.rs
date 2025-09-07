@@ -9,8 +9,8 @@ use cranelift_module::FuncId;
 use cranelift_module::Module;
 
 use super::scope::{CompileScope, FrameScope};
-use crate::core::compiler::ir::Expr;
 use crate::core::compiler::codegen::Codegen;
+use crate::core::compiler::ir::Expr;
 use crate::core::compiler::BuiltinFnPlugin;
 use anyhow::Result;
 

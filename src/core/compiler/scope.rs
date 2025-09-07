@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
+use crate::core::ident::Ident;
 use crate::core::value::Value as RuntimeValue;
 use cranelift::prelude::*;
 
@@ -20,7 +21,7 @@ impl<'a> GlobalScope<'a> {
 #[derive(Clone)]
 pub struct FrameScope<'a> {
     pub slots: ParamSlots,
-    pub lexical_binds: Option<RefCell<HashMap<Symbol, HashSet<RuntimeValue>>>>,
+    pub lexical_binds: Option<RefCell<HashMap<Ident, HashSet<RuntimeValue>>>>,
     is_func: bool,
     parent: &'a CompileScope<'a>,
 }
@@ -33,7 +34,7 @@ pub enum CompileScope<'a> {
 
 impl<'a> FrameScope<'a> {
     pub fn new(
-        vars: HashMap<Symbol, Variable>,
+        vars: HashMap<Ident, Variable>,
         parent: &'a CompileScope<'a>,
         lexical_binding: bool,
         is_func: bool,
@@ -86,13 +87,13 @@ impl CompileScope<'_> {
                 let val = builder.ins().iconst(types::I64, val.0 as i64);
                 Some(Val::Value(val))
             }
-            CompileScope::Frame(frame) => match frame.slots.get(symbol) {
+            CompileScope::Frame(frame) => match frame.slots.get(symbol.name) {
                 Some(var) => {
                     if same_func_scope {
                         Some(Val::Value(builder.use_var(var)))
                     } else {
                         if let Some(lexical_binds) = frame.lexical_binds.as_ref() {
-                            lexical_binds.borrow_mut().get_mut(&symbol).map(|captured| {
+                            lexical_binds.borrow_mut().get_mut(&symbol.name).map(|captured| {
                                 captured.insert(caller);
                             });
                         }
@@ -113,16 +114,16 @@ impl CompileScope<'_> {
 
 #[derive(Debug, Clone)]
 pub struct ParamSlots {
-    slots: HashMap<Symbol, Variable>,
+    slots: HashMap<Ident, Variable>,
 }
 
 impl ParamSlots {
-    pub fn new(slots: HashMap<Symbol, Variable>) -> Self {
+    pub fn new(slots: HashMap<Ident, Variable>) -> Self {
         Self { slots }
     }
 
-    pub fn get(&self, symbol: Symbol) -> Option<Variable> {
-        self.slots.get(&symbol).copied()
+    pub fn get(&self, ident: Ident) -> Option<Variable> {
+        self.slots.get(&ident).copied()
     }
 }
 

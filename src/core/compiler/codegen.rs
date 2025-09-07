@@ -10,8 +10,11 @@ use cranelift_module::DataDescription;
 use cranelift_module::FuncId;
 use cranelift_module::Module;
 
-use crate::core::compiler::ir::{Expr, SpecialForm, Literal, Number, Call, Let, If, Lambda, Quote, QuoteKind, QuotedData};
 use crate::core::compiler::error::{CodegenError, CodegenResult};
+use crate::core::compiler::ir::Arg;
+use crate::core::compiler::ir::{
+    Call, Expr, If, Lambda, Let, Literal, Number, Quote, QuoteKind, QuotedData, SpecialForm,
+};
 use crate::core::compiler::scope::CompileScope;
 use crate::core::compiler::scope::FrameScope;
 use crate::core::compiler::scope::Val;
@@ -41,7 +44,7 @@ impl<'a> Codegen<'a> {
         builtin_funcs: &'a HashMap<String, FuncId>,
         fctx: &'a mut FunctionBuilderContext,
         ctx: &'a mut Context,
-        args: &[Ident],
+        args: &[Arg],
         parent_scope: &'s CompileScope,
     ) -> CodegenResult<(Self, CompileScope<'s>)> {
         // make signature
@@ -65,7 +68,9 @@ impl<'a> Codegen<'a> {
 
         let mut variables = HashMap::new();
         for (i, arg) in args.iter().enumerate() {
-            let sym = (*arg).into();
+            // TODO deal with other type of arguments
+            let arg = arg.ident;
+            let sym = arg.into();
             let val = builder.block_params(entry_block)[i];
             let var = builder.declare_var(types::I64);
             variables.insert(sym, var);
@@ -219,7 +224,7 @@ impl<'a> Codegen<'a> {
         // Check if it's a builtin function
         if let Expr::Symbol(fn_name) = call.func.as_ref() {
             let fn_name_str = fn_name.text();
-            
+
             match fn_name_str {
                 "+" => {
                     let args = self.translate_arg_exprs(&call.args, scope)?;
@@ -318,20 +323,23 @@ impl<'a> Codegen<'a> {
         // Create an end block to jump to when we want to exit early
         let end_block = self.builder.create_block();
         self.builder.append_block_param(end_block, types::I64);
-        
+
         // Create blocks for each expression
-        let mut blocks = exprs.iter().map(|expr| {
-            let block = self.builder.create_block();
-            block
-        }).collect::<Vec<_>>();
+        let mut blocks = exprs
+            .iter()
+            .map(|expr| {
+                let block = self.builder.create_block();
+                block
+            })
+            .collect::<Vec<_>>();
 
         // Start with the first expression
         self.builder.switch_to_block(blocks[0]);
         self.builder.seal_block(blocks[0]);
-        
+
         let first_val = self.translate_expr(&exprs[0], scope)?;
         let nil = self.nil();
-        
+
         if exprs.len() == 1 {
             self.builder.ins().jump(end_block, &[first_val.into()]);
             self.builder.switch_to_block(end_block);
@@ -339,28 +347,32 @@ impl<'a> Codegen<'a> {
             let result = self.builder.block_params(end_block)[0];
             return Ok(result);
         }
-        
+
         // Check if first value is nil
         let cond = self.builder.ins().icmp(IntCC::NotEqual, first_val, nil);
-        self.builder.ins().brif(cond, blocks[1], &[], end_block, &[nil.into()]);
-        
+        self.builder
+            .ins()
+            .brif(cond, blocks[1], &[], end_block, &[nil.into()]);
+
         // Process remaining expressions
         for i in 1..exprs.len() {
             self.builder.switch_to_block(blocks[i]);
             self.builder.seal_block(blocks[i]);
-            
+
             let expr_val = self.translate_expr(&exprs[i], scope)?;
-            
+
             if i == exprs.len() - 1 {
                 // Last expression, jump to end with its value
                 self.builder.ins().jump(end_block, &[expr_val.into()]);
             } else {
                 // Middle expression, check for nil
                 let cond = self.not_nil(expr_val);
-                self.builder.ins().brif(cond, blocks[i+1], &[], end_block, &[nil.into()]);
+                self.builder
+                    .ins()
+                    .brif(cond, blocks[i + 1], &[], end_block, &[nil.into()]);
             }
         }
-        
+
         // End block
         self.builder.switch_to_block(end_block);
         self.builder.seal_block(end_block);
@@ -380,20 +392,23 @@ impl<'a> Codegen<'a> {
         // Create an end block to jump to when we want to exit early (with a non-nil value)
         let end_block = self.builder.create_block();
         self.builder.append_block_param(end_block, types::I64);
-        
+
         // Create blocks for each expression
-        let mut blocks = exprs.iter().map(|expr| {
-            let block = self.builder.create_block();
-            block
-        }).collect::<Vec<_>>();
+        let mut blocks = exprs
+            .iter()
+            .map(|expr| {
+                let block = self.builder.create_block();
+                block
+            })
+            .collect::<Vec<_>>();
 
         // Start with the first expression
         self.builder.switch_to_block(blocks[0]);
         self.builder.seal_block(blocks[0]);
-        
+
         let first_val = self.translate_expr(&exprs[0], scope)?;
         let nil = self.nil();
-        
+
         if exprs.len() == 1 {
             self.builder.ins().jump(end_block, &[first_val.into()]);
             self.builder.switch_to_block(end_block);
@@ -401,28 +416,32 @@ impl<'a> Codegen<'a> {
             let result = self.builder.block_params(end_block)[0];
             return Ok(result);
         }
-        
+
         // Check if first value is not nil
-        let cond = self.builder.ins().icmp(IntCC::NotEqual, first_val, nil);
-        self.builder.ins().brif(cond, end_block, &[first_val.into()], blocks[1], &[]);
-        
+        let cond = self.not_nil(first_val);
+        self.builder
+            .ins()
+            .brif(cond, end_block, &[first_val.into()], blocks[1], &[]);
+
         // Process remaining expressions
         for i in 1..exprs.len() {
             self.builder.switch_to_block(blocks[i]);
             self.builder.seal_block(blocks[i]);
-            
+
             let expr_val = self.translate_expr(&exprs[i], scope)?;
-            
+
             if i == exprs.len() - 1 {
                 // Last expression, jump to end with its value (even if nil)
                 self.builder.ins().jump(end_block, &[expr_val.into()]);
             } else {
                 // Middle expression, check if not nil
                 let cond = self.builder.ins().icmp(IntCC::NotEqual, expr_val, nil);
-                self.builder.ins().brif(cond, end_block, &[expr_val.into()], blocks[i+1], &[]);
+                self.builder
+                    .ins()
+                    .brif(cond, end_block, &[expr_val.into()], blocks[i + 1], &[]);
             }
         }
-        
+
         // End block
         self.builder.switch_to_block(end_block);
         self.builder.seal_block(end_block);
@@ -448,7 +467,7 @@ impl<'a> Codegen<'a> {
         match data {
             QuotedData::Literal(literal) => self.translate_literal(literal),
             QuotedData::Symbol(ident) => {
-                let symbol = (*ident).into();
+                let symbol: Symbol = (*ident).into();
                 let val = RuntimeValue::tag(symbol).0 as i64;
                 Ok(self.builder.ins().iconst(types::I64, val))
             }
@@ -471,16 +490,7 @@ impl<'a> Codegen<'a> {
         lambda: &Lambda,
         scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
-        // TODO: implement lambda compilation
-        todo!("Lambda compilation not yet implemented")
-    }
 
-    pub fn translate_defun<'s>(
-        &mut self,
-        scope: &CompileScope<'s>,
-        args: &[Ident],
-        body: &[Expr],
-    ) -> CodegenResult<Function> {
         let mut fctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
 
@@ -489,13 +499,15 @@ impl<'a> Codegen<'a> {
             self.builtin_funcs,
             &mut fctx,
             &mut ctx,
-            args,
+            &lambda.args,
             scope,
         )?;
 
-        let result = codegen.translate_exprs(body, &new_scope)?;
+        let result = codegen.translate_exprs(&lambda.body, &new_scope)?;
 
         let func_id = codegen.func_id;
+        // TODO make sure this is still valid after storing func_ptr
+        let closure_val = codegen.closure;
         let func = codegen.finalize(result);
 
         self.module.define_function(func_id, &mut ctx)?;
@@ -504,9 +516,8 @@ impl<'a> Codegen<'a> {
         closure.set_func_ptr(func_ptr);
 
         self.module.clear_context(&mut ctx);
-        Ok(closure)
+        Ok(closure_val)
     }
-
 
     fn translate_let_expr<'s>(
         &mut self,
@@ -517,9 +528,8 @@ impl<'a> Codegen<'a> {
         let mut binding_values = Vec::new();
 
         for (ident, value_expr) in &let_expr.bindings {
-            let sym = (*ident).into();
             let var = self.builder.declare_var(types::I64);
-            new_vars.insert(sym, var);
+            new_vars.insert(*ident, var);
 
             // The values are evaluated in the *parent* scope.
             let value = if let Some(expr) = value_expr {
@@ -527,7 +537,7 @@ impl<'a> Codegen<'a> {
             } else {
                 self.nil()
             };
-            binding_values.push((sym, value));
+            binding_values.push((ident, value));
         }
 
         let new_scope = FrameScope::new(new_vars, parent_scope, true, false).into();
@@ -535,7 +545,7 @@ impl<'a> Codegen<'a> {
         // Define the variables with their evaluated values
         if let CompileScope::Frame(frame) = &new_scope {
             for (sym, value) in binding_values {
-                let var = frame.slots.get(sym).unwrap();
+                let var = frame.slots.get(*sym).unwrap();
                 self.builder.def_var(var, value);
             }
         } else {
@@ -548,9 +558,10 @@ impl<'a> Codegen<'a> {
         // resolve bindings for closures capturing let-bound variables
         if let CompileScope::Frame(frame) = &new_scope {
             if let Some(binds) = &frame.lexical_binds {
-                for (symbol, funcs) in binds.borrow().iter() {
-                    let var = frame.slots.get(*symbol).unwrap();
+                for (ident, funcs) in binds.borrow().iter() {
+                    let var = frame.slots.get(*ident).unwrap();
                     let value = self.builder.use_var(var);
+                    let symbol: Symbol = ident.into();
                     let sym = translate_value(&mut self.builder, symbol.tag());
                     for func in funcs.iter() {
                         let func_val = translate_value(&mut self.builder, *func);

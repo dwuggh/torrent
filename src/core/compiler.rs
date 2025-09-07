@@ -6,15 +6,17 @@ pub type DeclJITSym = for<'a> fn(&'a mut cranelift_jit::JITBuilder);
 pub(crate) struct BuiltinFnPlugin {
     decl_subr: DeclSubr,
     decl_jit_sym: DeclJITSym,
+    lisp_subr: bool,
 }
 
 inventory::collect!(BuiltinFnPlugin);
 
 impl BuiltinFnPlugin {
-    pub(crate) const fn new(decl_subr: DeclSubr, decl_jit_sym: DeclJITSym) -> Self {
+    pub(crate) const fn new(decl_subr: DeclSubr, decl_jit_sym: DeclJITSym, lisp_subr: bool) -> Self {
         Self {
             decl_subr,
             decl_jit_sym,
+            lisp_subr,
         }
     }
 }

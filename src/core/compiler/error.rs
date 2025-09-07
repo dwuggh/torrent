@@ -8,6 +8,9 @@ pub enum CodegenError {
     #[error("Invalid function argument format")]
     InvalidArgFormat,
 
+    #[error("Invalid Unquote")]
+    InvalidUnquote,
+
     #[error("Let requires bindings and body")]
     LetMissingBindingsAndBody,
 

@@ -3,7 +3,9 @@ use std::{marker::PhantomData, mem::ManuallyDrop, ops::Deref, sync::Arc};
 use proc_macros::{defun, Trace};
 
 use crate::{
-    ast::Node, core::{function::Function, map::Map, string::LispString, symbol::Symbol}, gc::{Gc, GcInner, Trace}
+    ast::Node,
+    core::{function::Function, map::Map, string::LispString, symbol::Symbol},
+    gc::{Gc, GcInner, Trace},
 };
 
 #[repr(transparent)]
@@ -36,6 +38,7 @@ impl Clone for Value {
 pub enum LispType {
     Int = 0,
     Nil,
+    True,
     Float,
     Character,
     String,
@@ -47,11 +50,14 @@ pub enum LispType {
 }
 
 pub const NIL: i64 = LispType::Nil as i64;
+pub const TRUE: i64 = LispType::True as i64;
 
 #[derive(Clone, Trace, Debug)]
 pub enum LispValue {
     #[no_trace]
     Nil,
+    #[no_trace]
+    True,
     #[no_trace]
     Int(i64),
     #[no_trace]
@@ -68,7 +74,7 @@ pub enum LispValue {
     /// a macro-only inner type.
     /// the reason we use this instead of Cons list is to reduce GC overhead.
     #[no_trace]
-    MacroItem(MacroItem)
+    MacroItem(MacroItem),
 }
 
 #[derive(Clone, Debug)]
@@ -85,6 +91,7 @@ impl Value {
         unsafe {
             match tag {
                 LispType::Nil => LispValue::Nil,
+                LispType::True => LispValue::True,
                 LispType::Int => LispValue::Int(TaggedPtr::cast(data)),
                 LispType::Float => LispValue::Float(TaggedPtr::cast(data)),
                 LispType::Character => LispValue::Character(char::from_u32(data as u32).unwrap()),
@@ -189,6 +196,17 @@ impl TaggedPtr for f64 {
     }
 
     // TODO
+    unsafe fn get_untagged_data(self) -> u64 {
+        self as u64
+    }
+}
+
+impl TaggedPtr for char {
+    const TAG: LispType = LispType::Character;
+    unsafe fn cast(val: u64) -> Self {
+        char::from_u32(val as u32).unwrap()
+    }
+
     unsafe fn get_untagged_data(self) -> u64 {
         self as u64
     }

@@ -1,6 +1,8 @@
 use lasso::{Key, Spur, ThreadedRodeo};
 use std::{marker::PhantomData, ops::Deref, sync::LazyLock};
 
+use crate::core::symbol::Symbol;
+
 pub static INTERNER: LazyLock<ThreadedRodeo> = LazyLock::new(|| ThreadedRodeo::new());
 
 #[repr(C)]
@@ -52,5 +54,17 @@ impl From<String> for Ident {
 impl AsRef<str> for Ident {
     fn as_ref(&self) -> &str {
         self.text()
+    }
+}
+
+impl From<Symbol> for Ident {
+    fn from(value: Symbol) -> Self {
+        value.name
+    }
+}
+
+impl From<&Symbol> for Ident {
+    fn from(value: &Symbol) -> Self {
+        value.name
     }
 }
