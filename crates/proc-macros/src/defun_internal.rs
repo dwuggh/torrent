@@ -224,8 +224,18 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         unsafe fn #rust_wrapper_name(
             #(#c_params),*
         ) -> #wrapper_ret_ty {
+            if cfg!(debug_assertions) {
+                eprintln!("[DEBUG] Calling internal function: {}", #lisp_name);
+                eprintln!("[DEBUG] Direct args: {}", stringify!(#(#c_param_idents),*));
+            }
             #(#arg_conversion)*
+            if cfg!(debug_assertions) {
+                eprintln!("[DEBUG] About to call internal Rust function: {}", stringify!(#subr));
+            }
             let result = #subr(#(#call_args),*);
+            if cfg!(debug_assertions) {
+                eprintln!("[DEBUG] Internal Rust function {} returned", stringify!(#subr));
+            }
             #wrapper_result
         }
 
@@ -266,6 +276,9 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                     }
                 } else {
                     quote! {
+                        if cfg!(debug_assertions) {
+                            eprintln!("[DEBUG] Converting internal arg {} from i64: 0x{:x}", stringify!(#ident), #ident as u64);
+                        }
                         let #ident = crate::core::value::Value(#ident as u64);
                     }
                 }

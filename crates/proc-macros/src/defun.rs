@@ -224,9 +224,19 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         unsafe fn #rust_wrapper_name(
             #(#c_params),*
         ) -> #wrapper_ret_ty {
+            if cfg!(debug_assertions) {
+                eprintln!("[DEBUG] Calling defun function: {}", #lisp_name);
+                eprintln!("[DEBUG] args_ptr: 0x{:x}, args_cnt: {}", args_ptr, args_cnt);
+            }
             let args_cnt_u: usize = args_cnt as usize;
             #(#arg_conversion)*
+            if cfg!(debug_assertions) {
+                eprintln!("[DEBUG] About to call Rust function: {}", stringify!(#subr));
+            }
             let result = #subr(#(#call_args),*);
+            if cfg!(debug_assertions) {
+                eprintln!("[DEBUG] Rust function {} returned", stringify!(#subr));
+            }
             #wrapper_result
         }
 
@@ -296,6 +306,9 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                     ArgKind::Value => {
                         quote! {
                             let slice_len = args_cnt_u - #i;
+                            if cfg!(debug_assertions) {
+                                eprintln!("[DEBUG] Creating Value slice of length {} starting at arg {}", slice_len, #i);
+                            }
                             let #ident = unsafe {
                                 let ptr = args_ptr as *const i64;
                                 let slice_ptr = ptr.add(#i);
@@ -444,8 +457,14 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                 let load_arg = quote! {
                     let arg_val = unsafe {
                         let ptr = args_ptr as *const i64;
+                        if cfg!(debug_assertions) {
+                            eprintln!("[DEBUG] Loading arg {} from ptr: 0x{:x} + {}", #i, ptr as usize, #i);
+                        }
                         ptr.add(#i).read()
                     };
+                    if cfg!(debug_assertions) {
+                        eprintln!("[DEBUG] Loaded arg {} value: 0x{:x}", #i, arg_val as u64);
+                    }
                 };
 
                 if arg_info.is_ref {
