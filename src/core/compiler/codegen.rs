@@ -35,6 +35,7 @@ pub struct Codegen<'a> {
     closure: Value,
     func: RuntimeValue,
     pub func_id: FuncId,
+    env: Value,
     builtin_funcs: &'a HashMap<String, FuncId>,
 }
 
@@ -66,6 +67,7 @@ impl<'a> Codegen<'a> {
         builder.seal_block(entry_block);
         // builder.block_params(entry_block);
 
+
         let mut variables = HashMap::new();
         for (i, arg) in args.iter().enumerate() {
             // TODO deal with other type of arguments
@@ -76,6 +78,7 @@ impl<'a> Codegen<'a> {
             variables.insert(sym, var);
             builder.def_var(var, val);
         }
+        let env = *builder.block_params(entry_block).last().ok_or(anyhow::anyhow!("no env parameter"))?;
 
         let new_scope = FrameScope::new(variables, parent_scope, false, true).into();
 
@@ -88,6 +91,7 @@ impl<'a> Codegen<'a> {
             builder,
             func: func_runtime_val,
             closure: closure_val,
+            env,
             func_id,
         };
 
@@ -144,14 +148,14 @@ impl<'a> Codegen<'a> {
             .ok_or(CodegenError::SymbolNotFound(symbol))
             .map(|val| match val {
                 Val::Value(value) => value,
-                Val::Symbol(symbol) => {
+                Val::Ident(ident) => {
                     // this value is captured, we load it from the map for captured values
                     // through compiler, so it gets loaded at runtime
-                    let func_id = *self.builtin_funcs.get("--load-captured").unwrap();
-                    let sym = translate_value(&mut self.builder, symbol.tag());
+                    let func_id = *self.builtin_funcs.get("load-captured").unwrap();
+                    let ident_val = self.builder.ins().iconst(types::I64, Into::<i64>::into(ident));
 
                     let load = self.module.declare_func_in_func(func_id, self.builder.func);
-                    let inst = self.builder.ins().call(load, &[sym, self.closure]);
+                    let inst = self.builder.ins().call(load, &[ident_val, self.closure]);
                     self.builder.inst_results(inst)[0]
                 }
             })
@@ -174,6 +178,7 @@ impl<'a> Codegen<'a> {
         scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
         match expr {
+            Expr::Nil => Ok(self.nil()),
             Expr::Symbol(ident) => {
                 let symbol = (*ident).into();
                 let val = self.load_symbol(scope, symbol, false)?;
@@ -221,8 +226,8 @@ impl<'a> Codegen<'a> {
         call: &Call,
         scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
-        // Check if it's a builtin function
         if let Expr::Symbol(fn_name) = call.func.as_ref() {
+            // TODO retrive function from environment
             let fn_name_str = fn_name.text();
 
             match fn_name_str {
@@ -237,7 +242,10 @@ impl<'a> Codegen<'a> {
             }
         }
 
+
+
         // Dynamic function call
+        // TODO load function cell from symbol table
         let func = self.translate_expr(call.func.as_ref(), scope)?;
         let args = self.translate_arg_exprs(&call.args, scope)?;
 
@@ -253,10 +261,10 @@ impl<'a> Codegen<'a> {
 
         let args_ptr = self.builder.ins().stack_addr(types::I64, slot, 0);
         let args_len = self.builder.ins().iconst(types::I64, args.len() as i64);
-        let env_ptr = scope.get_root() as *const Environment;
-        let env_ptr = self.builder.ins().iconst(types::I64, env_ptr as i64);
 
-        let res = self.call("apply", &[func, args_ptr, args_len, env_ptr])[0];
+        // self.builder.ins().call_indirect(, callee, args)
+        // self.builder.import_signature()
+        let res = self.call("apply", &[func, args_ptr, args_len, self.env])[0];
         Ok(res)
     }
 
@@ -325,9 +333,9 @@ impl<'a> Codegen<'a> {
         self.builder.append_block_param(end_block, types::I64);
 
         // Create blocks for each expression
-        let mut blocks = exprs
+        let blocks = exprs
             .iter()
-            .map(|expr| {
+            .map(|_| {
                 let block = self.builder.create_block();
                 block
             })
@@ -394,9 +402,9 @@ impl<'a> Codegen<'a> {
         self.builder.append_block_param(end_block, types::I64);
 
         // Create blocks for each expression
-        let mut blocks = exprs
+        let blocks = exprs
             .iter()
-            .map(|expr| {
+            .map(|_| {
                 let block = self.builder.create_block();
                 block
             })
@@ -565,7 +573,7 @@ impl<'a> Codegen<'a> {
                     let sym = translate_value(&mut self.builder, symbol.tag());
                     for func in funcs.iter() {
                         let func_val = translate_value(&mut self.builder, *func);
-                        self.call("__store_lexical", &[sym, value, func_val]);
+                        self.call("store-captured", &[sym, value, func_val]);
                     }
                 }
             }

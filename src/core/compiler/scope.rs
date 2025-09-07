@@ -93,11 +93,11 @@ impl CompileScope<'_> {
                         Some(Val::Value(builder.use_var(var)))
                     } else {
                         if let Some(lexical_binds) = frame.lexical_binds.as_ref() {
-                            lexical_binds.borrow_mut().get_mut(&symbol.name).map(|captured| {
+                            lexical_binds.borrow_mut().get_mut(&symbol.into()).map(|captured| {
                                 captured.insert(caller);
                             });
                         }
-                        Some(Val::Symbol(symbol))
+                        Some(Val::Ident(symbol.into()))
                     }
                 }
                 None => frame.parent.load_symbol_inner(
@@ -130,5 +130,5 @@ impl ParamSlots {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Val {
     Value(Value),
-    Symbol(Symbol),
+    Ident(Ident),
 }

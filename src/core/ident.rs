@@ -39,6 +39,12 @@ impl Into<u64> for Ident {
     }
 }
 
+impl Into<i64> for Ident {
+    fn into(self) -> i64 {
+        self.spur.into_usize() as i64
+    }
+}
+
 impl From<&str> for Ident {
     fn from(value: &str) -> Self {
         Self::from_string(value)
@@ -66,5 +72,13 @@ impl From<Symbol> for Ident {
 impl From<&Symbol> for Ident {
     fn from(value: &Symbol) -> Self {
         value.name
+    }
+}
+
+impl TryFrom<i64> for Ident {
+    type Error = &'static str;
+
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        Ok(Self::from(value as u64))
     }
 }

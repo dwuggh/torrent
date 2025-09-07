@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub enum Expr {
+    Nil,
     Literal(Literal),
     Symbol(Ident),
     Vector(Vec<Expr>),

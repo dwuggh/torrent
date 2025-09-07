@@ -1,8 +1,6 @@
 use super::{env::Environment, function::Function};
 use crate::core::{
-    function::FunctionType,
-    symbol::Symbol,
-    value::{TaggedPtr, Value},
+    function::FunctionType, ident::Ident, symbol::Symbol, value::{TaggedPtr, Value}
 };
 use anyhow::{anyhow, Result};
 use proc_macros::defun;
@@ -12,30 +10,28 @@ fn apply(func: &Function, args: &[Value], env: &mut Environment) -> Result<Value
     func.run(args, env)
 }
 
-#[defun]
-fn __store_lexical(symbol: Symbol, value: Value, func: &Function) {
+#[defun(is_lisp_subr = false)]
+fn store_captured(ident: Ident, value: Value, func: &Function) {
     let FunctionType::Lambda(func) = func.get_func_type_mut() else {
         return;
     };
-    let key = symbol.tag();
-    func.captures.insert(key, value.clone());
+    func.captures.insert(ident, value.clone());
 }
 
-#[defun]
-fn __load_captured(symbol: Symbol, func: &Function) -> Result<Value> {
+#[defun(is_lisp_subr = false)]
+fn load_captured(ident: Ident, func: &Function) -> Result<Value> {
     let Some(closure) = func.get_func_type_mut().as_closure_mut() else {
         return Err(anyhow!("not a closure"));
     };
-    let key = symbol.tag();
-    if let Some(v) = closure.captures.get(&key) {
-        return Ok(v);
+    if let Some(v) = closure.captures.get(&ident) {
+        return Ok(*v);
     }
-    if let Some(cell_ref) = symbol.get() {
-        if let Some(v) = cell_ref.data().value.clone() {
-            closure.captures.insert(key, v.clone());
-            return Ok(v);
-        }
-    }
+    // if let Some(cell_ref) = ident.get() {
+    //     if let Some(v) = cell_ref.data().value.clone() {
+    //         closure.captures.insert(key, v.clone());
+    //         return Ok(v);
+    //     }
+    // }
     Err(anyhow!("failed to load captured value"))
 }
 

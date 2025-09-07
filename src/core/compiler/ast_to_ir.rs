@@ -57,7 +57,7 @@ impl AstToIrConverter {
 
             Node::Str(s) => Ok(Expr::Literal(Literal::String(s))),
 
-            Node::Nil => Ok(Expr::Literal(Literal::Boolean(false))), // or create a Nil literal type
+            Node::Nil => Ok(Expr::Nil), // or create a Nil literal type
 
             Node::Vector(nodes) => {
                 let exprs = nodes
@@ -832,7 +832,7 @@ impl AstToIrConverter {
             Node::Float(f) => Ok(QuotedData::Literal(Literal::Number(Number::Real(*f)))),
             Node::Char(c) => Ok(QuotedData::Literal(Literal::Character(*c))),
             Node::Str(s) => Ok(QuotedData::Literal(Literal::String(s.clone()))),
-            Node::Nil => Ok(QuotedData::Literal(Literal::Boolean(false))),
+            Node::Nil => Ok(QuotedData::Symbol(Ident::from("nil"))),
 
             Node::Vector(nodes) => {
                 let items = nodes
@@ -882,7 +882,7 @@ impl AstToIrConverter {
 }
 
 // Convenience function
-pub fn ast_to_ir(node: Node) -> Result<Expr, ConversionError> {
+pub fn node_to_ir(node: Node) -> Result<Expr, ConversionError> {
     AstToIrConverter::convert(node)
 }
 
@@ -893,7 +893,7 @@ mod tests {
     #[test]
     fn test_simple_literals() {
         let node = Node::Integer(42);
-        let expr = ast_to_ir(node).unwrap();
+        let expr = node_to_ir(node).unwrap();
         assert!(matches!(
             expr,
             Expr::Literal(Literal::Number(Number::FixedInteger(42)))
@@ -907,7 +907,7 @@ mod tests {
             Node::Integer(1),
             Node::Integer(2),
         ]);
-        let expr = ast_to_ir(node).unwrap();
+        let expr = node_to_ir(node).unwrap();
         assert!(matches!(expr, Expr::Call(_)));
     }
 
@@ -919,7 +919,7 @@ mod tests {
             Node::Integer(1),
             Node::Integer(2),
         ]);
-        let expr = ast_to_ir(node).unwrap();
+        let expr = node_to_ir(node).unwrap();
         assert!(matches!(expr, Expr::SpecialForm(SpecialForm::If(_))));
     }
 
@@ -933,7 +933,7 @@ mod tests {
             ])]),
             Node::Ident("x".into()),
         ]);
-        let expr = ast_to_ir(node).unwrap();
+        let expr = node_to_ir(node).unwrap();
         assert!(matches!(expr, Expr::SpecialForm(SpecialForm::Let(_))));
     }
 
@@ -944,7 +944,7 @@ mod tests {
             Node::Sexp(vec![Node::Ident("x".into())]),
             Node::Ident("x".into()),
         ]);
-        let expr = ast_to_ir(node).unwrap();
+        let expr = node_to_ir(node).unwrap();
         assert!(matches!(expr, Expr::SpecialForm(SpecialForm::Lambda(_))));
     }
 
@@ -954,7 +954,7 @@ mod tests {
             Node::Ident("quote".into()),
             Node::Ident("symbol".into()),
         ]);
-        let expr = ast_to_ir(node).unwrap();
+        let expr = node_to_ir(node).unwrap();
         assert!(matches!(
             expr,
             Expr::SpecialForm(SpecialForm::Quote(Quote {
@@ -973,7 +973,7 @@ mod tests {
                 Node::Sexp(vec![Node::Unquote, Node::Ident("x".into())]),
             ]),
         ]);
-        let expr = ast_to_ir(node).unwrap();
+        let expr = node_to_ir(node).unwrap();
         assert!(matches!(
             expr,
             Expr::SpecialForm(SpecialForm::Quote(Quote {
@@ -992,7 +992,7 @@ mod tests {
             Node::Ident("y".into()),
             Node::Integer(2),
         ]);
-        let expr = ast_to_ir(node).unwrap();
+        let expr = node_to_ir(node).unwrap();
         assert!(matches!(expr, Expr::SpecialForm(SpecialForm::Setq(_))));
     }
 
@@ -1003,7 +1003,7 @@ mod tests {
             Node::Sexp(vec![Node::Ident("condition1".into()), Node::Integer(1)]),
             Node::Sexp(vec![Node::Ident("condition2".into()), Node::Integer(2)]),
         ]);
-        let expr = ast_to_ir(node).unwrap();
+        let expr = node_to_ir(node).unwrap();
         assert!(matches!(expr, Expr::SpecialForm(SpecialForm::Cond(_))));
     }
 }

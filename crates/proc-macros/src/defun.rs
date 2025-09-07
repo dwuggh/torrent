@@ -90,6 +90,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
                 }
             } else {
                 quote! {
+                    // TODO check if this is correct
                     let v: crate::core::value::Value = ::std::convert::Into::into(result);
                     Ok(v.0 as i64)
                 }
@@ -139,11 +140,23 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         // Slice returns are recognized but not yet supported end-to-end here.
         // They will require two return values in the Cranelift signature and a wrapper shape to match.
         // For now, treat as unsupported to avoid silent ABI mismatches.
-        RetKind::Slice(_) | RetKind::Other => {
+        RetKind::Slice(_) => {
             quote! {
                 // You tried to export a function with an unsupported return type.
                 // Please implement slice return ABI or change the return type.
                 return Err("unsupported return type");
+            }
+        }
+        RetKind::Other => {
+            if function.fallible {
+                quote! {
+                    match result {
+                        Ok(val) => Ok(val as *const _ as i64),
+                        Err(_) => Err("call error"),
+                    }
+                }
+            } else {
+                quote! { Ok(result as *const _ as i64) }
             }
         }
     };
@@ -195,7 +208,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         }
     }
 
-    let is_lisp_subr = function.is_lisp_subr;
+    let is_lisp_subr = spec.is_lisp_subr && function.is_lisp_subr;
     quote! {
 
         #[automatically_derived]
@@ -431,10 +444,16 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                     }
                 }
 
-                // Fallback for other ABI-passed primitives: transmute raw i64
+                // Fallback for other ABI-passed primitives: transmute raw i64 for refs, try_from for non-refs
                 ArgKind::Other => {
-                    quote! {
-                        let #ident = unsafe { ::std::mem::transmute::<i64, #ty>(#param) };
+                    if arg_info.is_ref {
+                        quote! {
+                            let #ident = unsafe { ::std::mem::transmute::<i64, #ty>(#param) };
+                        }
+                    } else {
+                        quote! {
+                            let #ident: #ty = ::std::convert::TryFrom::try_from(#param)?;
+                        }
                     }
                 }
             }
@@ -689,4 +708,10 @@ pub(crate) struct Spec {
     name: Option<String>,
     #[darling(default)]
     required: Option<u16>,
+    #[darling(default = "tru")]
+    is_lisp_subr: bool,
+}
+
+fn tru() -> bool {
+    true
 }

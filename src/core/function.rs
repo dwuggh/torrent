@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+
+use crate::core::ident::Ident;
 use crate::core::map::Map;
 use cranelift_module::FuncId;
 use proc_macros::Trace;
@@ -29,7 +32,8 @@ pub unsafe fn cast_func_ptr(ptr: *const u8) -> Closure {
 #[derive(Debug, Clone, Trace)]
 pub struct LambdaFn {
     // Captured environment as a GC’d map of Value -> Value (key is typically a Symbol tagged as Value).
-    pub captures: Map,
+    #[no_trace]
+    pub captures: HashMap<Ident, Value>,
     #[no_trace]
     pub func: BuiltInFn,
 }
@@ -46,14 +50,19 @@ pub struct FunctionInner {
     #[no_trace]
     pub func_id: FuncId,
     #[no_trace]
+    pub sig: FunctionSignature,
+
+    #[no_trace]
     pub func_type: FunctionType,
 }
 
+#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FunctionSignature {
     pub func_id: FuncId,
     /// minial argument number required
-    pub min_arg_cnt: u8,
+    pub min_argc: u8,
+    pub option_argc: u8,
     /// whether this function accepts variable args, like `&rest`
     pub variable_arg: bool,
 }
@@ -78,7 +87,7 @@ impl Function {
         unsafe {
             let func = cast_func_ptr(func);
             let closure = LambdaFn {
-                captures: Map::new(),
+                captures: HashMap::new(),
                 func,
             };
             Self {
