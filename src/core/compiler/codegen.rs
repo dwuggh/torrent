@@ -92,9 +92,15 @@ impl<'a> Codegen<'a> {
     fn nil(&mut self) -> Value {
         self.builder.ins().iconst(types::I64, NIL)
     }
+
     fn t(&mut self) -> Value {
         // let t = LispValue
         self.builder.ins().iconst(types::I64, TRUE)
+    }
+
+    fn not_nil(&mut self, val: Value) -> Value {
+        let nil = self.nil();
+        self.builder.ins().icmp(IntCC::NotEqual, val, nil)
     }
 
     pub fn translate_exprs<'s>(
@@ -314,11 +320,11 @@ impl<'a> Codegen<'a> {
         self.builder.append_block_param(end_block, types::I64);
         
         // Create blocks for each expression
-        let mut blocks = Vec::new();
-        for _ in 0..exprs.len() {
-            blocks.push(self.builder.create_block());
-        }
-        
+        let mut blocks = exprs.iter().map(|expr| {
+            let block = self.builder.create_block();
+            block
+        }).collect::<Vec<_>>();
+
         // Start with the first expression
         self.builder.switch_to_block(blocks[0]);
         self.builder.seal_block(blocks[0]);
@@ -327,7 +333,7 @@ impl<'a> Codegen<'a> {
         let nil = self.nil();
         
         if exprs.len() == 1 {
-            self.builder.ins().jump(end_block, &[first_val]);
+            self.builder.ins().jump(end_block, &[first_val.into()]);
             self.builder.switch_to_block(end_block);
             self.builder.seal_block(end_block);
             let result = self.builder.block_params(end_block)[0];
@@ -336,28 +342,28 @@ impl<'a> Codegen<'a> {
         
         // Check if first value is nil
         let cond = self.builder.ins().icmp(IntCC::NotEqual, first_val, nil);
-        self.builder.ins().brif(cond, blocks[1], &[], end_block, &[nil]);
+        self.builder.ins().brif(cond, blocks[1], &[], end_block, &[nil.into()]);
         
         // Process remaining expressions
         for i in 1..exprs.len() {
             self.builder.switch_to_block(blocks[i]);
-            self.builder.seal_block(blocks[i-1]);
+            self.builder.seal_block(blocks[i]);
             
             let expr_val = self.translate_expr(&exprs[i], scope)?;
             
             if i == exprs.len() - 1 {
                 // Last expression, jump to end with its value
-                self.builder.ins().jump(end_block, &[expr_val]);
+                self.builder.ins().jump(end_block, &[expr_val.into()]);
             } else {
                 // Middle expression, check for nil
-                let cond = self.builder.ins().icmp(IntCC::NotEqual, expr_val, nil);
-                self.builder.ins().brif(cond, blocks[i+1], &[], end_block, &[nil]);
+                let cond = self.not_nil(expr_val);
+                self.builder.ins().brif(cond, blocks[i+1], &[], end_block, &[nil.into()]);
             }
         }
         
         // End block
         self.builder.switch_to_block(end_block);
-        self.builder.seal_block(blocks[exprs.len()-1]);
+        self.builder.seal_block(end_block);
         let result = self.builder.block_params(end_block)[0];
         Ok(result)
     }
