@@ -9,7 +9,7 @@ use cranelift_module::FuncId;
 use cranelift_module::Module;
 
 use super::scope::{CompileScope, FrameScope};
-use crate::ast::Node;
+use crate::core::compiler::ir::Expr;
 use crate::core::compiler::codegen::Codegen;
 use crate::core::compiler::BuiltinFnPlugin;
 use anyhow::Result;
@@ -53,7 +53,7 @@ impl Default for JIT {
 }
 
 impl JIT {
-    pub fn compile_node<'s>(&mut self, node: &Node, scope: &'s CompileScope) -> Result<*const u8> {
+    pub fn compile_expr<'s>(&mut self, expr: &Expr, scope: &'s CompileScope) -> Result<*const u8> {
         let mut fctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
         let (mut codegen, new_scope) = Codegen::new(
@@ -65,7 +65,7 @@ impl JIT {
             scope,
         )?;
 
-        let val = codegen.translate_node(node, &new_scope)?;
+        let val = codegen.translate_expr(expr, &new_scope)?;
 
         let func_id = codegen.func_id;
         codegen.finalize(val);

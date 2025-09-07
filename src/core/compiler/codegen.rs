@@ -10,7 +10,7 @@ use cranelift_module::DataDescription;
 use cranelift_module::FuncId;
 use cranelift_module::Module;
 
-use crate::ast::Node;
+use crate::core::compiler::ir::{Expr, SpecialForm, Literal, Number, Call, Let, If, Lambda, Quote, QuoteKind, QuotedData};
 use crate::core::compiler::error::{CodegenError, CodegenResult};
 use crate::core::compiler::scope::CompileScope;
 use crate::core::compiler::scope::FrameScope;
@@ -39,7 +39,7 @@ impl<'a> Codegen<'a> {
         builtin_funcs: &'a HashMap<String, FuncId>,
         fctx: &'a mut FunctionBuilderContext,
         ctx: &'a mut Context,
-        args: &[Node],
+        args: &[Ident],
         parent_scope: &'s CompileScope,
     ) -> CodegenResult<(Self, CompileScope<'s>)> {
         // make signature
@@ -63,10 +63,7 @@ impl<'a> Codegen<'a> {
 
         let mut variables = HashMap::new();
         for (i, arg) in args.iter().enumerate() {
-            let Node::Ident(arg) = arg else {
-                return Err(CodegenError::InvalidArgFormat);
-            };
-            let sym = arg.into();
+            let sym = (*arg).into();
             let val = builder.block_params(entry_block)[i];
             let var = builder.declare_var(types::I64);
             variables.insert(sym, var);
@@ -94,14 +91,14 @@ impl<'a> Codegen<'a> {
         self.builder.ins().iconst(types::I64, NIL)
     }
 
-    pub fn translate_nodes<'s>(
+    pub fn translate_exprs<'s>(
         &mut self,
-        nodes: &[Node],
+        exprs: &[Expr],
         scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
-        nodes
+        exprs
             .iter()
-            .map(|n| self.translate_node(n, scope))
+            .map(|e| self.translate_expr(e, scope))
             .last()
             .unwrap_or(Ok(self.nil()))
     }
@@ -143,146 +140,137 @@ impl<'a> Codegen<'a> {
             })
     }
 
-    fn translate_arg_nodes<'s>(
+    fn translate_arg_exprs<'s>(
         &mut self,
-        nodes: &[Node],
+        exprs: &[Expr],
         scope: &CompileScope<'s>,
     ) -> CodegenResult<Vec<Value>> {
-        nodes
+        exprs
             .iter()
-            .map(|n| self.translate_node(n, scope))
+            .map(|e| self.translate_expr(e, scope))
             .collect()
     }
 
-    pub fn translate_node<'s>(
+    pub fn translate_expr<'s>(
         &mut self,
-        node: &Node,
+        expr: &Expr,
         scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
-        match node {
-            Node::Ident(ident) => {
-                let symbol = ident.into();
+        match expr {
+            Expr::Symbol(ident) => {
+                let symbol = (*ident).into();
                 let val = self.load_symbol(scope, symbol, false)?;
                 Ok(val)
             }
-            Node::Sexp(nodes) => {
-                if nodes.is_empty() {
-                    return Ok(self.builder.ins().iconst(types::I64, 0));
-                }
-
-                let head = &nodes[0];
-                let arg_nodes = &nodes[1..];
-
-                if let Node::Ident(fn_name) = head {
-                    let fn_name_str = fn_name.text();
-
-                    // Handle special forms that don't evaluate all their arguments upfront
-                    match fn_name_str {
-                        "let" => {
-                            return self.translate_let(scope, arg_nodes);
-                        }
-                        _ => (), // Not a special form, fall through to regular call
-                    }
-
-                    // It is a regular function call or a builtin. Evaluate arguments.
-                    let args = self.translate_arg_nodes(arg_nodes, scope)?;
-
-                    match fn_name_str {
-                        "+" => {
-                            println!("rgs: {args:?}");
-                            let res = self.builder.ins().iadd(args[0], args[1]);
-                            return Ok(res);
-                        }
-                        _ => (), // Not a builtin, fall through to dynamic dispatch
-                    }
-
-                    let fn_sym = fn_name.into();
-                    let func = self.load_symbol(scope, fn_sym, true)?;
-
-                    let slot = self.builder.create_sized_stack_slot(StackSlotData {
-                        kind: StackSlotKind::ExplicitSlot,
-                        size: 8 * args.len() as u32,
-                        align_shift: 0,
-                    });
-
-                    for (i, val) in args.iter().enumerate() {
-                        self.builder.ins().stack_store(*val, slot, i as i32 * 8);
-                    }
-
-                    let args_ptr = self.builder.ins().stack_addr(types::I64, slot, 0);
-                    // let args_ptr = self.builder.ins().iconst(types::I64, args_ptr as i64);
-                    let args_len = self.builder.ins().iconst(types::I64, args.len() as i64);
-                    let env_ptr = scope.get_root() as *const Environment;
-                    let env_ptr = self.builder.ins().iconst(types::I64, env_ptr as i64);
-
-                    let res = self.call("apply", &[func, args_ptr, args_len, env_ptr])[0];
-                    return Ok(res);
-                }
-
-                Err(CodegenError::InvalidSexpHead(head.clone()))
-            }
-            Node::Vector(_) => todo!(),
-            Node::Integer(n) => {
-                let val = RuntimeValue::tag(*n).0 as i64;
-                println!("val: {val:?}, n: {n}");
-                Ok(self.builder.ins().iconst(types::I64, val))
-            }
-            Node::Float(_) => todo!(),
-            Node::Char(_) => {
-                // let val = RuntimeValue::tag(*c);
-                todo!()
-            }
-            Node::Str(string) => {
-                let val = RuntimeValue::tag(LispString::from_str(string)).0 as i64;
-                Ok(self.builder.ins().iconst(types::I64, val))
-            }
-            Node::Unquote => todo!(),
-            Node::UnquoteSplice => todo!(),
-            Node::Backquote => todo!(),
-            Node::Nil => todo!(),
+            Expr::Literal(literal) => self.translate_literal(literal),
+            Expr::Vector(exprs) => self.translate_vector(exprs, scope),
+            Expr::Call(call) => self.translate_call(call, scope),
+            Expr::SpecialForm(special_form) => self.translate_special_form(special_form, scope),
         }
     }
 
-    pub fn translate_defun<'s>(
-        &mut self,
-        scope: &CompileScope<'s>,
-        args: &[Node],
-        body: &[Node],
-    ) -> CodegenResult<Function> {
-        let mut fctx = FunctionBuilderContext::new();
-        let mut ctx = self.module.make_context();
-
-        let (mut codegen, new_scope) = Codegen::new(
-            self.module,
-            self.builtin_funcs,
-            &mut fctx,
-            &mut ctx,
-            args,
-            scope,
-        )?;
-
-        let result = codegen.translate_nodes(body, &new_scope)?;
-
-        let func_id = codegen.func_id;
-        let func = codegen.finalize(result);
-
-        self.module.define_function(func_id, &mut ctx)?;
-        let func_ptr = self.module.get_finalized_function(func_id);
-        let closure: Function = func.try_into().unwrap();
-        closure.set_func_ptr(func_ptr);
-
-        self.module.clear_context(&mut ctx);
-        Ok(closure)
+    fn translate_literal(&mut self, literal: &Literal) -> CodegenResult<Value> {
+        match literal {
+            Literal::Number(Number::FixedInteger(n)) => {
+                let val = RuntimeValue::tag(*n).0 as i64;
+                Ok(self.builder.ins().iconst(types::I64, val))
+            }
+            Literal::Number(Number::Real(f)) => {
+                let val = RuntimeValue::tag(*f).0 as i64;
+                Ok(self.builder.ins().iconst(types::I64, val))
+            }
+            Literal::Character(c) => {
+                let val = RuntimeValue::tag(*c).0 as i64;
+                Ok(self.builder.ins().iconst(types::I64, val))
+            }
+            Literal::String(s) => {
+                let val = RuntimeValue::tag(LispString::from_str(s)).0 as i64;
+                Ok(self.builder.ins().iconst(types::I64, val))
+            }
+            Literal::Boolean(false) => Ok(self.nil()),
+            Literal::Boolean(true) => {
+                // TODO: proper true value
+                Ok(self.builder.ins().iconst(types::I64, 1))
+            }
+        }
     }
 
-    pub fn translate_if<'s>(
+    fn translate_vector<'s>(
         &mut self,
+        exprs: &[Expr],
         scope: &CompileScope<'s>,
-        cond: &Node,
-        then: &Node,
-        els: &[Node],
     ) -> CodegenResult<Value> {
-        let cond_val = self.translate_node(cond, scope)?;
+        // TODO: implement vector creation
+        todo!("Vector creation not yet implemented")
+    }
+
+    fn translate_call<'s>(
+        &mut self,
+        call: &Call,
+        scope: &CompileScope<'s>,
+    ) -> CodegenResult<Value> {
+        // Check if it's a builtin function
+        if let Expr::Symbol(fn_name) = call.func.as_ref() {
+            let fn_name_str = fn_name.text();
+            
+            match fn_name_str {
+                "+" => {
+                    let args = self.translate_arg_exprs(&call.args, scope)?;
+                    if args.len() >= 2 {
+                        let res = self.builder.ins().iadd(args[0], args[1]);
+                        return Ok(res);
+                    }
+                }
+                _ => (), // Not a builtin, fall through to dynamic dispatch
+            }
+        }
+
+        // Dynamic function call
+        let func = self.translate_expr(call.func.as_ref(), scope)?;
+        let args = self.translate_arg_exprs(&call.args, scope)?;
+
+        let slot = self.builder.create_sized_stack_slot(StackSlotData {
+            kind: StackSlotKind::ExplicitSlot,
+            size: 8 * args.len() as u32,
+            align_shift: 0,
+        });
+
+        for (i, val) in args.iter().enumerate() {
+            self.builder.ins().stack_store(*val, slot, i as i32 * 8);
+        }
+
+        let args_ptr = self.builder.ins().stack_addr(types::I64, slot, 0);
+        let args_len = self.builder.ins().iconst(types::I64, args.len() as i64);
+        let env_ptr = scope.get_root() as *const Environment;
+        let env_ptr = self.builder.ins().iconst(types::I64, env_ptr as i64);
+
+        let res = self.call("apply", &[func, args_ptr, args_len, env_ptr])[0];
+        Ok(res)
+    }
+
+    fn translate_special_form<'s>(
+        &mut self,
+        special_form: &SpecialForm,
+        scope: &CompileScope<'s>,
+    ) -> CodegenResult<Value> {
+        match special_form {
+            SpecialForm::If(if_expr) => self.translate_if_expr(if_expr, scope),
+            SpecialForm::Let(let_expr) => self.translate_let_expr(let_expr, scope),
+            SpecialForm::Lambda(lambda) => self.translate_lambda_expr(lambda, scope),
+            SpecialForm::Quote(quote) => self.translate_quote(quote, scope),
+            SpecialForm::Progn(exprs) => self.translate_exprs(exprs, scope),
+            SpecialForm::And(exprs) => self.translate_and(exprs, scope),
+            SpecialForm::Or(exprs) => self.translate_or(exprs, scope),
+            _ => todo!("Special form not yet implemented: {:?}", special_form),
+        }
+    }
+
+    fn translate_if_expr<'s>(
+        &mut self,
+        if_expr: &If,
+        scope: &CompileScope<'s>,
+    ) -> CodegenResult<Value> {
+        let cond_val = self.translate_expr(&if_expr.cond, scope)?;
         let nil = self.nil();
         let cond = self.builder.ins().icmp(IntCC::NotEqual, cond_val, nil);
         let then_block = self.builder.create_block();
@@ -297,12 +285,12 @@ impl<'a> Codegen<'a> {
 
         self.builder.switch_to_block(then_block);
         self.builder.seal_block(then_block);
-        let then_return = self.translate_node(then, scope)?;
+        let then_return = self.translate_expr(&if_expr.then, scope)?;
         self.builder.ins().jump(merge_block, &[then_return.into()]);
 
         self.builder.switch_to_block(else_block);
         self.builder.seal_block(else_block);
-        let else_return = self.translate_nodes(els, scope)?;
+        let else_return = self.translate_exprs(&if_expr.els, scope)?;
         self.builder.ins().jump(merge_block, &[else_return.into()]);
 
         self.builder.switch_to_block(merge_block);
@@ -311,76 +299,181 @@ impl<'a> Codegen<'a> {
         Ok(phi)
     }
 
-    pub fn translate_let<'s>(
+    fn translate_and<'s>(
         &mut self,
-        parent_scope: &CompileScope<'s>,
-        args: &[Node],
+        exprs: &[Expr],
+        scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
-        let bindings_node = args.get(0).ok_or(CodegenError::LetMissingBindingsAndBody)?;
-        let body = &args[1..];
+        if exprs.is_empty() {
+            return Ok(self.builder.ins().iconst(types::I64, 1)); // true
+        }
 
-        let Node::Sexp(bindings) = bindings_node else {
-            return Err(CodegenError::LetBindingsNotList);
-        };
+        let mut result = self.translate_expr(&exprs[0], scope)?;
+        let nil = self.nil();
 
+        for expr in &exprs[1..] {
+            let continue_block = self.builder.create_block();
+            let end_block = self.builder.create_block();
+            self.builder.append_block_param(end_block, types::I64);
+
+            let cond = self.builder.ins().icmp(IntCC::NotEqual, result, nil);
+            self.builder
+                .ins()
+                .brif(cond, continue_block, &[], end_block, &[nil]);
+
+            self.builder.switch_to_block(continue_block);
+            self.builder.seal_block(continue_block);
+            result = self.translate_expr(expr, scope)?;
+            self.builder.ins().jump(end_block, &[result]);
+
+            self.builder.switch_to_block(end_block);
+            self.builder.seal_block(end_block);
+            result = self.builder.block_params(end_block)[0];
+        }
+
+        Ok(result)
+    }
+
+    fn translate_or<'s>(
+        &mut self,
+        exprs: &[Expr],
+        scope: &CompileScope<'s>,
+    ) -> CodegenResult<Value> {
+        if exprs.is_empty() {
+            return Ok(self.nil()); // nil
+        }
+
+        let mut result = self.translate_expr(&exprs[0], scope)?;
+        let nil = self.nil();
+
+        for expr in &exprs[1..] {
+            let continue_block = self.builder.create_block();
+            let end_block = self.builder.create_block();
+            self.builder.append_block_param(end_block, types::I64);
+
+            let cond = self.builder.ins().icmp(IntCC::Equal, result, nil);
+            self.builder
+                .ins()
+                .brif(cond, continue_block, &[], end_block, &[result]);
+
+            self.builder.switch_to_block(continue_block);
+            self.builder.seal_block(continue_block);
+            result = self.translate_expr(expr, scope)?;
+            self.builder.ins().jump(end_block, &[result]);
+
+            self.builder.switch_to_block(end_block);
+            self.builder.seal_block(end_block);
+            result = self.builder.block_params(end_block)[0];
+        }
+
+        Ok(result)
+    }
+
+    fn translate_quote<'s>(
+        &mut self,
+        quote: &Quote,
+        _scope: &CompileScope<'s>,
+    ) -> CodegenResult<Value> {
+        match quote.kind {
+            QuoteKind::Quote => self.translate_quoted_data(&quote.expr),
+            QuoteKind::Backquote => {
+                // TODO: implement backquote with unquote support
+                todo!("Backquote not yet implemented")
+            }
+        }
+    }
+
+    fn translate_quoted_data(&mut self, data: &QuotedData) -> CodegenResult<Value> {
+        match data {
+            QuotedData::Literal(literal) => self.translate_literal(literal),
+            QuotedData::Symbol(ident) => {
+                let symbol = (*ident).into();
+                let val = RuntimeValue::tag(symbol).0 as i64;
+                Ok(self.builder.ins().iconst(types::I64, val))
+            }
+            QuotedData::List(_items) => {
+                // TODO: implement list creation
+                todo!("Quoted list creation not yet implemented")
+            }
+            QuotedData::Vector(_items) => {
+                // TODO: implement vector creation
+                todo!("Quoted vector creation not yet implemented")
+            }
+            QuotedData::Unquote(_) | QuotedData::UnquoteSplice(_) => {
+                Err(CodegenError::InvalidSyntax("Unquote in simple quote".to_string()))
+            }
+        }
+    }
+
+    fn translate_lambda_expr<'s>(
+        &mut self,
+        lambda: &Lambda,
+        scope: &CompileScope<'s>,
+    ) -> CodegenResult<Value> {
+        // TODO: implement lambda compilation
+        todo!("Lambda compilation not yet implemented")
+    }
+
+    pub fn translate_defun<'s>(
+        &mut self,
+        scope: &CompileScope<'s>,
+        args: &[Ident],
+        body: &[Expr],
+    ) -> CodegenResult<Function> {
+        let mut fctx = FunctionBuilderContext::new();
+        let mut ctx = self.module.make_context();
+
+        let (mut codegen, new_scope) = Codegen::new(
+            self.module,
+            self.builtin_funcs,
+            &mut fctx,
+            &mut ctx,
+            args,
+            scope,
+        )?;
+
+        let result = codegen.translate_exprs(body, &new_scope)?;
+
+        let func_id = codegen.func_id;
+        let func = codegen.finalize(result);
+
+        self.module.define_function(func_id, &mut ctx)?;
+        let func_ptr = self.module.get_finalized_function(func_id);
+        let closure: Function = func.try_into().unwrap();
+        closure.set_func_ptr(func_ptr);
+
+        self.module.clear_context(&mut ctx);
+        Ok(closure)
+    }
+
+
+    fn translate_let_expr<'s>(
+        &mut self,
+        let_expr: &Let,
+        parent_scope: &CompileScope<'s>,
+    ) -> CodegenResult<Value> {
         let mut new_vars = HashMap::new();
         let mut binding_values = Vec::new();
 
-        for binding in bindings {
-            match binding {
-                // Case 1: Just a symbol (var) - bind to NIL
-                Node::Ident(ident) => {
-                    let ident_str = ident.text();
-                    let sym = Symbol::from_string(ident_str);
-                    let var = self.builder.declare_var(types::I64);
-                    new_vars.insert(sym, var);
-                    binding_values.push(self.nil());
-                }
-                // Case 2: (var value) pair
-                Node::Sexp(pair) => {
-                    let (ident_node, value_expr) = match pair.as_slice() {
-                        [id, val] => (id, val),
-                        _ => return Err(CodegenError::LetInvalidBindingFormat),
-                    };
+        for (ident, value_expr) in &let_expr.bindings {
+            let sym = (*ident).into();
+            let var = self.builder.declare_var(types::I64);
+            new_vars.insert(sym, var);
 
-                    let Node::Ident(ident) = ident_node else {
-                        return Err(CodegenError::LetBindingNotSymbol);
-                    };
-
-                    let ident_str = ident.text();
-                    let sym = Symbol::from_string(ident_str);
-                    let var = self.builder.declare_var(types::I64);
-                    new_vars.insert(sym, var);
-
-                    // The values are evaluated in the *parent* scope.
-                    let value = self.translate_node(value_expr, parent_scope)?;
-                    binding_values.push(value);
-                }
-                _ => return Err(CodegenError::LetInvalidBindingFormat),
-            }
+            // The values are evaluated in the *parent* scope.
+            let value = if let Some(expr) = value_expr {
+                self.translate_expr(expr, parent_scope)?
+            } else {
+                self.nil()
+            };
+            binding_values.push((sym, value));
         }
 
         let new_scope = FrameScope::new(new_vars, parent_scope, true, false).into();
 
         // Define the variables with their evaluated values
         if let CompileScope::Frame(frame) = &new_scope {
-            // This re-iterates `bindings` which is a bit inefficient but safe and simple.
-            for (binding, value) in bindings.iter().zip(binding_values) {
-                let sym = match binding {
-                    Node::Ident(ident) => {
-                        let ident_str = ident.text();
-                        Symbol::from_string(ident_str)
-                    }
-                    Node::Sexp(pair) => {
-                        let Node::Ident(ident) = &pair[0] else {
-                            unreachable!()
-                        };
-                        let ident_str = ident.text();
-                        Symbol::from_string(ident_str)
-                    }
-                    _ => unreachable!(),
-                };
-
+            for (sym, value) in binding_values {
                 let var = frame.slots.get(sym).unwrap();
                 self.builder.def_var(var, value);
             }
@@ -389,7 +482,7 @@ impl<'a> Codegen<'a> {
         }
 
         // translate body
-        let result = self.translate_nodes(body, &new_scope)?;
+        let result = self.translate_exprs(&let_expr.body, &new_scope)?;
 
         // resolve bindings for closures capturing let-bound variables
         if let CompileScope::Frame(frame) = &new_scope {
