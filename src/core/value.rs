@@ -3,8 +3,7 @@ use std::{marker::PhantomData, mem::ManuallyDrop, ops::Deref, sync::Arc};
 use proc_macros::{defun, Trace};
 
 use crate::{
-    core::{function::Function, map::Map, string::LispString, symbol::Symbol},
-    gc::{Gc, GcInner, Trace},
+    ast::Node, core::{function::Function, map::Map, string::LispString, symbol::Symbol}, gc::{Gc, GcInner, Trace}
 };
 
 #[repr(transparent)]
@@ -66,6 +65,16 @@ pub enum LispValue {
     Cons(Cons),
     Function(Function),
     Map(Map),
+    /// a macro-only inner type.
+    /// the reason we use this instead of Cons list is to reduce GC overhead.
+    #[no_trace]
+    MacroItem(MacroItem)
+}
+
+#[derive(Clone, Debug)]
+pub enum MacroItem {
+    List(Vec<LispValue>),
+    PrintedRep(String),
 }
 
 impl Value {
@@ -265,6 +274,27 @@ impl ::std::convert::TryFrom<Value> for () {
         match value.untag() {
             LispValue::Nil => Ok(()),
             _ => Err("expected Nil"),
+        }
+    }
+}
+
+impl From<Node> for LispValue {
+    fn from(node: Node) -> Self {
+        match node {
+            Node::Ident(ident) => LispValue::Symbol(ident.into()),
+            Node::Sexp(nodes) => {
+                let vals = nodes.into_iter().map(Into::into).collect::<Vec<_>>();
+                LispValue::MacroItem(MacroItem::List(vals))
+            }
+            Node::Vector(nodes) => todo!(),
+            Node::Integer(_) => todo!(),
+            Node::Float(_) => todo!(),
+            Node::Char(_) => todo!(),
+            Node::Str(_) => todo!(),
+            Node::Unquote => todo!(),
+            Node::UnquoteSplice => todo!(),
+            Node::Backquote => todo!(),
+            Node::Nil => todo!(),
         }
     }
 }
