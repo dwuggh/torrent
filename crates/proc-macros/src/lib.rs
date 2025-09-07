@@ -12,31 +12,6 @@ mod defun;
 mod defun_internal;
 mod variantly;
 
-/// ## `#[defun]`
-///
-/// Represents the functions that are going to be hydrated to emacs lisp, through the `rune` VM execution. As of
-/// today, they are not documented with the GNU Emacs documentation, though definitely is a point of improvement.
-/// Following Rust convention, `defun` names are written in `snake_case`, though if you search them in GNU Emacs,
-/// you'll find them in `kebab-case`.
-///
-/// Arguments of the `defun`s follow the arguments on its corresponding documentation, or rather, definition on
-/// the C Emacs core.
-///
-/// ### Examples
-///
-/// For the `make-vector` function, here's its signature:
-///
-/// > make-vector is a function defined in `alloc.c`. Signature `(make-vector LENGTH INIT)`
-///
-/// Its corresponding `rune` `#[defun]` signature would be:
-///
-/// ```ignore
-/// #[defun]
-/// fn make_vector(length: usize, init: GcObj) -> Vec<GcObj> {}
-/// ```
-///
-/// The return object is interesting, as it's not so easily inferrable from the signature, but rather from documentation.
-/// In this case, the `make-vector` defun returns a *newly created vector*.
 #[proc_macro_attribute]
 pub fn defun(attr_ts: TokenStream, fn_ts: TokenStream) -> TokenStream {
     let function = parse_macro_input!(fn_ts as defun::Function);

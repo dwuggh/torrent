@@ -68,7 +68,6 @@ impl<'a> Codegen<'a> {
         builder.seal_block(entry_block);
         // builder.block_params(entry_block);
 
-
         let block_params = builder.block_params(entry_block);
         let args_ptr = block_params[0];
         let args_cnt = block_params[1];
@@ -80,7 +79,7 @@ impl<'a> Codegen<'a> {
             let sym = arg.into();
             let var = builder.declare_var(types::I64);
             variables.insert(sym, var);
-            
+
             // Load argument from the arguments array
             let offset = builder.ins().iconst(types::I64, (i * 8) as i64);
             let arg_addr = builder.ins().iadd(args_ptr, offset);
@@ -90,7 +89,7 @@ impl<'a> Codegen<'a> {
 
         let new_scope = FrameScope::new(variables, parent_scope, false, true).into();
 
-        let func_runtime_val = Function::new_closure(0 as *const u8, func_id).tag();
+        let func_runtime_val = Function::new_closure(func_id).tag();
         let closure_val = translate_value(&mut builder, func_runtime_val);
 
         let codegen = Self {
@@ -127,7 +126,7 @@ impl<'a> Codegen<'a> {
     ) -> CodegenResult<Value> {
         exprs
             .iter()
-            .map(|e| self.translate_expr(e, scope))
+            .map(|e| self.translate_expr(e, scope, false))
             .last()
             .unwrap_or(Ok(self.nil()))
     }
@@ -160,7 +159,10 @@ impl<'a> Codegen<'a> {
                     // this value is captured, we load it from the map for captured values
                     // through compiler, so it gets loaded at runtime
                     let func_id = *self.builtin_funcs.get("load-captured").unwrap();
-                    let ident_val = self.builder.ins().iconst(types::I64, Into::<i64>::into(ident));
+                    let ident_val = self
+                        .builder
+                        .ins()
+                        .iconst(types::I64, Into::<i64>::into(ident));
 
                     let load = self.module.declare_func_in_func(func_id, self.builder.func);
                     let inst = self.builder.ins().call(load, &[ident_val, self.closure]);
@@ -176,7 +178,7 @@ impl<'a> Codegen<'a> {
     ) -> CodegenResult<Vec<Value>> {
         exprs
             .iter()
-            .map(|e| self.translate_expr(e, scope))
+            .map(|e| self.translate_expr(e, scope, false))
             .collect()
     }
 
@@ -184,12 +186,13 @@ impl<'a> Codegen<'a> {
         &mut self,
         expr: &Expr,
         scope: &CompileScope<'s>,
+        load_function_cell: bool,
     ) -> CodegenResult<Value> {
         match expr {
             Expr::Nil => Ok(self.nil()),
             Expr::Symbol(ident) => {
                 let symbol = (*ident).into();
-                let val = self.load_symbol(scope, symbol, false)?;
+                let val = self.load_symbol(scope, symbol, load_function_cell)?;
                 Ok(val)
             }
             Expr::Literal(literal) => self.translate_literal(literal),
@@ -234,27 +237,23 @@ impl<'a> Codegen<'a> {
         call: &Call,
         scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
-        if let Expr::Symbol(fn_name) = call.func.as_ref() {
-            // TODO retrive function from environment
-            let fn_name_str = fn_name.text();
+        // if let Expr::Symbol(fn_name) = call.func.as_ref() {
+        //     // TODO retrive function from environment
+        //     let fn_name_str = fn_name.text();
 
-            match fn_name_str {
-                "+" => {
-                    let args = self.translate_arg_exprs(&call.args, scope)?;
-                    if args.len() >= 2 {
-                        let res = self.builder.ins().iadd(args[0], args[1]);
-                        return Ok(res);
-                    }
-                }
-                _ => (), // Not a builtin, fall through to dynamic dispatch
-            }
-        }
+        //     match fn_name_str {
+        //         "+" => {
+        //             let args = self.translate_arg_exprs(&call.args, scope)?;
+        //             if args.len() >= 2 {
+        //                 let res = self.builder.ins().iadd(args[0], args[1]);
+        //                 return Ok(res);
+        //             }
+        //         }
+        //         _ => (), // Not a builtin, fall through to dynamic dispatch
+        //     }
+        // }
 
-
-
-        // Dynamic function call
-        // TODO load function cell from symbol table
-        let func = self.translate_expr(call.func.as_ref(), scope)?;
+        let func = self.translate_expr(call.func.as_ref(), scope, true)?;
         let args = self.translate_arg_exprs(&call.args, scope)?;
 
         let slot = self.builder.create_sized_stack_slot(StackSlotData {
@@ -296,7 +295,7 @@ impl<'a> Codegen<'a> {
         if_expr: &If,
         scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
-        let cond_val = self.translate_expr(&if_expr.cond, scope)?;
+        let cond_val = self.translate_expr(&if_expr.cond, scope, false)?;
         let nil = self.nil();
         let cond = self.builder.ins().icmp(IntCC::NotEqual, cond_val, nil);
         let then_block = self.builder.create_block();
@@ -311,7 +310,7 @@ impl<'a> Codegen<'a> {
 
         self.builder.switch_to_block(then_block);
         self.builder.seal_block(then_block);
-        let then_return = self.translate_expr(&if_expr.then, scope)?;
+        let then_return = self.translate_expr(&if_expr.then, scope, false)?;
         self.builder.ins().jump(merge_block, &[then_return.into()]);
 
         self.builder.switch_to_block(else_block);
@@ -351,7 +350,7 @@ impl<'a> Codegen<'a> {
         self.builder.switch_to_block(blocks[0]);
         self.builder.seal_block(blocks[0]);
 
-        let first_val = self.translate_expr(&exprs[0], scope)?;
+        let first_val = self.translate_expr(&exprs[0], scope, false)?;
         let nil = self.nil();
 
         if exprs.len() == 1 {
@@ -373,7 +372,7 @@ impl<'a> Codegen<'a> {
             self.builder.switch_to_block(blocks[i]);
             self.builder.seal_block(blocks[i]);
 
-            let expr_val = self.translate_expr(&exprs[i], scope)?;
+            let expr_val = self.translate_expr(&exprs[i], scope, false)?;
 
             if i == exprs.len() - 1 {
                 // Last expression, jump to end with its value
@@ -420,7 +419,7 @@ impl<'a> Codegen<'a> {
         self.builder.switch_to_block(blocks[0]);
         self.builder.seal_block(blocks[0]);
 
-        let first_val = self.translate_expr(&exprs[0], scope)?;
+        let first_val = self.translate_expr(&exprs[0], scope, false)?;
         let nil = self.nil();
 
         if exprs.len() == 1 {
@@ -442,7 +441,7 @@ impl<'a> Codegen<'a> {
             self.builder.switch_to_block(blocks[i]);
             self.builder.seal_block(blocks[i]);
 
-            let expr_val = self.translate_expr(&exprs[i], scope)?;
+            let expr_val = self.translate_expr(&exprs[i], scope, false)?;
 
             if i == exprs.len() - 1 {
                 // Last expression, jump to end with its value (even if nil)
@@ -504,7 +503,6 @@ impl<'a> Codegen<'a> {
         lambda: &Lambda,
         scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
-
         let mut fctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
 
@@ -547,7 +545,7 @@ impl<'a> Codegen<'a> {
 
             // The values are evaluated in the *parent* scope.
             let value = if let Some(expr) = value_expr {
-                self.translate_expr(expr, parent_scope)?
+                self.translate_expr(expr, parent_scope, false)?
             } else {
                 self.nil()
             };

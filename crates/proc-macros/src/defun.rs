@@ -25,7 +25,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     ];
     let c_param_idents = vec![
         format_ident!("args_ptr"),
-        format_ident!("args_cnt"), 
+        format_ident!("args_cnt"),
         format_ident!("env"),
     ];
 
@@ -141,12 +141,12 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
             if function.fallible {
                 quote! {
                     match result {
-                        Ok(val) => Ok(val as *const _ as i64),
+                        Ok(val) => Ok(val as *const u8 as i64),
                         Err(_) => Err("call error"),
                     }
                 }
             } else {
-                quote! { Ok(result as *const _ as i64) }
+                quote! { Ok(result as *const u8 as i64) }
             }
         }
     };
@@ -224,6 +224,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         unsafe fn #rust_wrapper_name(
             #(#c_params),*
         ) -> #wrapper_ret_ty {
+            let args_cnt_u: usize = args_cnt as usize;
             #(#arg_conversion)*
             let result = #subr(#(#call_args),*);
             #wrapper_result
@@ -242,12 +243,12 @@ fn param_name(i: usize) -> Ident {
 
 fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
     let mut conversions = Vec::new();
-    
+
     // Find the minimum required arguments (non-optional, non-slice)
-    let mut required_args = 0;
+    let mut required_args: usize = 0;
     let mut has_slice = false;
     let mut slice_start_idx = None;
-    
+
     for (i, (_, _, arg_info)) in args.iter().enumerate() {
         match &arg_info.kind {
             ArgKind::Slice(_) => {
@@ -263,23 +264,23 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
             }
         }
     }
-    
+
     // Add argument count validation
     if has_slice {
         conversions.push(quote! {
-            if args_cnt < #required_args {
+            if args_cnt_u < #required_args {
                 return Err("insufficient number of arguments");
             }
         });
     } else {
-        let max_args = args.len() as i64;
+        let max_args = args.len();
         conversions.push(quote! {
-            if args_cnt < #required_args || args_cnt > #max_args {
+            if args_cnt_u < #required_args || args_cnt_u > #max_args {
                 return Err("incorrect number of arguments");
             }
         });
     }
-    
+
     // Convert each argument by loading from the args array
     for (i, (ident, ty, arg_info)) in args.iter().enumerate() {
         let conversion = match &arg_info.kind {
@@ -294,7 +295,7 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                 let slice_conversion = match inner_kind.as_ref() {
                     ArgKind::Value => {
                         quote! {
-                            let slice_len = (args_cnt - #i) as usize;
+                            let slice_len = args_cnt_u - #i;
                             let #ident = unsafe {
                                 let ptr = args_ptr as *const i64;
                                 let slice_ptr = ptr.add(#i);
@@ -305,7 +306,7 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                     ArgKind::FromValue => {
                         // For FromValue slices, we need to convert each element
                         quote! {
-                            let slice_len = (args_cnt - #i) as usize;
+                            let slice_len = args_cnt_u - #i;
                             let mut slice_vec = Vec::with_capacity(slice_len);
                             unsafe {
                                 let ptr = args_ptr as *const i64;
@@ -321,7 +322,7 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                     }
                     _ => {
                         quote! {
-                            let slice_len = (args_cnt - #i) as usize;
+                            let slice_len = args_cnt_u - #i;
                             let mut slice_vec = Vec::with_capacity(slice_len);
                             unsafe {
                                 let ptr = args_ptr as *const i64;
@@ -343,11 +344,19 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                     ArgKind::Value => {
                         if arg_info.is_ref {
                             let tmp = format_ident!("__arg_val_{}", i);
-                            let mut_tok = if arg_info.is_mut { quote! { mut } } else { quote! {} };
-                            let ref_tok = if arg_info.is_mut { quote! { &mut #tmp } } else { quote! { &#tmp } };
+                            let mut_tok = if arg_info.is_mut {
+                                quote! { mut }
+                            } else {
+                                quote! {}
+                            };
+                            let ref_tok = if arg_info.is_mut {
+                                quote! { &mut #tmp }
+                            } else {
+                                quote! { &#tmp }
+                            };
                             quote! {
-                                let (#mut_tok #tmp, #ident) = if args_cnt > #i {
-                                    let arg_val = unsafe { 
+                                let (#mut_tok #tmp, #ident) = if args_cnt_u > #i {
+                                    let arg_val = unsafe {
                                         let ptr = args_ptr as *const i64;
                                         ptr.add(#i).read()
                                     };
@@ -359,8 +368,8 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                             }
                         } else {
                             quote! {
-                                let #ident = if args_cnt > #i {
-                                    let arg_val = unsafe { 
+                                let #ident = if args_cnt_u > #i {
+                                    let arg_val = unsafe {
                                         let ptr = args_ptr as *const i64;
                                         ptr.add(#i).read()
                                     };
@@ -375,11 +384,19 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                         if arg_info.is_ref {
                             let tmp_val = format_ident!("__arg_val_{}", i);
                             let tmp_cast = format_ident!("__arg_cast_{}", i);
-                            let mut_val = if arg_info.is_mut { quote! { mut } } else { quote! {} };
-                            let ref_tok = if arg_info.is_mut { quote! { &mut #tmp_cast } } else { quote! { &#tmp_cast } };
+                            let mut_val = if arg_info.is_mut {
+                                quote! { mut }
+                            } else {
+                                quote! {}
+                            };
+                            let ref_tok = if arg_info.is_mut {
+                                quote! { &mut #tmp_cast }
+                            } else {
+                                quote! { &#tmp_cast }
+                            };
                             quote! {
-                                let (#mut_val #tmp_cast, #ident) = if args_cnt > #i {
-                                    let arg_val = unsafe { 
+                                let (#mut_val #tmp_cast, #ident) = if args_cnt_u > #i {
+                                    let arg_val = unsafe {
                                         let ptr = args_ptr as *const i64;
                                         ptr.add(#i).read()
                                     };
@@ -392,8 +409,8 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                             }
                         } else {
                             quote! {
-                                let #ident = if args_cnt > #i {
-                                    let arg_val = unsafe { 
+                                let #ident = if args_cnt_u > #i {
+                                    let arg_val = unsafe {
                                         let ptr = args_ptr as *const i64;
                                         ptr.add(#i).read()
                                     };
@@ -408,8 +425,8 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                     }
                     _ => {
                         quote! {
-                            let #ident = if args_cnt > #i {
-                                let arg_val = unsafe { 
+                            let #ident = if args_cnt_u > #i {
+                                let arg_val = unsafe {
                                     let ptr = args_ptr as *const i64;
                                     ptr.add(#i).read()
                                 };
@@ -425,16 +442,24 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
             }
             ArgKind::Value => {
                 let load_arg = quote! {
-                    let arg_val = unsafe { 
+                    let arg_val = unsafe {
                         let ptr = args_ptr as *const i64;
                         ptr.add(#i).read()
                     };
                 };
-                
+
                 if arg_info.is_ref {
                     let tmp = format_ident!("__arg_val_{}", i);
-                    let mut_tok = if arg_info.is_mut { quote! { mut } } else { quote! {} };
-                    let ref_tok = if arg_info.is_mut { quote! { &mut #tmp } } else { quote! { &#tmp } };
+                    let mut_tok = if arg_info.is_mut {
+                        quote! { mut }
+                    } else {
+                        quote! {}
+                    };
+                    let ref_tok = if arg_info.is_mut {
+                        quote! { &mut #tmp }
+                    } else {
+                        quote! { &#tmp }
+                    };
                     quote! {
                         #load_arg
                         let #mut_tok #tmp = crate::core::value::Value(arg_val as u64);
@@ -449,17 +474,25 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
             }
             ArgKind::FromValue => {
                 let load_arg = quote! {
-                    let arg_val = unsafe { 
+                    let arg_val = unsafe {
                         let ptr = args_ptr as *const i64;
                         ptr.add(#i).read()
                     };
                 };
-                
+
                 if arg_info.is_ref {
                     let tmp_val = format_ident!("__arg_val_{}", i);
                     let tmp_cast = format_ident!("__arg_cast_{}", i);
-                    let mut_val = if arg_info.is_mut { quote! { mut } } else { quote! {} };
-                    let ref_tok = if arg_info.is_mut { quote! { &mut #tmp_cast } } else { quote! { &#tmp_cast } };
+                    let mut_val = if arg_info.is_mut {
+                        quote! { mut }
+                    } else {
+                        quote! {}
+                    };
+                    let ref_tok = if arg_info.is_mut {
+                        quote! { &mut #tmp_cast }
+                    } else {
+                        quote! { &#tmp_cast }
+                    };
                     quote! {
                         #load_arg
                         let #mut_val #tmp_val = crate::core::value::Value(arg_val as u64);
@@ -475,7 +508,7 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
             }
             _ => {
                 let load_arg = quote! {
-                    let arg_val = unsafe { 
+                    let arg_val = unsafe {
                         let ptr = args_ptr as *const i64;
                         ptr.add(#i).read()
                     };
@@ -486,10 +519,10 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                 }
             }
         };
-        
+
         conversions.push(conversion);
     }
-    
+
     conversions
 }
 
@@ -501,14 +534,14 @@ fn map_function_name(name: &str) -> String {
     name.replace('_', "-")
 }
 
-struct ArgInfo {
-    kind: ArgKind,
-    is_mut: bool,
-    is_ref: bool,
+pub(crate) struct ArgInfo {
+    pub(crate) kind: ArgKind,
+    pub(crate) is_mut: bool,
+    pub(crate) is_ref: bool,
 }
 
 #[derive(PartialEq, Debug, Clone)]
-enum ArgKind {
+pub(crate) enum ArgKind {
     Env,
     Value,
     FromValue,
@@ -518,7 +551,7 @@ enum ArgKind {
 }
 
 #[derive(PartialEq, Debug, Clone)]
-enum RetKind {
+pub(crate) enum RetKind {
     Unit,                 // no return
     Value,                // crate::core::value::Value
     IntoValue,            // types convertible into Value
@@ -528,12 +561,12 @@ enum RetKind {
 }
 
 pub(crate) struct Function {
-    name: syn::Ident,
-    body: syn::Item,
-    args: Vec<(syn::Ident, syn::Type, ArgInfo)>,
-    fallible: bool,
-    is_lisp_subr: bool,
-    ret_kind: RetKind,
+    pub(crate) name: syn::Ident,
+    pub(crate) body: syn::Item,
+    pub(crate) args: Vec<(syn::Ident, syn::Type, ArgInfo)>,
+    pub(crate) fallible: bool,
+    pub(crate) is_lisp_subr: bool,
+    pub(crate) ret_kind: RetKind,
 }
 
 impl syn::parse::Parse for Function {
@@ -651,8 +684,7 @@ fn classify_return_type(ty: &syn::Type) -> RetKind {
                 "LispString" | "Symbol" | "Vector" | "Cons" | "Map" | "Function" | "i64" => {
                     RetKind::IntoValue
                 }
-                // Fallback to requiring Into<Value> at compile-time
-                _ => RetKind::IntoValue,
+                _ => RetKind::Other,
             }
         }
         _ => RetKind::Other,
@@ -676,7 +708,7 @@ fn get_arg_type(ty: &syn::Type) -> Result<(ArgInfo, &syn::Type), Error> {
                     let option_ty = get_generic_param(outer).expect("incorrect Option types");
                     let (info, ty) = get_arg_type(option_ty)?;
                     inner_ty = ty; // ensure we return the inner T for Option<T>
-                                   // TODO we are not expecting double reference, so this is fine
+                    // TODO we are not expecting double reference, so this is fine
                     is_ref = is_ref | info.is_ref;
                     is_mut = is_mut | info.is_mut;
                     ArgKind::Option(Box::new(info.kind))

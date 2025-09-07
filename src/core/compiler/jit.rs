@@ -65,7 +65,7 @@ impl JIT {
             scope,
         )?;
 
-        let val = codegen.translate_expr(expr, &new_scope)?;
+        let val = codegen.translate_expr(expr, &new_scope, false)?;
 
         let func_id = codegen.func_id;
         codegen.finalize(val);

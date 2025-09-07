@@ -24,7 +24,10 @@ use crate::{
     ast::elisp_parser,
     core::{
         compiler::{
-            ast_to_ir::node_to_ir, ir::Expr, jit::JIT, scope::{CompileScope, GlobalScope}
+            ast_to_ir::node_to_ir,
+            ir::Expr,
+            jit::JIT,
+            scope::{CompileScope, GlobalScope},
         },
         env::Environment,
         value::Value,

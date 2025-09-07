@@ -13,18 +13,13 @@ use crate::{
     gc::{Gc, GcInner, Trace},
 };
 
-pub(crate) type BuiltInFn =
-    for<'a> fn(args: *const Value, env: *mut Environment) -> anyhow::Result<Value>;
-
 #[derive(Debug, Clone, Copy)]
-pub struct SubrFn {
-    pub func: BuiltInFn,
-}
+pub struct SubrFn {}
 
-pub(crate) type Closure =
-    for<'a> fn(args: *const Value, env: *mut Environment) -> anyhow::Result<Value>;
+pub(crate) type FuncPtr =
+    for<'a> fn(args: *const Value, argc: u64, env: *const Environment) -> anyhow::Result<Value>;
 
-pub unsafe fn cast_func_ptr(ptr: *const u8) -> Closure {
+pub unsafe fn cast_func_ptr(ptr: *const u8) -> FuncPtr {
     std::mem::transmute(ptr)
 }
 
@@ -34,14 +29,12 @@ pub struct LambdaFn {
     // Captured environment as a GC’d map of Value -> Value (key is typically a Symbol tagged as Value).
     #[no_trace]
     pub captures: HashMap<Ident, Value>,
-    #[no_trace]
-    pub func: BuiltInFn,
 }
 
 #[derive(Debug, Clone, Trace)]
 pub enum FunctionType {
     #[no_trace]
-    Subr(SubrFn),
+    Subr,
     Lambda(LambdaFn),
 }
 
@@ -49,11 +42,12 @@ pub enum FunctionType {
 pub struct FunctionInner {
     #[no_trace]
     pub func_id: FuncId,
-    #[no_trace]
-    pub sig: FunctionSignature,
 
     #[no_trace]
     pub func_type: FunctionType,
+
+    #[no_trace]
+    pub func_ptr: Option<FuncPtr>,
 }
 
 #[repr(C)]
@@ -83,19 +77,16 @@ impl FunctionType {
 }
 
 impl Function {
-    pub fn new_closure(func: *const u8, func_id: FuncId) -> Self {
-        unsafe {
-            let func = cast_func_ptr(func);
-            let closure = LambdaFn {
-                captures: HashMap::new(),
-                func,
-            };
-            Self {
-                inner: Gc::new(FunctionInner {
-                    func_id,
-                    func_type: FunctionType::Lambda(closure),
-                }),
-            }
+    pub fn new_closure(func_id: FuncId) -> Self {
+        let closure = LambdaFn {
+            captures: HashMap::new(),
+        };
+        Self {
+            inner: Gc::new(FunctionInner {
+                func_id,
+                func_type: FunctionType::Lambda(closure),
+                func_ptr: None,
+            }),
         }
     }
 
@@ -108,21 +99,21 @@ impl Function {
     }
 
     pub fn set_func_ptr(&self, func_ptr: *const u8) {
-        match &mut self.inner.get_mut().func_type {
-            FunctionType::Subr(subr_fn) => unsafe {
-                subr_fn.func = cast_func_ptr(func_ptr);
-            },
-            FunctionType::Lambda(lambda_fn) => unsafe {
-                lambda_fn.func = cast_func_ptr(func_ptr);
-            },
-        }
+        unsafe { self.inner.get_mut().func_ptr = Some(cast_func_ptr(func_ptr)) }
     }
 
-    pub fn run(&self, args: &[Value], env: &mut Environment) -> anyhow::Result<Value> {
-        match &self.inner.get().func_type {
-            FunctionType::Subr(subr_fn) => (subr_fn.func)(args.as_ptr(), env),
-            FunctionType::Lambda(lambda_fn) => (lambda_fn.func)(args.as_ptr(), env),
-        }
+    pub fn get_func_ptr(&self) -> Option<FuncPtr> {
+        self.inner.get().func_ptr
+    }
+
+    pub fn run(&self, args: &[Value], env: &Environment) -> anyhow::Result<Value> {
+        let func = self
+            .inner
+            .get()
+            .func_ptr
+            .ok_or(anyhow::anyhow!("no pointer"))?;
+        let argc = args.len() as u64;
+        func(args.as_ptr(), argc, env)
     }
 }
 

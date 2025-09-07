@@ -4,13 +4,13 @@ use proc_macro2::{Ident, Literal, TokenStream};
 use quote::{format_ident, quote};
 use syn::{Error, Type};
 
-use crate::defun::{Function, ArgInfo, ArgKind, RetKind};
+use crate::defun::{ArgInfo, ArgKind, Function, RetKind};
 
 pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let body = function.body;
     let subr = function.name;
     let subr_name = subr.to_string();
-    let lisp_name = spec.name.unwrap_or_else(|| map_function_name(&subr_name));
+    let lisp_name = spec.name.unwrap_or_else(|| subr_name.clone());
     let func_name = format_ident!("__wrapper_fn_{}", &subr_name);
     let def_func_name = format_ident!("__def_{}", &subr_name);
     let register_func_name = format_ident!("__register_{}", &subr_name);
@@ -20,19 +20,23 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let arg_conversion = get_arg_conversion(&args);
 
     // Generate direct parameter passing for internal functions
-    let c_params: Vec<TokenStream> = args.iter().enumerate().map(|(i, (ident, ty, arg_info))| {
-        match &arg_info.kind {
+    let c_params: Vec<TokenStream> = args
+        .iter()
+        .enumerate()
+        .map(|(i, (ident, ty, arg_info))| match &arg_info.kind {
             ArgKind::Env => quote! { env: i64 },
             _ => quote! { #ident: i64 },
-        }
-    }).collect();
+        })
+        .collect();
 
-    let c_param_idents: Vec<Ident> = args.iter().enumerate().map(|(i, (ident, _, arg_info))| {
-        match &arg_info.kind {
+    let c_param_idents: Vec<Ident> = args
+        .iter()
+        .enumerate()
+        .map(|(i, (ident, _, arg_info))| match &arg_info.kind {
             ArgKind::Env => format_ident!("env"),
             _ => ident.clone(),
-        }
-    }).collect();
+        })
+        .collect();
 
     // Generate the actual function call
     let call_args = args.iter().map(|(ident, _, _)| quote! { #ident });
@@ -179,16 +183,19 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     };
 
     // Generate direct parameter signatures for internal functions
-    let signatures: Vec<TokenStream> = args.iter().map(|(_, _, arg_info)| {
-        match &arg_info.kind {
-            ArgKind::Env => quote! {
-                sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // env
-            },
-            _ => quote! {
-                sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // param
-            },
-        }
-    }).collect();
+    let signatures: Vec<TokenStream> = args
+        .iter()
+        .map(|(_, _, arg_info)| {
+            match &arg_info.kind {
+                ArgKind::Env => quote! {
+                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // env
+                },
+                _ => quote! {
+                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // param
+                },
+            }
+        })
+        .collect();
 
     quote! {
         #[automatically_derived]
@@ -230,7 +237,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
 
 fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
     let mut conversions = Vec::new();
-    
+
     // Convert each argument directly from i64 parameter
     for (i, (ident, ty, arg_info)) in args.iter().enumerate() {
         let conversion = match &arg_info.kind {
@@ -243,8 +250,16 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
             ArgKind::Value => {
                 if arg_info.is_ref {
                     let tmp = format_ident!("__arg_val_{}", i);
-                    let mut_tok = if arg_info.is_mut { quote! { mut } } else { quote! {} };
-                    let ref_tok = if arg_info.is_mut { quote! { &mut #tmp } } else { quote! { &#tmp } };
+                    let mut_tok = if arg_info.is_mut {
+                        quote! { mut }
+                    } else {
+                        quote! {}
+                    };
+                    let ref_tok = if arg_info.is_mut {
+                        quote! { &mut #tmp }
+                    } else {
+                        quote! { &#tmp }
+                    };
                     quote! {
                         let #mut_tok #tmp = crate::core::value::Value(#ident as u64);
                         let #ident = #ref_tok;
@@ -259,8 +274,16 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                 if arg_info.is_ref {
                     let tmp_val = format_ident!("__arg_val_{}", i);
                     let tmp_cast = format_ident!("__arg_cast_{}", i);
-                    let mut_val = if arg_info.is_mut { quote! { mut } } else { quote! {} };
-                    let ref_tok = if arg_info.is_mut { quote! { &mut #tmp_cast } } else { quote! { &#tmp_cast } };
+                    let mut_val = if arg_info.is_mut {
+                        quote! { mut }
+                    } else {
+                        quote! {}
+                    };
+                    let ref_tok = if arg_info.is_mut {
+                        quote! { &mut #tmp_cast }
+                    } else {
+                        quote! { &#tmp_cast }
+                    };
                     quote! {
                         let #mut_val #tmp_val = crate::core::value::Value(#ident as u64);
                         let #mut_val #tmp_cast: #ty = ::std::convert::TryFrom::try_from(#tmp_val)?;
@@ -278,10 +301,10 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                 }
             }
         };
-        
+
         conversions.push(conversion);
     }
-    
+
     conversions
 }
 
