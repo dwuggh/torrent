@@ -51,10 +51,11 @@ impl<'a> Codegen<'a> {
         // make signature
 
         let sig = &mut ctx.func.signature;
-        for _ in 0..args.len() {
-            sig.params.push(AbiParam::new(types::I64));
-        }
-        // NOTE env arg
+        // args_ptr: pointer to arguments array
+        sig.params.push(AbiParam::new(types::I64));
+        // args_cnt: number of arguments
+        sig.params.push(AbiParam::new(types::I64));
+        // env arg
         sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
 
@@ -68,17 +69,24 @@ impl<'a> Codegen<'a> {
         // builder.block_params(entry_block);
 
 
+        let block_params = builder.block_params(entry_block);
+        let args_ptr = block_params[0];
+        let args_cnt = block_params[1];
+        let env = block_params[2];
+
         let mut variables = HashMap::new();
         for (i, arg) in args.iter().enumerate() {
-            // TODO deal with other type of arguments
             let arg = arg.ident;
             let sym = arg.into();
-            let val = builder.block_params(entry_block)[i];
             let var = builder.declare_var(types::I64);
             variables.insert(sym, var);
+            
+            // Load argument from the arguments array
+            let offset = builder.ins().iconst(types::I64, (i * 8) as i64);
+            let arg_addr = builder.ins().iadd(args_ptr, offset);
+            let val = builder.ins().load(types::I64, MemFlags::new(), arg_addr, 0);
             builder.def_var(var, val);
         }
-        let env = *builder.block_params(entry_block).last().ok_or(anyhow::anyhow!("no env parameter"))?;
 
         let new_scope = FrameScope::new(variables, parent_scope, false, true).into();
 
@@ -252,7 +260,7 @@ impl<'a> Codegen<'a> {
         let slot = self.builder.create_sized_stack_slot(StackSlotData {
             kind: StackSlotKind::ExplicitSlot,
             size: 8 * args.len() as u32,
-            align_shift: 0,
+            align_shift: 3, // 8-byte alignment
         });
 
         for (i, val) in args.iter().enumerate() {
@@ -260,11 +268,9 @@ impl<'a> Codegen<'a> {
         }
 
         let args_ptr = self.builder.ins().stack_addr(types::I64, slot, 0);
-        let args_len = self.builder.ins().iconst(types::I64, args.len() as i64);
+        let args_cnt = self.builder.ins().iconst(types::I64, args.len() as i64);
 
-        // self.builder.ins().call_indirect(, callee, args)
-        // self.builder.import_signature()
-        let res = self.call("apply", &[func, args_ptr, args_len, self.env])[0];
+        let res = self.call("apply", &[func, args_ptr, args_cnt, self.env])[0];
         Ok(res)
     }
 

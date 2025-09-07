@@ -18,26 +18,16 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let arg_conversion = get_arg_conversion(&args);
 
     // Generate the extern "C" function signature
-    // let c_params = (0..args.len()).map(|i| quote! { arg_#i: i64 });
-    let mut c_param_idents: Vec<Ident> = Vec::new();
-    let mut c_params: Vec<TokenStream> = Vec::new();
-    for (i, (_ident, _ty, arg_info)) in args.iter().enumerate() {
-        match &arg_info.kind {
-            ArgKind::Slice(_) => {
-                let ptr = format_ident!("arg_{}_ptr", i);
-                let len = format_ident!("arg_{}_len", i);
-                c_params.push(quote! { #ptr: i64 });
-                c_params.push(quote! { #len: i64 });
-                c_param_idents.push(ptr);
-                c_param_idents.push(len);
-            }
-            _ => {
-                let id = format_ident!("arg_{}", i);
-                c_params.push(quote! { #id: i64 });
-                c_param_idents.push(id);
-            }
-        }
-    }
+    let c_params = vec![
+        quote! { args_ptr: i64 },
+        quote! { args_cnt: i64 },
+        quote! { env: i64 },
+    ];
+    let c_param_idents = vec![
+        format_ident!("args_ptr"),
+        format_ident!("args_cnt"), 
+        format_ident!("env"),
+    ];
 
     // Generate the actual function call
     let call_args = args.iter().map(|(ident, _, _)| quote! { #ident });
@@ -189,24 +179,17 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         }
     };
 
-    let mut signatures: Vec<TokenStream> = Vec::new();
-    for (_, _, arg_info) in args.iter() {
-        match &arg_info.kind {
-            ArgKind::Slice(_) => {
-                signatures.push(quote! {
-                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64));
-                });
-                signatures.push(quote! {
-                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64));
-                });
-            }
-            _ => {
-                signatures.push(quote! {
-                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64));
-                });
-            }
-        }
-    }
+    let signatures = vec![
+        quote! {
+            sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // args_ptr
+        },
+        quote! {
+            sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // args_cnt
+        },
+        quote! {
+            sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // env
+        },
+    ];
 
     let is_lisp_subr = spec.is_lisp_subr && function.is_lisp_subr;
     quote! {
@@ -258,207 +241,81 @@ fn param_name(i: usize) -> Ident {
 }
 
 fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
-    args.iter()
-        .enumerate()
-        .map(|(i, (ident, ty, arg_info))| {
-            let param = param_name(i);
-
-            match &arg_info.kind {
-                ArgKind::Env => {
+    let mut conversions = Vec::new();
+    
+    // Add argument count validation
+    let expected_args = args.len() as i64;
+    conversions.push(quote! {
+        if args_cnt != #expected_args {
+            return Err("incorrect number of arguments");
+        }
+    });
+    
+    // Convert each argument by loading from the args array
+    for (i, (ident, ty, arg_info)) in args.iter().enumerate() {
+        let load_arg = quote! {
+            let arg_val = unsafe { 
+                let ptr = args_ptr as *const i64;
+                ptr.add(#i).read()
+            };
+        };
+        
+        let conversion = match &arg_info.kind {
+            ArgKind::Env => {
+                quote! {
+                    let #ident = env as *mut crate::core::env::Environment;
+                    let #ident = #ident.as_mut().ok_or("failed to convert env")?;
+                }
+            }
+            ArgKind::Value => {
+                if arg_info.is_ref {
+                    let tmp = format_ident!("__arg_val_{}", i);
+                    let mut_tok = if arg_info.is_mut { quote! { mut } } else { quote! {} };
+                    let ref_tok = if arg_info.is_mut { quote! { &mut #tmp } } else { quote! { &#tmp } };
                     quote! {
-                        let #ident = #param as *mut crate::core::env::Environment;
-                        let #ident = #ident.as_mut().ok_or("failed to convert env")?;
+                        #load_arg
+                        let #mut_tok #tmp = crate::core::value::Value(arg_val as u64);
+                        let #ident = #ref_tok;
                     }
-                }
-
-                // Direct Value reconstruction (by bits)
-                ArgKind::Value => {
-                    if arg_info.is_ref {
-                        let tmp = format_ident!("__arg_val_{}", i);
-                        let mut_tok = if arg_info.is_mut { quote! { mut } } else { quote! {} };
-                        let ref_tok = if arg_info.is_mut { quote! { &mut #tmp } } else { quote! { &#tmp } };
-                        quote! {
-                            let #mut_tok #tmp = crate::core::value::Value(#param as u64);
-                            let #ident = #ref_tok;
-                        }
-                    } else {
-                        quote! {
-                            let #ident = crate::core::value::Value(#param as u64);
-                        }
-                    }
-                }
-
-                // Types that require TryFrom<Value>
-                ArgKind::FromValue => {
-                    if arg_info.is_ref {
-                        let tmp_val = format_ident!("__arg_val_{}", i);
-                        let tmp_cast = format_ident!("__arg_cast_{}", i);
-                        let mut_val = if arg_info.is_mut { quote! { mut } } else { quote! {} };
-                        let ref_tok = if arg_info.is_mut { quote! { &mut #tmp_cast } } else { quote! { &#tmp_cast } };
-                        quote! {
-                            let #mut_val #tmp_val = crate::core::value::Value(#param as u64);
-                            let #mut_val #tmp_cast: #ty = ::std::convert::TryFrom::try_from(#tmp_val)?;
-                            let #ident = #ref_tok;
-                        }
-                    } else {
-                        quote! {
-                            let #ident: #ty = ::std::convert::TryFrom::try_from(crate::core::value::Value(#param as u64))?;
-                        }
-                    }
-                }
-
-                // Option<T> where T is Value-like or FromValue-like, with NIL as None
-                ArgKind::Option(inner_kind) => {
-                    let is_ref = arg_info.is_ref;
-                    let is_mut = arg_info.is_mut;
-
-                    match &**inner_kind {
-                        // Option<Value> or Option<&Value>
-                        ArgKind::Value => {
-                            if is_ref {
-                                let tmp = format_ident!("__arg_val_{}", i);
-                                let mut_tok = if is_mut { quote! { mut } } else { quote! {} };
-                                let ref_tok = if is_mut { quote! { &mut #tmp } } else { quote! { &#tmp } };
-                                quote! {
-                                    let #ident = if #param == crate::core::value::NIL {
-                                        None
-                                    } else {
-                                        let #mut_tok #tmp = crate::core::value::Value(#param as u64);
-                                        Some(#ref_tok)
-                                    };
-                                }
-                            } else {
-                                quote! {
-                                    let #ident = if #param == crate::core::value::NIL {
-                                        None
-                                    } else {
-                                        Some(crate::core::value::Value(#param as u64))
-                                    };
-                                }
-                            }
-                        }
-
-                        // Option<T> or Option<&T> where T: TryFrom<Value>
-                        ArgKind::FromValue => {
-                            if is_ref {
-                                let tmp_val = format_ident!("__arg_val_{}", i);
-                                let tmp_cast = format_ident!("__arg_cast_{}", i);
-                                let mut_val = if is_mut { quote! { mut } } else { quote! {} };
-                                let ref_tok = if is_mut { quote! { &mut #tmp_cast } } else { quote! { &#tmp_cast } };
-                                quote! {
-                                    let #ident = if #param == crate::core::value::NIL {
-                                        None
-                                    } else {
-                                        let #mut_val #tmp_val = crate::core::value::Value(#param as u64);
-                                        let #tmp_cast: #ty = ::std::convert::TryFrom::try_from(#tmp_val)?;
-                                        Some(#ref_tok)
-                                    };
-                                }
-                            } else {
-                                quote! {
-                                    let #ident = if #param == crate::core::value::NIL {
-                                        None
-                                    } else {
-                                        Some(::std::convert::TryFrom::try_from(crate::core::value::Value(#param as u64))?)
-                                    };
-                                }
-                            }
-                        }
-
-                        // Fallback: transmute inside Some
-                        _ => {
-                            quote! {
-                                let #ident = if #param == crate::core::value::NIL {
-                                    None
-                                } else {
-                                    Some(unsafe { ::std::mem::transmute::<i64, #ty>(#param) })
-                                };
-                            }
-                        }
-                    }
-                }
-
-                // Slice arguments: reconstruct from (ptr,len)
-                ArgKind::Slice(inner_kind) => {
-                    // arg_i comes in as two C-ABI params: arg_{i}_ptr (i64) and arg_{i}_len (i64)
-                    let ptr_param = format_ident!("arg_{}_ptr", i);
-                    let len_param = format_ident!("arg_{}_len", i);
-                    let vec_name = format_ident!("__arg_slice_vec_{}", i);
-                    let len_name = format_ident!("__arg_slice_len_{}", i);
-                    let ptr_cast = quote! { #ptr_param as *const i64 };
-
-                    // Whether the Rust parameter is &mut [..]
-                    let ref_tok = if arg_info.is_mut { quote! { &mut #vec_name[..] } } else { quote! { &#vec_name[..] } };
-
-                    // If the inner item requires TryFrom<Value>
-                    match &**inner_kind {
-                        ArgKind::Value => {
-                            quote! {
-                                let #len_name: usize = ::std::convert::TryFrom::try_from(#len_param)
-                                    .map_err(|_| "invalid slice length")?;
-                                let __ptr = #ptr_cast;
-                                let mut #vec_name: ::std::vec::Vec<crate::core::value::Value> = ::std::vec::Vec::with_capacity(#len_name);
-                                for __i in 0..#len_name {
-                                    let __raw = unsafe { __ptr.add(__i).read() as u64 };
-                                    let __val = crate::core::value::Value::from_raw_inc_rc(__raw);
-                                    #vec_name.push(__val);
-                                }
-                                let #ident = #ref_tok;
-                            }
-                        }
-                        ArgKind::FromValue => {
-                            // Determine the element type from the Rust type: it must be a slice [T]
-                            let elem_ty: &syn::Type = match ty {
-                                syn::Type::Slice(s) => s.elem.as_ref(),
-                                _ => ty, // fallback; shouldn't happen
-                            };
-                            quote! {
-                                let #len_name: usize = ::std::convert::TryFrom::try_from(#len_param)
-                                    .map_err(|_| "invalid slice length")?;
-                                let __ptr = #ptr_cast;
-                                let mut #vec_name: ::std::vec::Vec<#elem_ty> = ::std::vec::Vec::with_capacity(#len_name);
-                                for __i in 0..#len_name {
-                                    let __raw = unsafe { __ptr.add(__i).read() as u64 };
-                                    let __val = crate::core::value::Value::from_raw_inc_rc(__raw);
-                                    let __cast: #elem_ty = ::std::convert::TryFrom::try_from(__val)?;
-                                    #vec_name.push(__cast);
-                                }
-                                let #ident = #ref_tok;
-                            }
-                        }
-                        _ => {
-                            // Fallback: treat as slice of raw i64 payloads
-                            quote! {
-                                let #len_name: usize = ::std::convert::TryFrom::try_from(#len_param)
-                                    .map_err(|_| "invalid slice length")?;
-                                let __ptr = #ptr_cast;
-                                // Rebuild a Vec<i64> and borrow it as a slice
-                                let mut #vec_name: ::std::vec::Vec<i64> = ::std::vec::Vec::with_capacity(#len_name);
-                                for __i in 0..#len_name {
-                                    let __raw = unsafe { __ptr.add(__i).read() };
-                                    #vec_name.push(__raw);
-                                }
-                                let #ident = #ref_tok;
-                            }
-                        }
-                    }
-                }
-
-                // Fallback for other ABI-passed primitives: transmute raw i64 for refs, try_from for non-refs
-                ArgKind::Other => {
-                    if arg_info.is_ref {
-                        quote! {
-                            let #ident = unsafe { ::std::mem::transmute::<i64, #ty>(#param) };
-                        }
-                    } else {
-                        quote! {
-                            let #ident: #ty = ::std::convert::TryFrom::try_from(#param)?;
-                        }
+                } else {
+                    quote! {
+                        #load_arg
+                        let #ident = crate::core::value::Value(arg_val as u64);
                     }
                 }
             }
-        })
-        .collect()
+            ArgKind::FromValue => {
+                if arg_info.is_ref {
+                    let tmp_val = format_ident!("__arg_val_{}", i);
+                    let tmp_cast = format_ident!("__arg_cast_{}", i);
+                    let mut_val = if arg_info.is_mut { quote! { mut } } else { quote! {} };
+                    let ref_tok = if arg_info.is_mut { quote! { &mut #tmp_cast } } else { quote! { &#tmp_cast } };
+                    quote! {
+                        #load_arg
+                        let #mut_val #tmp_val = crate::core::value::Value(arg_val as u64);
+                        let #mut_val #tmp_cast: #ty = ::std::convert::TryFrom::try_from(#tmp_val)?;
+                        let #ident = #ref_tok;
+                    }
+                } else {
+                    quote! {
+                        #load_arg
+                        let #ident: #ty = ::std::convert::TryFrom::try_from(crate::core::value::Value(arg_val as u64))?;
+                    }
+                }
+            }
+            // Handle other cases similarly, but they'll need special handling for slices
+            _ => {
+                quote! {
+                    #load_arg
+                    let #ident: #ty = ::std::convert::TryFrom::try_from(arg_val)?;
+                }
+            }
+        };
+        
+        conversions.push(conversion);
+    }
+    
+    conversions
 }
 
 fn get_path_ident_name(type_path: &syn::TypePath) -> String {
