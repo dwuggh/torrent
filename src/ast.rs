@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-use std::collections::HashSet;
 
 use chumsky::{
     prelude::*,
@@ -119,7 +118,7 @@ impl Node {
 
     // car/cdr + synonyms
     pub fn car(&self) -> Option<&Node> {
-        self.as_list().and_then(|s| s.get(0))
+        self.as_list().and_then(|s| s.first())
     }
 
     pub fn cdr(&self) -> Option<&[Node]> {
@@ -139,7 +138,7 @@ impl Node {
 
     // Common composed selectors
     pub fn cadr(&self) -> Option<&Node> {
-        self.cdr().and_then(|s| s.get(0))
+        self.cdr().and_then(|s| s.first())
     }
 
     pub fn caddr(&self) -> Option<&Node> {

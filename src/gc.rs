@@ -1,7 +1,7 @@
 use std::{
     alloc::Layout,
     any::Any,
-    cell::{Cell, UnsafeCell},
+    cell::UnsafeCell,
     hash::Hash,
     marker::PhantomData,
     mem::ManuallyDrop,

@@ -1,23 +1,3 @@
-// use ast::Node;
-// use env::{Env, Value};
-
-// mod ast;
-// mod env;
-
-// fn main() {
-//     let program = "(+ 6 1)";
-//     let nodes = Node::parse(program).unwrap();
-//     let mut env = Env::new();
-//     for node in nodes {
-//         let val = env.eval_node(node);
-//         match val {
-//             Value::Integer(i) => println!("Result: {}", i),
-//             Value::Float(f) => println!("Result: {}", f),
-//             _ => println!("Result: {:?}", val),
-//         }
-//     }
-// }
-
 use chumsky::Parser;
 
 use crate::{
@@ -25,7 +5,6 @@ use crate::{
     core::{
         compiler::{
             ast_to_ir::node_to_ir,
-            ir::Expr,
             jit::JIT,
             scope::{CompileScope, GlobalScope},
         },
@@ -39,40 +18,47 @@ pub mod core;
 pub mod gc;
 
 fn main() -> anyhow::Result<()> {
+    // let subscriber = tracing_subscriber::fmt().with_max_level(tracing::Level::TRACE).finish();
+    // tracing::subscriber::set_global_default(subscriber)?;
+    tracing_subscriber::fmt::init();
     let mut jit = JIT::default();
-    let text = "(+ 1 2)";
+    let text = "(let ((x (lambda (x) 1))) x)";
+    // let text = "((lambda (x) x) 20)";
+    // let text = "(let ((x 5)) x)";
     // let text = "2";
-    let runtime_env = Environment::default();
+    let runtime_env = Box::new(Environment::default());
     let root = GlobalScope::new(&runtime_env);
+    let ptr = runtime_env.as_ref() as *const Environment;
+    // let runtime_env = Box::new(Environment::default());
+
     let ctx = CompileScope::Global(root);
 
     unsafe {
-        let a: u64 = run_code(&mut jit, text, ctx, ()).unwrap();
+        let a: u64 = run_code(&mut jit, text, ctx, ptr).unwrap();
         let value = Value(a);
         let result = value.untag();
-        println!("result: {result:?}");
+        println!("result: {result:?} {a}");
     };
     Ok(())
 }
 
-unsafe fn run_code<I, O>(
+unsafe fn run_code<O>(
     jit: &mut JIT,
     code: &str,
     ctx: CompileScope<'_>,
-    input: I,
+    env: *const Environment,
 ) -> anyhow::Result<O> {
     unsafe {
         // Pass the string to the JIT, and it returns a raw pointer to machine code.
         let node = elisp_parser().parse(code).unwrap()[0].clone();
-        println!("{node:?}");
         let expr = node_to_ir(node)?;
 
         let f = jit.compile_expr(&expr, &ctx).unwrap();
         // Cast the raw pointer to a typed function pointer. This is unsafe, because
         // this is the critical point where you have to trust that the generated code
         // is safe to be called.
-        let code_fn = std::mem::transmute::<_, fn(I) -> O>(f);
+        let code_fn = std::mem::transmute::<_, fn(i64, u64, *const Environment) -> O>(f);
         // And now we can call it!
-        Ok(code_fn(input))
+        Ok(code_fn(0, 0, env as *const Environment))
     }
 }

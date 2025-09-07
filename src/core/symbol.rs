@@ -1,11 +1,10 @@
-use std::sync::{LazyLock, RwLock};
-use std::{marker::PhantomData, sync::Arc};
+use std::sync::LazyLock;
+use std::marker::PhantomData;
 
 // include!(concat!(env!("OUT_DIR"), "/sym.rs"));
 // use sym::BUILTIN_SYMBOLS;
 
 use dashmap::DashMap;
-use lasso::{Key, Spur};
 use proc_macros::Trace;
 
 use crate::core::ident::Ident;
@@ -99,11 +98,11 @@ impl Symbol {
 
     // TODO
     pub(crate) fn get(&self) -> Option<dashmap::mapref::one::Ref<'_, Symbol, SymbolCell>> {
-        INTERNED_SYMBOLS.map.get(&self)
+        INTERNED_SYMBOLS.map.get(self)
     }
 
     pub fn get_or_init(&self) -> dashmap::mapref::one::RefMut<'_, Symbol, SymbolCell> {
-        INTERNED_SYMBOLS.map.get_mut(&self).unwrap()
+        INTERNED_SYMBOLS.map.get_mut(self).unwrap()
     }
 }
 

@@ -3,7 +3,7 @@ use crate::core::{
     function::{FuncPtr, FunctionType},
     ident::Ident,
     symbol::Symbol,
-    value::{LispValue, TaggedPtr, Value},
+    value::{LispValue, Value},
 };
 use anyhow::{anyhow, Result};
 use proc_macros::{defun, internal_fn};
@@ -18,7 +18,7 @@ fn store_captured(ident: Ident, value: Value, func: &Function) {
     let FunctionType::Lambda(func) = func.get_func_type_mut() else {
         return;
     };
-    func.captures.insert(ident, value.clone());
+    func.captures.insert(ident, value);
 }
 
 #[internal_fn]

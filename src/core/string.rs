@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use proc_macros::Trace;
 
-use crate::core::value::{LispType, TaggedPtr, Value};
+use crate::core::value::{LispType, TaggedPtr};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LispString(Arc<String>);

@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use anyhow::bail;
 use cranelift::prelude::*;
 use cranelift_jit::JITBuilder;
 use cranelift_jit::JITModule;
@@ -8,7 +7,7 @@ use cranelift_module::DataDescription;
 use cranelift_module::FuncId;
 use cranelift_module::Module;
 
-use super::scope::{CompileScope, FrameScope};
+use super::scope::CompileScope;
 use crate::core::compiler::codegen::Codegen;
 use crate::core::compiler::ir::Expr;
 use crate::core::compiler::BuiltinFnPlugin;
@@ -53,7 +52,7 @@ impl Default for JIT {
 }
 
 impl JIT {
-    pub fn compile_expr<'s>(&mut self, expr: &Expr, scope: &'s CompileScope) -> Result<*const u8> {
+    pub fn compile_expr(&mut self, expr: &Expr, scope: &CompileScope) -> Result<*const u8> {
         let mut fctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
         let (mut codegen, new_scope) = Codegen::new(

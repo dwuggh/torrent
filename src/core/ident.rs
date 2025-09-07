@@ -1,14 +1,20 @@
 use lasso::{Key, Spur, ThreadedRodeo};
-use std::{marker::PhantomData, ops::Deref, sync::LazyLock};
+use std::sync::LazyLock;
 
 use crate::core::symbol::Symbol;
 
-pub static INTERNER: LazyLock<ThreadedRodeo> = LazyLock::new(|| ThreadedRodeo::new());
+pub static INTERNER: LazyLock<ThreadedRodeo> = LazyLock::new(ThreadedRodeo::new);
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Ident {
     pub(crate) spur: Spur,
+}
+
+impl std::fmt::Debug for Ident {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ident").field("text", &self.text()).finish()
+    }
 }
 
 impl Ident {
@@ -33,15 +39,15 @@ impl From<u64> for Ident {
     }
 }
 
-impl Into<u64> for Ident {
-    fn into(self) -> u64 {
-        self.spur.into_usize() as u64
+impl From<Ident> for u64 {
+    fn from(val: Ident) -> Self {
+        val.spur.into_usize() as u64
     }
 }
 
-impl Into<i64> for Ident {
-    fn into(self) -> i64 {
-        self.spur.into_usize() as i64
+impl From<Ident> for i64 {
+    fn from(val: Ident) -> Self {
+        val.spur.into_usize() as i64
     }
 }
 

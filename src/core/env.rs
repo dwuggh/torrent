@@ -5,13 +5,12 @@ use crate::core::{
 
 // pub(crate) static INTERNED_SYMBOLS: OnceLock<std::sync::Mutex<SymbolMap>>;
 
-pub struct Environment;
-
-impl Default for Environment {
-    fn default() -> Self {
-        Self
-    }
+#[derive(Debug, Clone)]
+#[derive(Default)]
+pub struct Environment {
+    inner: u64,
 }
+
 
 impl Environment {
     // Global lookup using INTERNED_SYMBOLS; no per-env state yet.

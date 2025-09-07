@@ -173,7 +173,10 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
             unsafe extern "C" fn #func_name(#(#c_params),*) -> i64 {
                 match #rust_wrapper_name(#(#c_param_idents),*) {
                     Ok(v) => v,
-                    Err(_) => crate::core::value::NIL as i64,
+                    Err(e) => {
+                        tracing::error!("error: {e:?}");
+                        crate::core::value::NIL as i64
+                    }
                 }
             }
         }

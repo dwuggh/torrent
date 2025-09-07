@@ -56,12 +56,12 @@ impl<'a> From<FrameScope<'a>> for CompileScope<'a> {
 }
 
 impl CompileScope<'_> {
-    pub fn get_root(&self) -> &Environment {
-        match self {
-            CompileScope::Global(root) => root.env,
-            CompileScope::Frame(frame) => frame.parent.get_root(),
-        }
-    }
+    // pub fn get_root(&self) -> &Environment {
+    //     match self {
+    //         CompileScope::Global(root) => root.env,
+    //         CompileScope::Frame(frame) => frame.parent.get_root(),
+    //     }
+    // }
 
     pub fn load_symbol(
         &self,
@@ -93,12 +93,9 @@ impl CompileScope<'_> {
                         Some(Val::Value(builder.use_var(var)))
                     } else {
                         if let Some(lexical_binds) = frame.lexical_binds.as_ref() {
-                            lexical_binds
+                            if let Some(captured) = lexical_binds
                                 .borrow_mut()
-                                .get_mut(&symbol.into())
-                                .map(|captured| {
-                                    captured.insert(caller);
-                                });
+                                .get_mut(&symbol.into()) { captured.insert(caller); }
                         }
                         Some(Val::Ident(symbol.into()))
                     }

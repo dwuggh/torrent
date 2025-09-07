@@ -1,13 +1,10 @@
 use std::collections::HashMap;
 
 use crate::core::ident::Ident;
-use crate::core::map::Map;
 use cranelift_module::FuncId;
 use proc_macros::Trace;
 
 use crate::core::env::Environment;
-use crate::core::symbol::Symbol;
-use crate::core::symbol::SymbolCell;
 use crate::{
     core::value::{LispType, TaggedPtr, Value},
     gc::{Gc, GcInner, Trace},
@@ -17,7 +14,7 @@ use crate::{
 pub struct SubrFn {}
 
 pub(crate) type FuncPtr =
-    for<'a> fn(args: *const Value, argc: u64, env: *const Environment) -> anyhow::Result<Value>;
+    unsafe extern "C" fn(args_ptr: *const Value, argc: u64, env: *const Environment) -> Value;
 
 pub unsafe fn cast_func_ptr(ptr: *const u8) -> FuncPtr {
     std::mem::transmute(ptr)
@@ -113,7 +110,8 @@ impl Function {
             .func_ptr
             .ok_or(anyhow::anyhow!("no pointer"))?;
         let argc = args.len() as u64;
-        func(args.as_ptr(), argc, env)
+        let result = unsafe { func(args.as_ptr(), argc, env) };
+        Ok(result)
     }
 }
 

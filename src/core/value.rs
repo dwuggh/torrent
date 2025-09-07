@@ -1,6 +1,6 @@
-use std::{marker::PhantomData, mem::ManuallyDrop, ops::Deref, sync::Arc};
+use std::{marker::PhantomData, mem::ManuallyDrop, ops::Deref};
 
-use proc_macros::{defun, Trace};
+use proc_macros::Trace;
 
 use crate::{
     ast::Node,

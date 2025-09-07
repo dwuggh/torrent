@@ -16,8 +16,6 @@ quote = "1"
 [dependencies]
 inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm20-1"] }
 # llvm-sys-201 = { package = "llvm-sys", version = "170.0.1", features = ["prefer-static"] }
-env_logger = "0.11.3"
-log = "0.4.21"
 thiserror = "2"
 chumsky = "1.0.0-alpha.8"
 anyhow = "1.0.99"
@@ -34,6 +32,8 @@ lasso = { version = "0.7.3", features = ["multi-threaded"] }
 string-interner = "0.19.0"
 inventory = "0.3.21"
 dashmap = "6.1.0"
+tracing = "0.1.41"
+tracing-subscriber = "0.3.20"
 
 [build-dependencies]
 syn = { workspace = true }
