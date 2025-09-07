@@ -20,8 +20,10 @@ use crate::core::function::Function;
 use crate::core::ident::Ident;
 use crate::core::string::LispString;
 use crate::core::symbol::Symbol;
+use crate::core::value::LispValue;
 use crate::core::value::TaggedPtr;
 use crate::core::value::NIL;
+use crate::core::value::TRUE;
 use crate::Value as RuntimeValue;
 
 pub struct Codegen<'a> {
@@ -89,6 +91,10 @@ impl<'a> Codegen<'a> {
 
     fn nil(&mut self) -> Value {
         self.builder.ins().iconst(types::I64, NIL)
+    }
+    fn t(&mut self) -> Value {
+        // let t = LispValue
+        self.builder.ins().iconst(types::I64, TRUE)
     }
 
     pub fn translate_exprs<'s>(
@@ -186,11 +192,6 @@ impl<'a> Codegen<'a> {
             Literal::String(s) => {
                 let val = RuntimeValue::tag(LispString::from_str(s)).0 as i64;
                 Ok(self.builder.ins().iconst(types::I64, val))
-            }
-            Literal::Boolean(false) => Ok(self.nil()),
-            Literal::Boolean(true) => {
-                // TODO: proper true value
-                Ok(self.builder.ins().iconst(types::I64, 1))
             }
         }
     }
@@ -305,7 +306,7 @@ impl<'a> Codegen<'a> {
         scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
         if exprs.is_empty() {
-            return Ok(self.builder.ins().iconst(types::I64, 1)); // true
+            return Ok(self.t()); // true
         }
 
         let mut result = self.translate_expr(&exprs[0], scope)?;
@@ -400,7 +401,7 @@ impl<'a> Codegen<'a> {
                 todo!("Quoted vector creation not yet implemented")
             }
             QuotedData::Unquote(_) | QuotedData::UnquoteSplice(_) => {
-                Err(CodegenError::InvalidSyntax("Unquote in simple quote".to_string()))
+                Err(CodegenError::InvalidUnquote)
             }
         }
     }
