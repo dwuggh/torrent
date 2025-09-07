@@ -195,6 +195,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         }
     }
 
+    let is_lisp_subr = function.is_lisp_subr;
     quote! {
 
         #[automatically_derived]
@@ -218,7 +219,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
 
         }
 
-        inventory::submit!(crate::core::compiler::BuiltinFnPlugin::new(#def_func_name, #register_func_name));
+        inventory::submit!(crate::core::compiler::BuiltinFnPlugin::new(#def_func_name, #register_func_name, #is_lisp_subr));
 
 
         #[automatically_derived]
@@ -480,6 +481,7 @@ pub(crate) struct Function {
     body: syn::Item,
     args: Vec<(syn::Ident, syn::Type, ArgInfo)>,
     fallible: bool,
+    is_lisp_subr: bool,
     ret_kind: RetKind,
 }
 
@@ -497,12 +499,14 @@ fn parse_fn(item: syn::Item) -> Result<Function, Error> {
                 Err(Error::new_spanned(sig, "lisp functions cannot be `unsafe`"))
             } else {
                 let args = parse_signature(sig)?;
+                let is_lisp_subr = args.iter().all(|(_, _, info)| info.kind != ArgKind::Other);
                 let (fallible, ret_kind) = return_type_info(&sig.output);
                 Ok(Function {
                     name: sig.ident.clone(),
                     body: item,
                     args,
                     fallible,
+                    is_lisp_subr,
                     ret_kind,
                 })
             }
@@ -600,7 +604,7 @@ fn classify_return_type(ty: &syn::Type) -> RetKind {
                 _ => RetKind::IntoValue,
             }
         }
-        _ => RetKind::IntoValue,
+        _ => RetKind::Other,
     }
 }
 
@@ -621,7 +625,7 @@ fn get_arg_type(ty: &syn::Type) -> Result<(ArgInfo, &syn::Type), Error> {
                     let option_ty = get_generic_param(outer).expect("incorrect Option types");
                     let (info, ty) = get_arg_type(option_ty)?;
                     inner_ty = ty; // ensure we return the inner T for Option<T>
-                    // TODO we are not expecting double reference, so this is fine
+                                   // TODO we are not expecting double reference, so this is fine
                     is_ref = is_ref | info.is_ref;
                     is_mut = is_mut | info.is_mut;
                     ArgKind::Option(Box::new(info.kind))
@@ -658,6 +662,7 @@ fn get_object_kind(type_path: &syn::TypePath) -> ArgKind {
         || outer_type.ident == "Vector"
         || outer_type.ident == "Cons"
         || outer_type.ident == "Function"
+        || outer_type.ident == "Map"
         || outer_type.ident == "i64"
     {
         ArgKind::FromValue
