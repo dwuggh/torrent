@@ -173,7 +173,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
             unsafe extern "C" fn #func_name(#(#c_params),*) -> i64 {
                 match #rust_wrapper_name(#(#c_param_idents),*) {
                     Ok(v) => v,
-                    Err(_) => 0,
+                    Err(_) => crate::core::value::NIL as i64,
                 }
             }
         }
@@ -263,8 +263,8 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
         let conversion = match &arg_info.kind {
             ArgKind::Env => {
                 quote! {
-                    let #ident = env as *mut crate::core::env::Environment;
-                    let #ident = #ident.as_mut().ok_or("failed to convert env")?;
+                    let #ident = env as *const crate::core::env::Environment;
+                    let #ident = #ident.as_ref().ok_or("failed to convert env")?;
                 }
             }
             ArgKind::Value => {
