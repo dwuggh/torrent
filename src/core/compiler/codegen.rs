@@ -377,29 +377,56 @@ impl<'a> Codegen<'a> {
             return Ok(self.nil()); // nil
         }
 
-        let mut result = self.translate_expr(&exprs[0], scope)?;
+        // Create an end block to jump to when we want to exit early (with a non-nil value)
+        let end_block = self.builder.create_block();
+        self.builder.append_block_param(end_block, types::I64);
+        
+        // Create blocks for each expression
+        let mut blocks = exprs.iter().map(|expr| {
+            let block = self.builder.create_block();
+            block
+        }).collect::<Vec<_>>();
+
+        // Start with the first expression
+        self.builder.switch_to_block(blocks[0]);
+        self.builder.seal_block(blocks[0]);
+        
+        let first_val = self.translate_expr(&exprs[0], scope)?;
         let nil = self.nil();
-
-        for expr in &exprs[1..] {
-            let continue_block = self.builder.create_block();
-            let end_block = self.builder.create_block();
-            self.builder.append_block_param(end_block, types::I64);
-
-            let cond = self.builder.ins().icmp(IntCC::Equal, result, nil);
-            self.builder
-                .ins()
-                .brif(cond, continue_block, &[], end_block, &[result]);
-
-            self.builder.switch_to_block(continue_block);
-            self.builder.seal_block(continue_block);
-            result = self.translate_expr(expr, scope)?;
-            self.builder.ins().jump(end_block, &[result]);
-
+        
+        if exprs.len() == 1 {
+            self.builder.ins().jump(end_block, &[first_val.into()]);
             self.builder.switch_to_block(end_block);
             self.builder.seal_block(end_block);
-            result = self.builder.block_params(end_block)[0];
+            let result = self.builder.block_params(end_block)[0];
+            return Ok(result);
         }
-
+        
+        // Check if first value is not nil
+        let cond = self.builder.ins().icmp(IntCC::NotEqual, first_val, nil);
+        self.builder.ins().brif(cond, end_block, &[first_val.into()], blocks[1], &[]);
+        
+        // Process remaining expressions
+        for i in 1..exprs.len() {
+            self.builder.switch_to_block(blocks[i]);
+            self.builder.seal_block(blocks[i]);
+            
+            let expr_val = self.translate_expr(&exprs[i], scope)?;
+            
+            if i == exprs.len() - 1 {
+                // Last expression, jump to end with its value (even if nil)
+                self.builder.ins().jump(end_block, &[expr_val.into()]);
+            } else {
+                // Middle expression, check if not nil
+                let cond = self.builder.ins().icmp(IntCC::NotEqual, expr_val, nil);
+                self.builder.ins().brif(cond, end_block, &[expr_val.into()], blocks[i+1], &[]);
+            }
+        }
+        
+        // End block
+        self.builder.switch_to_block(end_block);
+        self.builder.seal_block(end_block);
+        let result = self.builder.block_params(end_block)[0];
         Ok(result)
     }
 
