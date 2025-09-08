@@ -1,8 +1,6 @@
 use thiserror::Error;
-use std::fmt;
 
 use crate::{
-    ast::Node,
     core::{
         ident::Ident,
         symbol::Symbol,

@@ -74,7 +74,20 @@ pub enum LispType {
 
 impl std::fmt::Display for LispType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        let type_name = match self {
+            LispType::Int => "integer",
+            LispType::Nil => "nil",
+            LispType::True => "boolean",
+            LispType::Float => "float",
+            LispType::Character => "character",
+            LispType::String => "string",
+            LispType::Symbol => "symbol",
+            LispType::Vector => "vector",
+            LispType::Cons => "cons",
+            LispType::Function => "function",
+            LispType::Map => "hash-table",
+        };
+        write!(f, "{}", type_name)
     }
 }
 

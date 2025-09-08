@@ -72,6 +72,12 @@ impl std::fmt::Debug for Symbol {
     }
 }
 
+impl std::fmt::Display for Symbol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.name.fmt(f)
+    }
+}
+
 impl From<Ident> for Symbol {
     fn from(value: Ident) -> Self {
         Self::new(value)
