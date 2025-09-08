@@ -38,6 +38,22 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         })
         .collect();
 
+    let mut c_param_idents = Vec::new();
+    for (ident, _, arg_info) in args.iter() {
+        match arg_info.kind {
+            ArgKind::Env => {
+                let env_ident = format_ident!("env");
+                c_params.push(env_ident);
+            }
+            ArgKind::Slice(inner) => {
+                // c_params.push(env_ident);
+            }
+            _ => {
+                c_param_idents.push(ident.clone());
+            }
+        };
+    }
+
     // Generate the actual function call
     let call_args = args.iter().map(|(ident, _, _)| quote! { #ident });
 
