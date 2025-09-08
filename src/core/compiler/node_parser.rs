@@ -32,10 +32,7 @@ pub fn node_to_expr<'s>() -> impl Parser<'s, NodeInput, Expr, ParseError> + Clon
                 let node_input = NodeInput::new(vec![node]);
                 match expr.clone().parse(node_input).into_result() {
                     Ok(parsed_expr) => exprs.push(parsed_expr),
-                    Err(_) => return Err(ParseError {
-                        message: "Failed to parse vector element".to_string(),
-                        span: Some((span.start, span.end)),
-                    }),
+                    Err(_) => return Err(Rich::custom(span, "Failed to parse vector element")),
                 }
             }
             Ok(Expr::Vector(exprs))
@@ -92,14 +89,11 @@ pub fn node_to_expr<'s>() -> impl Parser<'s, NodeInput, Expr, ParseError> + Clon
 
 fn parse_if_form<'s>(
     nodes: &[Node],
-    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
+) -> Result<Expr, Rich<'s, Node>> {
     if nodes.len() < 3 || nodes.len() > 4 {
-        return Err(ParseError {
-            message: "if requires 2 or 3 arguments".to_string(),
-            span: Some((span.start, span.end)),
-        });
+        return Err(Rich::custom(span, "if requires 2 or 3 arguments"));
     }
 
     let cond = parse_single_expr(&nodes[1], expr_parser.clone())?;
@@ -117,19 +111,16 @@ fn parse_if_form<'s>(
     })))
 }
 
-fn parse_lambda_form(
+fn parse_lambda_form<'s>(
     nodes: &[Node],
-    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
+) -> Result<Expr, Rich<'s, Node>> {
     if nodes.len() < 3 {
-        return Err(ParseError {
-            message: "lambda requires at least 2 arguments".to_string(),
-            span: Some((span.start, span.end)),
-        });
+        return Err(Rich::custom(span, "lambda requires at least 2 arguments"));
     }
 
-    let args = parse_lambda_args(&nodes[1])?;
+    let args = parse_lambda_args(&nodes[1], span.clone())?;
     let mut body = Vec::new();
     for node in &nodes[2..] {
         body.push(parse_single_expr(node, expr_parser.clone())?);
@@ -145,7 +136,7 @@ fn parse_lambda_form(
     })))
 }
 
-fn parse_lambda_args(node: &Node) -> Result<Vec<Arg>, ParseError> {
+fn parse_lambda_args<'s>(node: &Node, span: std::ops::Range<usize>) -> Result<Vec<Arg>, Rich<'s, Node>> {
     match node {
         Node::Nil => Ok(vec![]),
         Node::Sexp(nodes) => {
@@ -173,34 +164,25 @@ fn parse_lambda_args(node: &Node) -> Result<Vec<Arg>, ParseError> {
                             }
                         }
                     }
-                    _ => return Err(ParseError {
-                        message: "Invalid lambda argument".to_string(),
-                        span: None,
-                    }),
+                    _ => return Err(Rich::custom(span.clone(), "Invalid lambda argument")),
                 }
             }
             Ok(args)
         }
-        _ => Err(ParseError {
-            message: "Lambda args must be a list or nil".to_string(),
-            span: None,
-        }),
+        _ => Err(Rich::custom(span, "Lambda args must be a list or nil")),
     }
 }
 
 fn parse_let_form<'s>(
     nodes: &[Node],
-    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
+) -> Result<Expr, Rich<'s, Node>> {
     if nodes.len() < 3 {
-        return Err(ParseError {
-            message: "let requires at least 2 arguments".to_string(),
-            span: Some((span.start, span.end)),
-        });
+        return Err(Rich::custom(span, "let requires at least 2 arguments"));
     }
 
-    let bindings = parse_let_bindings(&nodes[1], expr_parser.clone())?;
+    let bindings = parse_let_bindings(&nodes[1], expr_parser.clone(), span.clone())?;
     let mut body = Vec::new();
     for node in &nodes[2..] {
         body.push(parse_single_expr(node, expr_parser.clone())?);
@@ -211,17 +193,14 @@ fn parse_let_form<'s>(
 
 fn parse_let_star_form<'s>(
     nodes: &[Node],
-    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
+) -> Result<Expr, Rich<'s, Node>> {
     if nodes.len() < 3 {
-        return Err(ParseError {
-            message: "let* requires at least 2 arguments".to_string(),
-            span: Some((span.start, span.end)),
-        });
+        return Err(Rich::custom(span, "let* requires at least 2 arguments"));
     }
 
-    let bindings = parse_let_bindings(&nodes[1], expr_parser.clone())?;
+    let bindings = parse_let_bindings(&nodes[1], expr_parser.clone(), span.clone())?;
     let mut body = Vec::new();
     for node in &nodes[2..] {
         body.push(parse_single_expr(node, expr_parser.clone())?);
@@ -232,8 +211,9 @@ fn parse_let_star_form<'s>(
 
 fn parse_let_bindings<'s>(
     node: &Node,
-    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
-) -> Result<Vec<(Ident, Option<Expr>)>, ParseError> {
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Vec<(Ident, Option<Expr>)>, Rich<'s, Node>> {
     match node {
         Node::Nil => Ok(vec![]),
         Node::Sexp(nodes) => {
@@ -245,54 +225,36 @@ fn parse_let_bindings<'s>(
                     }
                     Node::Sexp(binding_parts) => {
                         if binding_parts.len() != 2 {
-                            return Err(ParseError {
-                                message: "Invalid let binding".to_string(),
-                                span: None,
-                            });
+                            return Err(Rich::custom(span.clone(), "Invalid let binding"));
                         }
                         if let Node::Ident(ident) = &binding_parts[0] {
                             let value = parse_single_expr(&binding_parts[1], expr_parser.clone())?;
                             bindings.push((*ident, Some(value)));
                         } else {
-                            return Err(ParseError {
-                                message: "Let binding must start with identifier".to_string(),
-                                span: None,
-                            });
+                            return Err(Rich::custom(span.clone(), "Let binding must start with identifier"));
                         }
                     }
-                    _ => return Err(ParseError {
-                        message: "Invalid let binding format".to_string(),
-                        span: None,
-                    }),
+                    _ => return Err(Rich::custom(span.clone(), "Invalid let binding format")),
                 }
             }
             Ok(bindings)
         }
-        _ => Err(ParseError {
-            message: "Let bindings must be a list or nil".to_string(),
-            span: None,
-        }),
+        _ => Err(Rich::custom(span, "Let bindings must be a list or nil")),
     }
 }
 
 fn parse_defvar_form<'s>(
     nodes: &[Node],
-    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
+) -> Result<Expr, Rich<'s, Node>> {
     if nodes.len() < 2 || nodes.len() > 4 {
-        return Err(ParseError {
-            message: "defvar requires 1-3 arguments".to_string(),
-            span: Some((span.start, span.end)),
-        });
+        return Err(Rich::custom(span, "defvar requires 1-3 arguments"));
     }
 
     let symbol = match &nodes[1] {
         Node::Ident(ident) => *ident,
-        _ => return Err(ParseError {
-            message: "defvar first argument must be a symbol".to_string(),
-            span: Some((span.start, span.end)),
-        }),
+        _ => return Err(Rich::custom(span, "defvar first argument must be a symbol")),
     };
 
     let value = if nodes.len() > 2 {
@@ -304,10 +266,7 @@ fn parse_defvar_form<'s>(
     let docstring = if nodes.len() > 3 {
         match &nodes[3] {
             Node::Str(s) => Some(s.clone()),
-            _ => return Err(ParseError {
-                message: "defvar docstring must be a string".to_string(),
-                span: Some((span.start, span.end)),
-            }),
+            _ => return Err(Rich::custom(span, "defvar docstring must be a string")),
         }
     } else {
         None
@@ -323,14 +282,11 @@ fn parse_defvar_form<'s>(
 
 fn parse_function_call<'s>(
     nodes: &[Node],
-    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
-    _span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, Rich<'s, Node>> {
     if nodes.is_empty() {
-        return Err(ParseError {
-            message: "Empty function call".to_string(),
-            span: None,
-        });
+        return Err(Rich::custom(span, "Empty function call"));
     }
 
     let func = parse_single_expr(&nodes[0], expr_parser.clone())?;
@@ -348,53 +304,41 @@ fn parse_function_call<'s>(
 // Placeholder implementations for remaining forms
 fn parse_defconst_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
-    Err(ParseError {
-        message: "defconst not yet implemented".to_string(),
-        span: Some((span.start, span.end)),
-    })
+) -> Result<Expr, Rich<'s, Node>> {
+    Err(Rich::custom(span, "defconst not yet implemented"))
 }
 
 fn parse_set_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
-    Err(ParseError {
-        message: "set not yet implemented".to_string(),
-        span: Some((span.start, span.end)),
-    })
+) -> Result<Expr, Rich<'s, Node>> {
+    Err(Rich::custom(span, "set not yet implemented"))
 }
 
 fn parse_setq_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
-    Err(ParseError {
-        message: "setq not yet implemented".to_string(),
-        span: Some((span.start, span.end)),
-    })
+) -> Result<Expr, Rich<'s, Node>> {
+    Err(Rich::custom(span, "setq not yet implemented"))
 }
 
 fn parse_setq_default_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
-    Err(ParseError {
-        message: "setq-default not yet implemented".to_string(),
-        span: Some((span.start, span.end)),
-    })
+) -> Result<Expr, Rich<'s, Node>> {
+    Err(Rich::custom(span, "setq-default not yet implemented"))
 }
 
 fn parse_and_form<'s>(
     nodes: &[Node],
-    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     _span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
+) -> Result<Expr, Rich<'s, Node>> {
     let mut exprs = Vec::new();
     for node in &nodes[1..] {
         exprs.push(parse_single_expr(node, expr_parser.clone())?);
@@ -404,9 +348,9 @@ fn parse_and_form<'s>(
 
 fn parse_or_form<'s>(
     nodes: &[Node],
-    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     _span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
+) -> Result<Expr, Rich<'s, Node>> {
     let mut exprs = Vec::new();
     for node in &nodes[1..] {
         exprs.push(parse_single_expr(node, expr_parser.clone())?);
@@ -416,9 +360,9 @@ fn parse_or_form<'s>(
 
 fn parse_progn_form<'s>(
     nodes: &[Node],
-    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     _span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
+) -> Result<Expr, Rich<'s, Node>> {
     let mut exprs = Vec::new();
     for node in &nodes[1..] {
         exprs.push(parse_single_expr(node, expr_parser.clone())?);
@@ -428,35 +372,26 @@ fn parse_progn_form<'s>(
 
 fn parse_prog1_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
-    Err(ParseError {
-        message: "prog1 not yet implemented".to_string(),
-        span: Some((span.start, span.end)),
-    })
+) -> Result<Expr, Rich<'s, Node>> {
+    Err(Rich::custom(span, "prog1 not yet implemented"))
 }
 
 fn parse_prog2_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
-    Err(ParseError {
-        message: "prog2 not yet implemented".to_string(),
-        span: Some((span.start, span.end)),
-    })
+) -> Result<Expr, Rich<'s, Node>> {
+    Err(Rich::custom(span, "prog2 not yet implemented"))
 }
 
-fn parse_quote_form(
+fn parse_quote_form<'s>(
     nodes: &[Node],
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
+) -> Result<Expr, Rich<'s, Node>> {
     if nodes.len() != 2 {
-        return Err(ParseError {
-            message: "quote requires exactly 1 argument".to_string(),
-            span: Some((span.start, span.end)),
-        });
+        return Err(Rich::custom(span, "quote requires exactly 1 argument"));
     }
 
     let quoted_data = node_to_quoted_data(&nodes[1], false);
@@ -466,23 +401,17 @@ fn parse_quote_form(
     })))
 }
 
-fn parse_function_form(
+fn parse_function_form<'s>(
     nodes: &[Node],
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
+) -> Result<Expr, Rich<'s, Node>> {
     if nodes.len() != 2 {
-        return Err(ParseError {
-            message: "function requires exactly 1 argument".to_string(),
-            span: Some((span.start, span.end)),
-        });
+        return Err(Rich::custom(span, "function requires exactly 1 argument"));
     }
 
     let name = match &nodes[1] {
         Node::Ident(ident) => *ident,
-        _ => return Err(ParseError {
-            message: "function argument must be a symbol".to_string(),
-            span: Some((span.start, span.end)),
-        }),
+        _ => return Err(Rich::custom(span, "function argument must be a symbol")),
     };
 
     Ok(Expr::SpecialForm(SpecialForm::Function(Function { name })))
@@ -491,100 +420,73 @@ fn parse_function_form(
 // Add placeholder implementations for the remaining forms
 fn parse_cond_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
-    Err(ParseError {
-        message: "cond not yet implemented".to_string(),
-        span: Some((span.start, span.end)),
-    })
+) -> Result<Expr, Rich<'s, Node>> {
+    Err(Rich::custom(span, "cond not yet implemented"))
 }
 
 fn parse_while_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
-    Err(ParseError {
-        message: "while not yet implemented".to_string(),
-        span: Some((span.start, span.end)),
-    })
+) -> Result<Expr, Rich<'s, Node>> {
+    Err(Rich::custom(span, "while not yet implemented"))
 }
 
-fn parse_catch_form(
+fn parse_catch_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
-    Err(ParseError {
-        message: "catch not yet implemented".to_string(),
-        span: Some((span.start, span.end)),
-    })
+) -> Result<Expr, Rich<'s, Node>> {
+    Err(Rich::custom(span, "catch not yet implemented"))
 }
 
 fn parse_unwind_protect_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
-    Err(ParseError {
-        message: "unwind-protect not yet implemented".to_string(),
-        span: Some((span.start, span.end)),
-    })
+) -> Result<Expr, Rich<'s, Node>> {
+    Err(Rich::custom(span, "unwind-protect not yet implemented"))
 }
 
-fn parse_condition_case_form(
+fn parse_condition_case_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
-    Err(ParseError {
-        message: "condition-case not yet implemented".to_string(),
-        span: Some((span.start, span.end)),
-    })
+) -> Result<Expr, Rich<'s, Node>> {
+    Err(Rich::custom(span, "condition-case not yet implemented"))
 }
 
 fn parse_save_current_buffer_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
-    Err(ParseError {
-        message: "save-current-buffer not yet implemented".to_string(),
-        span: Some((span.start, span.end)),
-    })
+) -> Result<Expr, Rich<'s, Node>> {
+    Err(Rich::custom(span, "save-current-buffer not yet implemented"))
 }
 
-fn parse_save_excursion_form(
+fn parse_save_excursion_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
-    Err(ParseError {
-        message: "save-excursion not yet implemented".to_string(),
-        span: Some((span.start, span.end)),
-    })
+) -> Result<Expr, Rich<'s, Node>> {
+    Err(Rich::custom(span, "save-excursion not yet implemented"))
 }
 
 fn parse_save_restriction_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
-    Err(ParseError {
-        message: "save-restriction not yet implemented".to_string(),
-        span: Some((span.start, span.end)),
-    })
+) -> Result<Expr, Rich<'s, Node>> {
+    Err(Rich::custom(span, "save-restriction not yet implemented"))
 }
 
-fn parse_interactive_form(
+fn parse_interactive_form<'s>(
     _nodes: &[Node],
     span: std::ops::Range<usize>,
-) -> Result<Expr, ParseError> {
-    Err(ParseError {
-        message: "interactive not yet implemented".to_string(),
-        span: Some((span.start, span.end)),
-    })
+) -> Result<Expr, Rich<'s, Node>> {
+    Err(Rich::custom(span, "interactive not yet implemented"))
 }
 
 fn node_to_quoted_data(node: &Node, _allow_unquote: bool) -> QuotedData {
@@ -612,25 +514,17 @@ fn node_to_quoted_data(node: &Node, _allow_unquote: bool) -> QuotedData {
 
 fn parse_single_expr<'s>(
     node: &Node,
-    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
-) -> Result<Expr, ParseError> {
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError<'s>> + Clone,
+) -> Result<Expr, Rich<'s, Node>> {
     let node_input = NodeInput::new(vec![node.clone()]);
     expr_parser.parse(node_input).into_result().map_err(|errs| {
-        errs.into_iter().next().unwrap_or(ParseError {
-            message: "Failed to parse expression".to_string(),
-            span: None,
-        })
+        errs.into_iter().next().unwrap_or_else(|| Rich::custom(0..0, "Failed to parse expression"))
     })
 }
 
-pub fn parse_node_to_expr(node: Node) -> Result<Expr, ParseError> {
+pub fn parse_node_to_expr(node: Node) -> Result<Expr, Vec<Rich<'_, Node>>> {
     let node_input = NodeInput::new(vec![node]);
-    node_to_expr().parse(node_input).into_result().map_err(|errs| {
-        errs.into_iter().next().unwrap_or(ParseError {
-            message: "Unknown parse error".to_string(),
-            span: None,
-        })
-    })
+    node_to_expr().parse(node_input).into_result()
 }
 
 #[cfg(test)]
