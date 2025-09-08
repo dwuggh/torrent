@@ -23,6 +23,38 @@ pub enum Node {
     Nil,
 }
 
+impl chumsky::input::Input for Node {
+    type Span;
+
+    type Token;
+
+    type MaybeToken;
+
+    type Cursor;
+
+    type Cache;
+
+    fn begin(self) -> (Self::Cursor, Self::Cache) {
+        todo!()
+    }
+
+    fn cursor_location(cursor: &Self::Cursor) -> usize {
+        todo!()
+    }
+
+    unsafe fn next_maybe(
+        cache: &mut Self::Cache,
+        cursor: &mut Self::Cursor,
+    ) -> Option<Self::MaybeToken> {
+        todo!()
+    }
+
+    unsafe fn span(cache: &mut Self::Cache, range: std::ops::Range<&Self::Cursor>) -> Self::Span {
+        todo!()
+    }
+}
+
+
 impl Node {
     // Predicates
     pub fn is_nil(&self) -> bool {
