@@ -2,7 +2,7 @@ use chumsky::prelude::*;
 use std::sync::Arc;
 
 use crate::{
-    ast::Node,
+    ast::{Node, NodeInput},
     core::{compiler::ir::*, ident::Ident},
 };
 
@@ -20,7 +20,7 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
-pub fn node_to_expr() -> impl Parser<Node, Expr, Error = ParseError> + Clone {
+pub fn node_to_expr() -> impl Parser<NodeInput, Expr, Error = ParseError> + Clone {
     recursive(|expr| {
         // Atomic expressions
         let atom = select! {
@@ -32,98 +32,132 @@ pub fn node_to_expr() -> impl Parser<Node, Expr, Error = ParseError> + Clone {
             Node::Nil => Expr::Nil,
         };
 
-        // Vector expressions
+        // Vector expressions - parse the contained nodes recursively
         let vector = select! {
             Node::Vector(nodes) => nodes,
         }
-        .then(expr.clone().repeated().collect::<Vec<_>>())
-        .map(|(_, exprs)| Expr::Vector(exprs));
+        .try_map(|nodes, span| {
+            let mut exprs = Vec::new();
+            for node in nodes {
+                let node_input = NodeInput::new(vec![node]);
+                match expr.clone().parse(node_input).into_result() {
+                    Ok(parsed_expr) => exprs.push(parsed_expr),
+                    Err(_) => return Err(ParseError {
+                        message: "Failed to parse vector element".to_string(),
+                        span: Some((span.start, span.end)),
+                    }),
+                }
+            }
+            Ok(Expr::Vector(exprs))
+        });
 
         // Special forms and function calls
         let sexp = select! {
             Node::Sexp(nodes) => nodes,
         }
-        .then(
-            choice((
-                // Special forms
-                if_form(expr.clone()),
-                lambda_form(expr.clone()),
-                let_form(expr.clone()),
-                let_star_form(expr.clone()),
-                defvar_form(expr.clone()),
-                defconst_form(expr.clone()),
-                set_form(expr.clone()),
-                setq_form(expr.clone()),
-                setq_default_form(expr.clone()),
-                and_form(expr.clone()),
-                or_form(expr.clone()),
-                progn_form(expr.clone()),
-                prog1_form(expr.clone()),
-                prog2_form(expr.clone()),
-                quote_form(expr.clone()),
-                function_form(expr.clone()),
-                cond_form(expr.clone()),
-                while_form(expr.clone()),
-                catch_form(expr.clone()),
-                unwind_protect_form(expr.clone()),
-                condition_case_form(expr.clone()),
-                save_current_buffer_form(expr.clone()),
-                save_excursion_form(expr.clone()),
-                save_restriction_form(expr.clone()),
-                interactive_form(expr.clone()),
-                // Function call (fallback)
-                function_call(expr.clone()),
-            ))
-        )
-        .map(|(_, expr)| expr);
+        .try_map(|nodes, span| {
+            if nodes.is_empty() {
+                return Ok(Expr::Nil);
+            }
+
+            // Check if this is a special form
+            if let Some(Node::Ident(ident)) = nodes.first() {
+                let name = ident.text();
+                match name {
+                    "if" => parse_if_form(&nodes, expr.clone(), span),
+                    "lambda" => parse_lambda_form(&nodes, expr.clone(), span),
+                    "let" => parse_let_form(&nodes, expr.clone(), span),
+                    "let*" => parse_let_star_form(&nodes, expr.clone(), span),
+                    "defvar" => parse_defvar_form(&nodes, expr.clone(), span),
+                    "defconst" => parse_defconst_form(&nodes, expr.clone(), span),
+                    "set" => parse_set_form(&nodes, expr.clone(), span),
+                    "setq" => parse_setq_form(&nodes, expr.clone(), span),
+                    "setq-default" => parse_setq_default_form(&nodes, expr.clone(), span),
+                    "and" => parse_and_form(&nodes, expr.clone(), span),
+                    "or" => parse_or_form(&nodes, expr.clone(), span),
+                    "progn" => parse_progn_form(&nodes, expr.clone(), span),
+                    "prog1" => parse_prog1_form(&nodes, expr.clone(), span),
+                    "prog2" => parse_prog2_form(&nodes, expr.clone(), span),
+                    "quote" => parse_quote_form(&nodes, span),
+                    "function" => parse_function_form(&nodes, span),
+                    "cond" => parse_cond_form(&nodes, expr.clone(), span),
+                    "while" => parse_while_form(&nodes, expr.clone(), span),
+                    "catch" => parse_catch_form(&nodes, expr.clone(), span),
+                    "unwind-protect" => parse_unwind_protect_form(&nodes, expr.clone(), span),
+                    "condition-case" => parse_condition_case_form(&nodes, expr.clone(), span),
+                    "save-current-buffer" => parse_save_current_buffer_form(&nodes, expr.clone(), span),
+                    "save-excursion" => parse_save_excursion_form(&nodes, expr.clone(), span),
+                    "save-restriction" => parse_save_restriction_form(&nodes, expr.clone(), span),
+                    "interactive" => parse_interactive_form(&nodes, span),
+                    _ => parse_function_call(&nodes, expr.clone(), span),
+                }
+            } else {
+                parse_function_call(&nodes, expr.clone(), span)
+            }
+        });
 
         choice((atom, vector, sexp))
     })
 }
 
-fn if_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "if")
-    })
-    .then(
-        expr.clone()
-            .then(expr.clone())
-            .then(expr.clone().or_not())
-            .map(|((cond, then_branch), else_branch)| {
-                Expr::SpecialForm(SpecialForm::If(If {
-                    cond: Arc::new(cond),
-                    then: Arc::new(then_branch),
-                    els: else_branch.map_or(vec![], |e| vec![e]),
-                }))
-            })
-    )
-    .map(|(_, expr)| expr)
+fn parse_if_form(
+    nodes: &[Node],
+    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    if nodes.len() < 3 || nodes.len() > 4 {
+        return Err(ParseError {
+            message: "if requires 2 or 3 arguments".to_string(),
+            span: Some((span.start, span.end)),
+        });
+    }
+
+    let cond = parse_single_expr(&nodes[1], expr_parser.clone())?;
+    let then_branch = parse_single_expr(&nodes[2], expr_parser.clone())?;
+    let else_branch = if nodes.len() == 4 {
+        vec![parse_single_expr(&nodes[3], expr_parser)?]
+    } else {
+        vec![]
+    };
+
+    Ok(Expr::SpecialForm(SpecialForm::If(If {
+        cond: Arc::new(cond),
+        then: Arc::new(then_branch),
+        els: else_branch,
+    })))
 }
 
-fn lambda_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "lambda")
-    })
-    .then(
-        lambda_args()
-            .then(expr.clone().repeated().collect::<Vec<_>>())
-            .map(|(args, body)| {
-                Expr::SpecialForm(SpecialForm::Lambda(Lambda {
-                    args,
-                    docstring: None,
-                    interactive: None,
-                    declare: None,
-                    body,
-                    captures: vec![],
-                }))
-            })
-    )
-    .map(|(_, expr)| expr)
+fn parse_lambda_form(
+    nodes: &[Node],
+    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    if nodes.len() < 3 {
+        return Err(ParseError {
+            message: "lambda requires at least 2 arguments".to_string(),
+            span: Some((span.start, span.end)),
+        });
+    }
+
+    let args = parse_lambda_args(&nodes[1])?;
+    let mut body = Vec::new();
+    for node in &nodes[2..] {
+        body.push(parse_single_expr(node, expr_parser.clone())?);
+    }
+
+    Ok(Expr::SpecialForm(SpecialForm::Lambda(Lambda {
+        args,
+        docstring: None,
+        interactive: None,
+        declare: None,
+        body,
+        captures: vec![],
+    })))
 }
 
-fn lambda_args() -> impl Parser<Node, Vec<Arg>, Error = ParseError> + Clone {
-    select! {
-        Node::Nil => vec![],
+fn parse_lambda_args(node: &Node) -> Result<Vec<Arg>, ParseError> {
+    match node {
+        Node::Nil => Ok(vec![]),
         Node::Sexp(nodes) => {
             let mut args = Vec::new();
             let mut arg_type = ArgsType::Normal;
@@ -157,41 +191,61 @@ fn lambda_args() -> impl Parser<Node, Vec<Arg>, Error = ParseError> + Clone {
             }
             Ok(args)
         }
+        _ => Err(ParseError {
+            message: "Lambda args must be a list or nil".to_string(),
+            span: None,
+        }),
     }
-    .try_map(|result, _span| result)
 }
 
-fn let_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "let")
-    })
-    .then(
-        let_bindings()
-            .then(expr.clone().repeated().collect::<Vec<_>>())
-            .map(|(bindings, body)| {
-                Expr::SpecialForm(SpecialForm::Let(Let { bindings, body }))
-            })
-    )
-    .map(|(_, expr)| expr)
+fn parse_let_form(
+    nodes: &[Node],
+    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    if nodes.len() < 3 {
+        return Err(ParseError {
+            message: "let requires at least 2 arguments".to_string(),
+            span: Some((span.start, span.end)),
+        });
+    }
+
+    let bindings = parse_let_bindings(&nodes[1], expr_parser.clone())?;
+    let mut body = Vec::new();
+    for node in &nodes[2..] {
+        body.push(parse_single_expr(node, expr_parser.clone())?);
+    }
+
+    Ok(Expr::SpecialForm(SpecialForm::Let(Let { bindings, body })))
 }
 
-fn let_star_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "let*")
-    })
-    .then(
-        let_bindings()
-            .then(expr.clone().repeated().collect::<Vec<_>>())
-            .map(|(bindings, body)| {
-                Expr::SpecialForm(SpecialForm::LetStar(LetStar { bindings, body }))
-            })
-    )
-    .map(|(_, expr)| expr)
+fn parse_let_star_form(
+    nodes: &[Node],
+    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    if nodes.len() < 3 {
+        return Err(ParseError {
+            message: "let* requires at least 2 arguments".to_string(),
+            span: Some((span.start, span.end)),
+        });
+    }
+
+    let bindings = parse_let_bindings(&nodes[1], expr_parser.clone())?;
+    let mut body = Vec::new();
+    for node in &nodes[2..] {
+        body.push(parse_single_expr(node, expr_parser.clone())?);
+    }
+
+    Ok(Expr::SpecialForm(SpecialForm::LetStar(LetStar { bindings, body })))
 }
 
-fn let_bindings() -> impl Parser<Node, Vec<(Ident, Option<Expr>)>, Error = ParseError> + Clone {
-    select! {
-        Node::Nil => vec![],
+fn parse_let_bindings(
+    node: &Node,
+    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+) -> Result<Vec<(Ident, Option<Expr>)>, ParseError> {
+    match node {
+        Node::Nil => Ok(vec![]),
         Node::Sexp(nodes) => {
             let mut bindings = Vec::new();
             for binding_node in nodes {
@@ -207,9 +261,8 @@ fn let_bindings() -> impl Parser<Node, Vec<(Ident, Option<Expr>)>, Error = Parse
                             });
                         }
                         if let Node::Ident(ident) = &binding_parts[0] {
-                            // We need to parse the value expression recursively
-                            // For now, we'll create a placeholder
-                            bindings.push((*ident, None)); // TODO: parse value
+                            let value = parse_single_expr(&binding_parts[1], expr_parser.clone())?;
+                            bindings.push((*ident, Some(value)));
                         } else {
                             return Err(ParseError {
                                 message: "Let binding must start with identifier".to_string(),
@@ -225,405 +278,323 @@ fn let_bindings() -> impl Parser<Node, Vec<(Ident, Option<Expr>)>, Error = Parse
             }
             Ok(bindings)
         }
+        _ => Err(ParseError {
+            message: "Let bindings must be a list or nil".to_string(),
+            span: None,
+        }),
     }
-    .try_map(|result, _span| result)
 }
 
-fn defvar_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "defvar")
-    })
-    .then(
-        select! { Node::Ident(ident) => ident }
-            .then(expr.clone().or_not())
-            .then(select! { Node::Str(s) => s }.or_not())
-            .map(|((symbol, value), docstring)| {
-                Expr::SpecialForm(SpecialForm::Defvar(Defvar {
-                    symbol,
-                    value: value.map(Box::new),
-                    docstring,
-                }))
-            })
-    )
-    .map(|(_, expr)| expr)
-}
+fn parse_defvar_form(
+    nodes: &[Node],
+    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    if nodes.len() < 2 || nodes.len() > 4 {
+        return Err(ParseError {
+            message: "defvar requires 1-3 arguments".to_string(),
+            span: Some((span.start, span.end)),
+        });
+    }
 
-fn defconst_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "defconst")
-    })
-    .then(
-        select! { Node::Ident(ident) => ident }
-            .then(expr.clone())
-            .then(select! { Node::Str(s) => s }.or_not())
-            .map(|((symbol, value), docstring)| {
-                Expr::SpecialForm(SpecialForm::Defconst(Defconst {
-                    symbol,
-                    value: Box::new(value),
-                    docstring,
-                }))
-            })
-    )
-    .map(|(_, expr)| expr)
-}
+    let symbol = match &nodes[1] {
+        Node::Ident(ident) => *ident,
+        _ => return Err(ParseError {
+            message: "defvar first argument must be a symbol".to_string(),
+            span: Some((span.start, span.end)),
+        }),
+    };
 
-fn set_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "set")
-    })
-    .then(
-        select! { Node::Ident(ident) => ident }
-            .then(expr.clone())
-            .map(|(symbol, value)| {
-                Expr::SpecialForm(SpecialForm::Set(Set {
-                    symbol,
-                    value: Box::new(value),
-                }))
-            })
-    )
-    .map(|(_, expr)| expr)
-}
+    let value = if nodes.len() > 2 {
+        Some(Box::new(parse_single_expr(&nodes[2], expr_parser)?))
+    } else {
+        None
+    };
 
-fn setq_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "setq")
-    })
-    .then(
-        setq_assignments(expr.clone())
-            .map(|assignments| {
-                Expr::SpecialForm(SpecialForm::Setq(Setq { assignments }))
-            })
-    )
-    .map(|(_, expr)| expr)
-}
-
-fn setq_default_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "setq-default")
-    })
-    .then(
-        setq_assignments(expr.clone())
-            .map(|assignments| {
-                Expr::SpecialForm(SpecialForm::SetqDefault(SetqDefault { assignments }))
-            })
-    )
-    .map(|(_, expr)| expr)
-}
-
-fn setq_assignments(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Vec<(Ident, Expr)>, Error = ParseError> + Clone {
-    select! {
-        nodes if nodes.len() % 2 == 1 => { // Skip the first element (setq/setq-default)
-            let pairs = &nodes[1..];
-            let mut assignments = Vec::new();
-            for chunk in pairs.chunks(2) {
-                if let [Node::Ident(ident), value_node] = chunk {
-                    // TODO: parse value_node to Expr
-                    assignments.push((*ident, Expr::Nil)); // placeholder
-                }
-            }
-            assignments
+    let docstring = if nodes.len() > 3 {
+        match &nodes[3] {
+            Node::Str(s) => Some(s.clone()),
+            _ => return Err(ParseError {
+                message: "defvar docstring must be a string".to_string(),
+                span: Some((span.start, span.end)),
+            }),
         }
+    } else {
+        None
+    };
+
+    Ok(Expr::SpecialForm(SpecialForm::Defvar(Defvar {
+        symbol,
+        value,
+        docstring,
+    })))
+}
+
+
+fn parse_function_call(
+    nodes: &[Node],
+    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    _span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    if nodes.is_empty() {
+        return Err(ParseError {
+            message: "Empty function call".to_string(),
+            span: None,
+        });
     }
-}
 
-fn and_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "and")
-    })
-    .then(
-        expr.clone().repeated().collect::<Vec<_>>()
-            .map(|exprs| Expr::SpecialForm(SpecialForm::And(exprs)))
-    )
-    .map(|(_, expr)| expr)
-}
-
-fn or_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "or")
-    })
-    .then(
-        expr.clone().repeated().collect::<Vec<_>>()
-            .map(|exprs| Expr::SpecialForm(SpecialForm::Or(exprs)))
-    )
-    .map(|(_, expr)| expr)
-}
-
-fn progn_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "progn")
-    })
-    .then(
-        expr.clone().repeated().collect::<Vec<_>>()
-            .map(|exprs| Expr::SpecialForm(SpecialForm::Progn(exprs)))
-    )
-    .map(|(_, expr)| expr)
-}
-
-fn prog1_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "prog1")
-    })
-    .then(
-        expr.clone()
-            .then(expr.clone().repeated().collect::<Vec<_>>())
-            .map(|(first, rest)| {
-                Expr::SpecialForm(SpecialForm::Prog1(Prog1 {
-                    first: Box::new(first),
-                    rest,
-                }))
-            })
-    )
-    .map(|(_, expr)| expr)
-}
-
-fn prog2_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "prog2")
-    })
-    .then(
-        expr.clone()
-            .then(expr.clone())
-            .then(expr.clone().repeated().collect::<Vec<_>>())
-            .map(|((first, second), rest)| {
-                Expr::SpecialForm(SpecialForm::Prog2(Prog2 {
-                    first: Box::new(first),
-                    second: Box::new(second),
-                    rest,
-                }))
-            })
-    )
-    .map(|(_, expr)| expr)
-}
-
-fn quote_form(_expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "quote")
-    })
-    .then(
-        any().map(|node| {
-            let quoted_data = node_to_quoted_data(&node, false);
-            Expr::SpecialForm(SpecialForm::Quote(Quote {
-                kind: QuoteKind::Quote,
-                expr: quoted_data,
-            }))
-        })
-    )
-    .map(|(_, expr)| expr)
-}
-
-fn function_form(_expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "function")
-    })
-    .then(
-        select! { Node::Ident(ident) => ident }
-            .map(|name| {
-                Expr::SpecialForm(SpecialForm::Function(Function { name }))
-            })
-    )
-    .map(|(_, expr)| expr)
-}
-
-fn cond_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "cond")
-    })
-    .then(
-        cond_clauses(expr.clone())
-            .map(|clauses| Expr::SpecialForm(SpecialForm::Cond(Cond { clauses })))
-    )
-    .map(|(_, expr)| expr)
-}
-
-fn cond_clauses(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Vec<CondClause>, Error = ParseError> + Clone {
-    select! {
-        nodes => {
-            let mut clauses = Vec::new();
-            for clause_node in &nodes[1..] { // Skip the 'cond' symbol
-                if let Node::Sexp(clause) = clause_node {
-                    if !clause.is_empty() {
-                        // TODO: parse condition and body expressions
-                        clauses.push(CondClause {
-                            condition: Expr::Nil, // placeholder
-                            body: vec![],
-                        });
-                    }
-                }
-            }
-            clauses
-        }
+    let func = parse_single_expr(&nodes[0], expr_parser.clone())?;
+    let mut args = Vec::new();
+    for node in &nodes[1..] {
+        args.push(parse_single_expr(node, expr_parser.clone())?);
     }
+
+    Ok(Expr::Call(Call {
+        func: Box::new(func),
+        args,
+    }))
 }
 
-fn while_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "while")
+// Placeholder implementations for remaining forms
+fn parse_defconst_form(
+    _nodes: &[Node],
+    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    Err(ParseError {
+        message: "defconst not yet implemented".to_string(),
+        span: Some((span.start, span.end)),
     })
-    .then(
-        expr.clone()
-            .then(expr.clone().repeated().collect::<Vec<_>>())
-            .map(|(condition, body)| {
-                Expr::SpecialForm(SpecialForm::While(While {
-                    condition: Box::new(condition),
-                    body,
-                }))
-            })
-    )
-    .map(|(_, expr)| expr)
 }
 
-fn catch_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "catch")
+fn parse_set_form(
+    _nodes: &[Node],
+    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    Err(ParseError {
+        message: "set not yet implemented".to_string(),
+        span: Some((span.start, span.end)),
     })
-    .then(
-        expr.clone()
-            .then(expr.clone().repeated().collect::<Vec<_>>())
-            .map(|(tag, body)| {
-                Expr::SpecialForm(SpecialForm::Catch(Catch {
-                    tag: Box::new(tag),
-                    body,
-                }))
-            })
-    )
-    .map(|(_, expr)| expr)
 }
 
-fn unwind_protect_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "unwind-protect")
+fn parse_setq_form(
+    _nodes: &[Node],
+    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    Err(ParseError {
+        message: "setq not yet implemented".to_string(),
+        span: Some((span.start, span.end)),
     })
-    .then(
-        expr.clone()
-            .then(expr.clone().repeated().collect::<Vec<_>>())
-            .map(|(protected, cleanup)| {
-                Expr::SpecialForm(SpecialForm::UnwindProtect(UnwindProtect {
-                    protected: Box::new(protected),
-                    cleanup,
-                }))
-            })
-    )
-    .map(|(_, expr)| expr)
 }
 
-fn condition_case_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "condition-case")
+fn parse_setq_default_form(
+    _nodes: &[Node],
+    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    Err(ParseError {
+        message: "setq-default not yet implemented".to_string(),
+        span: Some((span.start, span.end)),
     })
-    .then(
-        condition_case_var()
-            .then(expr.clone())
-            .then(condition_handlers(expr.clone()))
-            .map(|((var, protected), handlers)| {
-                Expr::SpecialForm(SpecialForm::ConditionCase(ConditionCase {
-                    var,
-                    protected: Box::new(protected),
-                    handlers,
-                }))
-            })
-    )
-    .map(|(_, expr)| expr)
 }
 
-fn condition_case_var() -> impl Parser<Node, Option<Ident>, Error = ParseError> + Clone {
-    select! {
-        Node::Ident(ident) => Some(ident),
-        Node::Nil => None,
+fn parse_and_form(
+    nodes: &[Node],
+    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    _span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    let mut exprs = Vec::new();
+    for node in &nodes[1..] {
+        exprs.push(parse_single_expr(node, expr_parser.clone())?);
     }
+    Ok(Expr::SpecialForm(SpecialForm::And(exprs)))
 }
 
-fn condition_handlers(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Vec<ConditionHandler>, Error = ParseError> + Clone {
-    select! {
-        nodes => {
-            let mut handlers = Vec::new();
-            for handler_node in nodes {
-                if let Node::Sexp(_handler) = handler_node {
-                    // TODO: parse handler condition and body
-                    handlers.push(ConditionHandler {
-                        condition: Expr::Nil, // placeholder
-                        body: vec![],
-                    });
-                }
-            }
-            handlers
-        }
+fn parse_or_form(
+    nodes: &[Node],
+    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    _span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    let mut exprs = Vec::new();
+    for node in &nodes[1..] {
+        exprs.push(parse_single_expr(node, expr_parser.clone())?);
     }
+    Ok(Expr::SpecialForm(SpecialForm::Or(exprs)))
 }
 
-fn save_current_buffer_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "save-current-buffer")
-    })
-    .then(
-        expr.clone().repeated().collect::<Vec<_>>()
-            .map(|body| Expr::SpecialForm(SpecialForm::SaveCurrentBuffer(SaveCurrentBuffer { body })))
-    )
-    .map(|(_, expr)| expr)
-}
-
-fn save_excursion_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "save-excursion")
-    })
-    .then(
-        expr.clone().repeated().collect::<Vec<_>>()
-            .map(|body| Expr::SpecialForm(SpecialForm::SaveExcursion(SaveExcursion { body })))
-    )
-    .map(|(_, expr)| expr)
-}
-
-fn save_restriction_form(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "save-restriction")
-    })
-    .then(
-        expr.clone().repeated().collect::<Vec<_>>()
-            .map(|body| Expr::SpecialForm(SpecialForm::SaveRestriction(SaveRestriction { body })))
-    )
-    .map(|(_, expr)| expr)
-}
-
-fn interactive_form(_expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    filter(|nodes: &Vec<Node>| {
-        matches!(nodes.first(), Some(Node::Ident(ident)) if ident.text() == "interactive")
-    })
-    .then(
-        interactive_spec()
-            .map(|interactive| Expr::SpecialForm(SpecialForm::Interactive(interactive)))
-    )
-    .map(|(_, expr)| expr)
-}
-
-fn interactive_spec() -> impl Parser<Vec<Node>, Interactive, Error = ParseError> + Clone {
-    select! {
-        nodes => {
-            let arg_desc = if let Some(Node::Str(s)) = nodes.get(1) {
-                Some(s.clone())
-            } else {
-                None
-            };
-            
-            let mut modes = Vec::new();
-            for arg in nodes.iter().skip(if arg_desc.is_some() { 2 } else { 1 }) {
-                if let Node::Ident(ident) = arg {
-                    modes.push(*ident);
-                }
-            }
-            
-            Interactive { arg_desc, modes }
-        }
+fn parse_progn_form(
+    nodes: &[Node],
+    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    _span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    let mut exprs = Vec::new();
+    for node in &nodes[1..] {
+        exprs.push(parse_single_expr(node, expr_parser.clone())?);
     }
+    Ok(Expr::SpecialForm(SpecialForm::Progn(exprs)))
 }
 
-fn function_call(expr: impl Parser<Node, Expr, Error = ParseError> + Clone) -> impl Parser<Vec<Node>, Expr, Error = ParseError> + Clone {
-    expr.clone()
-        .then(expr.clone().repeated().collect::<Vec<_>>())
-        .map(|(func, args)| {
-            Expr::Call(Call {
-                func: Box::new(func),
-                args,
-            })
-        })
+fn parse_prog1_form(
+    _nodes: &[Node],
+    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    Err(ParseError {
+        message: "prog1 not yet implemented".to_string(),
+        span: Some((span.start, span.end)),
+    })
+}
+
+fn parse_prog2_form(
+    _nodes: &[Node],
+    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    Err(ParseError {
+        message: "prog2 not yet implemented".to_string(),
+        span: Some((span.start, span.end)),
+    })
+}
+
+fn parse_quote_form(
+    nodes: &[Node],
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    if nodes.len() != 2 {
+        return Err(ParseError {
+            message: "quote requires exactly 1 argument".to_string(),
+            span: Some((span.start, span.end)),
+        });
+    }
+
+    let quoted_data = node_to_quoted_data(&nodes[1], false);
+    Ok(Expr::SpecialForm(SpecialForm::Quote(Quote {
+        kind: QuoteKind::Quote,
+        expr: quoted_data,
+    })))
+}
+
+fn parse_function_form(
+    nodes: &[Node],
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    if nodes.len() != 2 {
+        return Err(ParseError {
+            message: "function requires exactly 1 argument".to_string(),
+            span: Some((span.start, span.end)),
+        });
+    }
+
+    let name = match &nodes[1] {
+        Node::Ident(ident) => *ident,
+        _ => return Err(ParseError {
+            message: "function argument must be a symbol".to_string(),
+            span: Some((span.start, span.end)),
+        }),
+    };
+
+    Ok(Expr::SpecialForm(SpecialForm::Function(Function { name })))
+}
+
+// Add placeholder implementations for the remaining forms
+fn parse_cond_form(
+    _nodes: &[Node],
+    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    Err(ParseError {
+        message: "cond not yet implemented".to_string(),
+        span: Some((span.start, span.end)),
+    })
+}
+
+fn parse_while_form(
+    _nodes: &[Node],
+    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    Err(ParseError {
+        message: "while not yet implemented".to_string(),
+        span: Some((span.start, span.end)),
+    })
+}
+
+fn parse_catch_form(
+    _nodes: &[Node],
+    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    Err(ParseError {
+        message: "catch not yet implemented".to_string(),
+        span: Some((span.start, span.end)),
+    })
+}
+
+fn parse_unwind_protect_form(
+    _nodes: &[Node],
+    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    Err(ParseError {
+        message: "unwind-protect not yet implemented".to_string(),
+        span: Some((span.start, span.end)),
+    })
+}
+
+fn parse_condition_case_form(
+    _nodes: &[Node],
+    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    Err(ParseError {
+        message: "condition-case not yet implemented".to_string(),
+        span: Some((span.start, span.end)),
+    })
+}
+
+fn parse_save_current_buffer_form(
+    _nodes: &[Node],
+    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    Err(ParseError {
+        message: "save-current-buffer not yet implemented".to_string(),
+        span: Some((span.start, span.end)),
+    })
+}
+
+fn parse_save_excursion_form(
+    _nodes: &[Node],
+    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    Err(ParseError {
+        message: "save-excursion not yet implemented".to_string(),
+        span: Some((span.start, span.end)),
+    })
+}
+
+fn parse_save_restriction_form(
+    _nodes: &[Node],
+    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    Err(ParseError {
+        message: "save-restriction not yet implemented".to_string(),
+        span: Some((span.start, span.end)),
+    })
+}
+
+fn parse_interactive_form(
+    _nodes: &[Node],
+    span: std::ops::Range<usize>,
+) -> Result<Expr, ParseError> {
+    Err(ParseError {
+        message: "interactive not yet implemented".to_string(),
+        span: Some((span.start, span.end)),
+    })
 }
 
 fn node_to_quoted_data(node: &Node, _allow_unquote: bool) -> QuotedData {
@@ -649,8 +620,22 @@ fn node_to_quoted_data(node: &Node, _allow_unquote: bool) -> QuotedData {
     }
 }
 
+fn parse_single_expr(
+    node: &Node,
+    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+) -> Result<Expr, ParseError> {
+    let node_input = NodeInput::new(vec![node.clone()]);
+    expr_parser.parse(node_input).into_result().map_err(|errs| {
+        errs.into_iter().next().unwrap_or(ParseError {
+            message: "Failed to parse expression".to_string(),
+            span: None,
+        })
+    })
+}
+
 pub fn parse_node_to_expr(node: Node) -> Result<Expr, ParseError> {
-    node_to_expr().parse(node).into_result().map_err(|errs| {
+    let node_input = NodeInput::new(vec![node]);
+    node_to_expr().parse(node_input).into_result().map_err(|errs| {
         errs.into_iter().next().unwrap_or(ParseError {
             message: "Unknown parse error".to_string(),
             span: None,
