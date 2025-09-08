@@ -57,6 +57,7 @@ impl Clone for Value {
 }
 
 #[repr(u8)]
+#[derive(Debug)]
 pub enum LispType {
     Int = 0,
     Nil,
@@ -69,6 +70,12 @@ pub enum LispType {
     Cons,
     Function,
     Map,
+}
+
+impl std::fmt::Display for LispType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        todo!()
+    }
 }
 
 pub const NIL: i64 = LispType::Nil as i64;
