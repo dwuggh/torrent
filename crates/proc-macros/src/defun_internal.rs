@@ -20,38 +20,28 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let arg_conversion = get_arg_conversion(&args);
 
     // Generate direct parameter passing for internal functions
-    let c_params: Vec<TokenStream> = args
-        .iter()
-        .enumerate()
-        .map(|(_i, (ident, _ty, arg_info))| match &arg_info.kind {
-            ArgKind::Env => quote! { env: i64 },
-            _ => quote! { #ident: i64 },
-        })
-        .collect();
-
-    let c_param_idents: Vec<Ident> = args
-        .iter()
-        .enumerate()
-        .map(|(_i, (ident, _, arg_info))| match &arg_info.kind {
-            ArgKind::Env => format_ident!("env"),
-            _ => ident.clone(),
-        })
-        .collect();
-
-    let mut c_param_idents = Vec::new();
-    for (ident, _, arg_info) in args.iter() {
-        match arg_info.kind {
+    let mut c_params: Vec<TokenStream> = Vec::new();
+    let mut c_param_idents: Vec<Ident> = Vec::new();
+    
+    for (ident, _ty, arg_info) in args.iter() {
+        match &arg_info.kind {
             ArgKind::Env => {
-                let env_ident = format_ident!("env");
-                c_params.push(env_ident);
+                c_params.push(quote! { env: i64 });
+                c_param_idents.push(format_ident!("env"));
             }
-            ArgKind::Slice(inner) => {
-                // c_params.push(env_ident);
+            ArgKind::Slice(_) => {
+                let ptr_ident = format_ident!("{}_ptr", ident);
+                let argc_ident = format_ident!("{}_argc", ident);
+                c_params.push(quote! { #ptr_ident: i64 });
+                c_params.push(quote! { #argc_ident: i64 });
+                c_param_idents.push(ptr_ident);
+                c_param_idents.push(argc_ident);
             }
             _ => {
+                c_params.push(quote! { #ident: i64 });
                 c_param_idents.push(ident.clone());
             }
-        };
+        }
     }
 
     // Generate the actual function call
@@ -199,19 +189,29 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     };
 
     // Generate direct parameter signatures for internal functions
-    let signatures: Vec<TokenStream> = args
-        .iter()
-        .map(|(_, _, arg_info)| {
-            match &arg_info.kind {
-                ArgKind::Env => quote! {
+    let mut signatures: Vec<TokenStream> = Vec::new();
+    for (_, _, arg_info) in args.iter() {
+        match &arg_info.kind {
+            ArgKind::Env => {
+                signatures.push(quote! {
                     sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // env
-                },
-                _ => quote! {
-                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // param
-                },
+                });
             }
-        })
-        .collect();
+            ArgKind::Slice(_) => {
+                signatures.push(quote! {
+                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // slice_ptr
+                });
+                signatures.push(quote! {
+                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // slice_argc
+                });
+            }
+            _ => {
+                signatures.push(quote! {
+                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // param
+                });
+            }
+        }
+    }
 
     quote! {
         #[automatically_derived]
@@ -271,6 +271,48 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                 quote! {
                     let #ident = env as *const crate::core::env::Environment;
                     let #ident = #ident.as_ref().ok_or("failed to convert env")?;
+                }
+            }
+            ArgKind::Slice(inner_kind) => {
+                let ptr_ident = format_ident!("{}_ptr", ident);
+                let argc_ident = format_ident!("{}_argc", ident);
+                
+                match inner_kind.as_ref() {
+                    ArgKind::Value => {
+                        quote! {
+                            let #ident = unsafe {
+                                let ptr = #ptr_ident as *const crate::core::value::Value;
+                                std::slice::from_raw_parts(ptr, #argc_ident as usize)
+                            };
+                        }
+                    }
+                    ArgKind::FromValue => {
+                        quote! {
+                            let mut slice_vec = Vec::with_capacity(#argc_ident as usize);
+                            unsafe {
+                                let ptr = #ptr_ident as *const i64;
+                                for j in 0..#argc_ident as usize {
+                                    let val = crate::core::value::Value(ptr.add(j).read() as u64);
+                                    let converted: #ty = ::std::convert::TryFrom::try_from(val)?;
+                                    slice_vec.push(converted);
+                                }
+                            }
+                            let #ident = slice_vec.as_slice();
+                        }
+                    }
+                    _ => {
+                        quote! {
+                            let mut slice_vec = Vec::with_capacity(#argc_ident as usize);
+                            unsafe {
+                                let ptr = #ptr_ident as *const i64;
+                                for j in 0..#argc_ident as usize {
+                                    let converted: #ty = ::std::convert::TryFrom::try_from(ptr.add(j).read())?;
+                                    slice_vec.push(converted);
+                                }
+                            }
+                            let #ident = slice_vec.as_slice();
+                        }
+                    }
                 }
             }
             ArgKind::Value => {
