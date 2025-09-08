@@ -6,21 +6,11 @@ use crate::{
     core::{compiler::ir::*, ident::Ident},
 };
 
-#[derive(Debug, Clone)]
-pub struct ParseError {
-    pub message: String,
-    pub span: Option<(usize, usize)>,
-}
 
-impl std::fmt::Display for ParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Parse error: {}", self.message)
-    }
-}
+type ParseError<'s> = extra::Err<Rich<'s, char>>;
 
-impl std::error::Error for ParseError {}
 
-pub fn node_to_expr() -> impl Parser<NodeInput, Expr, Error = ParseError> + Clone {
+pub fn node_to_expr<'s>() -> impl Parser<'s, NodeInput, Expr, ParseError> + Clone {
     recursive(|expr| {
         // Atomic expressions
         let atom = select! {
@@ -100,9 +90,9 @@ pub fn node_to_expr() -> impl Parser<NodeInput, Expr, Error = ParseError> + Clon
     })
 }
 
-fn parse_if_form(
+fn parse_if_form<'s>(
     nodes: &[Node],
-    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     if nodes.len() < 3 || nodes.len() > 4 {
@@ -129,7 +119,7 @@ fn parse_if_form(
 
 fn parse_lambda_form(
     nodes: &[Node],
-    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     if nodes.len() < 3 {
@@ -198,9 +188,9 @@ fn parse_lambda_args(node: &Node) -> Result<Vec<Arg>, ParseError> {
     }
 }
 
-fn parse_let_form(
+fn parse_let_form<'s>(
     nodes: &[Node],
-    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     if nodes.len() < 3 {
@@ -219,9 +209,9 @@ fn parse_let_form(
     Ok(Expr::SpecialForm(SpecialForm::Let(Let { bindings, body })))
 }
 
-fn parse_let_star_form(
+fn parse_let_star_form<'s>(
     nodes: &[Node],
-    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     if nodes.len() < 3 {
@@ -240,9 +230,9 @@ fn parse_let_star_form(
     Ok(Expr::SpecialForm(SpecialForm::LetStar(LetStar { bindings, body })))
 }
 
-fn parse_let_bindings(
+fn parse_let_bindings<'s>(
     node: &Node,
-    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
 ) -> Result<Vec<(Ident, Option<Expr>)>, ParseError> {
     match node {
         Node::Nil => Ok(vec![]),
@@ -285,9 +275,9 @@ fn parse_let_bindings(
     }
 }
 
-fn parse_defvar_form(
+fn parse_defvar_form<'s>(
     nodes: &[Node],
-    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     if nodes.len() < 2 || nodes.len() > 4 {
@@ -331,9 +321,9 @@ fn parse_defvar_form(
 }
 
 
-fn parse_function_call(
+fn parse_function_call<'s>(
     nodes: &[Node],
-    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     _span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     if nodes.is_empty() {
@@ -356,9 +346,9 @@ fn parse_function_call(
 }
 
 // Placeholder implementations for remaining forms
-fn parse_defconst_form(
+fn parse_defconst_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     Err(ParseError {
@@ -367,9 +357,9 @@ fn parse_defconst_form(
     })
 }
 
-fn parse_set_form(
+fn parse_set_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     Err(ParseError {
@@ -378,9 +368,9 @@ fn parse_set_form(
     })
 }
 
-fn parse_setq_form(
+fn parse_setq_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     Err(ParseError {
@@ -389,9 +379,9 @@ fn parse_setq_form(
     })
 }
 
-fn parse_setq_default_form(
+fn parse_setq_default_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     Err(ParseError {
@@ -400,9 +390,9 @@ fn parse_setq_default_form(
     })
 }
 
-fn parse_and_form(
+fn parse_and_form<'s>(
     nodes: &[Node],
-    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     _span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     let mut exprs = Vec::new();
@@ -412,9 +402,9 @@ fn parse_and_form(
     Ok(Expr::SpecialForm(SpecialForm::And(exprs)))
 }
 
-fn parse_or_form(
+fn parse_or_form<'s>(
     nodes: &[Node],
-    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     _span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     let mut exprs = Vec::new();
@@ -424,9 +414,9 @@ fn parse_or_form(
     Ok(Expr::SpecialForm(SpecialForm::Or(exprs)))
 }
 
-fn parse_progn_form(
+fn parse_progn_form<'s>(
     nodes: &[Node],
-    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     _span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     let mut exprs = Vec::new();
@@ -436,9 +426,9 @@ fn parse_progn_form(
     Ok(Expr::SpecialForm(SpecialForm::Progn(exprs)))
 }
 
-fn parse_prog1_form(
+fn parse_prog1_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     Err(ParseError {
@@ -447,9 +437,9 @@ fn parse_prog1_form(
     })
 }
 
-fn parse_prog2_form(
+fn parse_prog2_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     Err(ParseError {
@@ -499,9 +489,9 @@ fn parse_function_form(
 }
 
 // Add placeholder implementations for the remaining forms
-fn parse_cond_form(
+fn parse_cond_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     Err(ParseError {
@@ -510,9 +500,9 @@ fn parse_cond_form(
     })
 }
 
-fn parse_while_form(
+fn parse_while_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     Err(ParseError {
@@ -523,7 +513,7 @@ fn parse_while_form(
 
 fn parse_catch_form(
     _nodes: &[Node],
-    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     Err(ParseError {
@@ -532,9 +522,9 @@ fn parse_catch_form(
     })
 }
 
-fn parse_unwind_protect_form(
+fn parse_unwind_protect_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     Err(ParseError {
@@ -545,7 +535,7 @@ fn parse_unwind_protect_form(
 
 fn parse_condition_case_form(
     _nodes: &[Node],
-    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     Err(ParseError {
@@ -554,9 +544,9 @@ fn parse_condition_case_form(
     })
 }
 
-fn parse_save_current_buffer_form(
+fn parse_save_current_buffer_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     Err(ParseError {
@@ -567,7 +557,7 @@ fn parse_save_current_buffer_form(
 
 fn parse_save_excursion_form(
     _nodes: &[Node],
-    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     Err(ParseError {
@@ -576,9 +566,9 @@ fn parse_save_excursion_form(
     })
 }
 
-fn parse_save_restriction_form(
+fn parse_save_restriction_form<'s>(
     _nodes: &[Node],
-    _expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    _expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
     span: std::ops::Range<usize>,
 ) -> Result<Expr, ParseError> {
     Err(ParseError {
@@ -620,9 +610,9 @@ fn node_to_quoted_data(node: &Node, _allow_unquote: bool) -> QuotedData {
     }
 }
 
-fn parse_single_expr(
+fn parse_single_expr<'s>(
     node: &Node,
-    expr_parser: impl Parser<NodeInput, Expr, Error = ParseError> + Clone,
+    expr_parser: impl Parser<'s, NodeInput, Expr, ParseError> + Clone,
 ) -> Result<Expr, ParseError> {
     let node_input = NodeInput::new(vec![node.clone()]);
     expr_parser.parse(node_input).into_result().map_err(|errs| {
