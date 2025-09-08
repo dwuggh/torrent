@@ -2,7 +2,7 @@ use dashmap::mapref::one::RefMut;
 
 use crate::core::{
     symbol::{Symbol, SymbolCell, SymbolMap, INTERNED_SYMBOLS},
-    value::{LispValue, TaggedPtr, Value},
+    value::{nil, LispValue, TaggedPtr, Value},
 };
 
 // pub(crate) static INTERNED_SYMBOLS: OnceLock<std::sync::Mutex<SymbolMap>>;
@@ -15,22 +15,24 @@ pub struct Environment {
 }
 
 impl Environment {
-    pub fn load_symbol(&self, symbol: Symbol, load_function_cell: bool) -> Option<Value> {
-        let mut data_ref = self.get_symbol_cell(symbol)?;
+    pub fn load_symbol(&self, symbol: Symbol, load_function_cell: bool) -> anyhow::Result<Value> {
+        let Some(mut data_ref) = self.get_symbol_cell(symbol) else {
+            return Ok(nil());
+        };
         let data = data_ref.value_mut().data();
         if load_function_cell {
             let LispValue::Cons(cons) = data.func.untag() else {
-                return None;
+                anyhow::bail!("wrong type for func cell")
             };
             let LispValue::Symbol(marker) = cons.car().untag() else {
-                return None;
+                anyhow::bail!("wrong type for func cell")
             };
             match marker.name() {
-                "function" => Some(cons.cdr()),
-                _ => return None,
+                "function" => Ok(cons.cdr()),
+                _ => anyhow::bail!("wrong type for func cell"),
             }
         } else {
-            return Some(data.value);
+            return Ok(data.value);
         }
     }
 

@@ -8,3 +8,4 @@ pub mod runtime;
 pub mod string;
 pub mod symbol;
 pub mod value;
+pub mod error;

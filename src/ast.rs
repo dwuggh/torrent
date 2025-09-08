@@ -23,38 +23,6 @@ pub enum Node {
     Nil,
 }
 
-// We implement Input for Vec<Node> instead of Node itself, since we want to parse
-// over sequences of nodes
-impl chumsky::input::Input for Vec<Node> {
-    type Span = std::ops::Range<usize>;
-    type Token = Node;
-    type MaybeToken = Node;
-    type Cursor = usize;
-    type Cache = ();
-
-    fn begin(self) -> (Self::Cursor, Self::Cache) {
-        (0, ())
-    }
-
-    fn cursor_location(cursor: &Self::Cursor) -> usize {
-        *cursor
-    }
-
-    unsafe fn next_maybe(
-        _cache: &mut Self::Cache,
-        cursor: &mut Self::Cursor,
-    ) -> Option<Self::MaybeToken> {
-        // This is unsafe because we need to access self through the cursor
-        // In practice, this would need a more sophisticated implementation
-        // that maintains a reference to the input data
-        None // Placeholder - this needs proper implementation
-    }
-
-    unsafe fn span(_cache: &mut Self::Cache, range: std::ops::Range<&Self::Cursor>) -> Self::Span {
-        *range.start..*range.end
-    }
-}
-
 // Alternative implementation using a wrapper struct that holds the data
 #[derive(Debug, Clone)]
 pub struct NodeInput {
@@ -68,7 +36,7 @@ impl NodeInput {
     }
 }
 
-impl chumsky::input::Input for NodeInput {
+impl<'s> chumsky::input::Input<'s> for NodeInput {
     type Span = std::ops::Range<usize>;
     type Token = Node;
     type MaybeToken = Node;
@@ -368,7 +336,6 @@ pub fn elisp_parser<'a>() -> impl Parser<'a, &'a str, Vec<Node>, extra::Err<Rich
             .delimited_by(just('('), just(')'))
             .map(|items| {
                 // An empty list `()` is canonical `nil`.
-                println!("{items:?}");
                 if items.is_empty() {
                     Node::Nil
                 } else {

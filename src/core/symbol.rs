@@ -59,11 +59,17 @@ impl SymbolMap {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Trace)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Trace)]
 pub struct Symbol {
     #[no_trace]
     pub name: Ident,
     phantom: PhantomData<SymbolCell>,
+}
+
+impl std::fmt::Debug for Symbol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Symbol").field("name", &self.name()).finish()
+    }
 }
 
 impl From<Ident> for Symbol {

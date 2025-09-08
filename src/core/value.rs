@@ -15,8 +15,14 @@ use crate::{
 };
 
 #[repr(transparent)]
-#[derive(PartialEq, PartialOrd, Eq, Copy, Debug)]
+#[derive(PartialEq, PartialOrd, Eq, Copy)]
 pub struct Value(pub u64);
+
+impl std::fmt::Debug for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.untag().fmt(f)
+    }
+}
 
 impl Default for Value {
     fn default() -> Self {
@@ -297,6 +303,12 @@ impl ::std::convert::TryFrom<Value> for () {
             LispValue::Nil => Ok(()),
             _ => Err("expected Nil"),
         }
+    }
+}
+
+impl<T: TaggedPtr> From<T> for Value {
+    fn from(val: T) -> Self {
+        val.tag()
     }
 }
 

@@ -3,11 +3,13 @@ use std::collections::HashMap;
 use cranelift::codegen::Context;
 use cranelift::prelude::*;
 use cranelift_jit::JITModule;
+use cranelift_module::DataDescription;
 use cranelift_module::FuncId;
 use cranelift_module::Module;
 
 use crate::core::compiler::error::{CodegenError, CodegenResult};
 use crate::core::compiler::ir::Arg;
+use crate::core::compiler::ir::Defvar;
 use crate::core::compiler::ir::{
     Call, Expr, If, Lambda, Let, Literal, Number, Quote, QuoteKind, QuotedData, SpecialForm,
 };
@@ -24,6 +26,7 @@ use crate::Value as RuntimeValue;
 
 pub struct Codegen<'a> {
     module: &'a mut JITModule,
+    data_desc: &'a mut DataDescription,
     builder: FunctionBuilder<'a>,
     closure: Value,
     func: RuntimeValue,
@@ -35,11 +38,11 @@ pub struct Codegen<'a> {
 impl<'a> Codegen<'a> {
     pub fn new_empty<'s>(
         module: &'a mut JITModule,
+        data_desc: &'a mut DataDescription,
         builtin_funcs: &'a HashMap<String, FuncId>,
         fctx: &'a mut FunctionBuilderContext,
         ctx: &'a mut Context,
     ) -> CodegenResult<Self> {
-
         // make signature
         let sig = &mut ctx.func.signature;
         // env arg
@@ -73,6 +76,7 @@ impl<'a> Codegen<'a> {
 
         let codegen = Self {
             module,
+            data_desc,
             builtin_funcs,
             builder,
             func: func_runtime_val,
@@ -86,6 +90,7 @@ impl<'a> Codegen<'a> {
 
     pub fn new<'s>(
         module: &'a mut JITModule,
+        data_desc: &'a mut DataDescription,
         builtin_funcs: &'a HashMap<String, FuncId>,
         fctx: &'a mut FunctionBuilderContext,
         ctx: &'a mut Context,
@@ -151,6 +156,7 @@ impl<'a> Codegen<'a> {
 
         let codegen = Self {
             module,
+            data_desc,
             builtin_funcs,
             builder,
             func: func_runtime_val,
@@ -194,7 +200,7 @@ impl<'a> Codegen<'a> {
         self.func
     }
 
-    fn call(&mut self, func_name: &str, args: &[Value]) -> &[Value] {
+    fn call_internal(&mut self, func_name: &str, args: &[Value]) -> &[Value] {
         tracing::debug!("calling function: {}", func_name);
         tracing::debug!("function args count: {}", args.len());
 
@@ -241,15 +247,12 @@ impl<'a> Codegen<'a> {
                     tracing::debug!("Symbol is captured, loading from closure: {}", ident.text());
                     // this value is captured, we load it from the map for captured values
                     // through compiler, so it gets loaded at runtime
-                    let func_id = *self.builtin_funcs.get("load_captured").unwrap();
                     let ident_val = self
                         .builder
                         .ins()
                         .iconst(types::I64, Into::<i64>::into(ident));
 
-                    let load = self.module.declare_func_in_func(func_id, self.builder.func);
-                    let inst = self.builder.ins().call(load, &[ident_val, self.closure]);
-                    self.builder.inst_results(inst)[0]
+                    self.call_internal("load_captured", &[ident_val, self.closure, self.env])[0]
                 }
             })
     }
@@ -269,7 +272,7 @@ impl<'a> Codegen<'a> {
                     .builder
                     .ins()
                     .iconst(types::I64, if load_function_cell { 1 } else { 0 });
-                let val = self.call(
+                let val = self.call_internal(
                     "load_symbol_value",
                     &[sym_val, load_function_cell, self.env],
                 )[0];
@@ -374,6 +377,12 @@ impl<'a> Codegen<'a> {
             "Translating function call with {} arguments",
             call.args.len()
         );
+        // match *call.func {
+        //     Expr::Symbol(ident) => {
+        //         todo!()
+        //     }
+        //     _ => ()
+        // };
 
         let func = self.translate_expr(call.func.as_ref(), scope, true)?;
         let args = self.translate_arg_exprs(&call.args, scope)?;
@@ -383,22 +392,20 @@ impl<'a> Codegen<'a> {
         let slot = self.builder.create_sized_stack_slot(StackSlotData {
             kind: StackSlotKind::ExplicitSlot,
             size: 8 * argc as u32,
-            align_shift: 0, // 8-byte alignment
+            align_shift: 0,
         });
 
         // self.builder.ins().stack_store(func, slot, 0);
         for (i, val) in args.iter().enumerate() {
             tracing::debug!("Storing argument {} to stack", i);
-            self.builder
-                .ins()
-                .stack_store(*val, slot, i as i32 * 8);
+            self.builder.ins().stack_store(*val, slot, i as i32 * 8);
         }
 
         let args_ptr = self.builder.ins().stack_addr(types::I64, slot, 0);
         let args_cnt = self.builder.ins().iconst(types::I64, argc as i64);
 
         tracing::debug!("Calling apply function");
-        let res = self.call("apply", &[func, args_ptr, args_cnt, self.env])[0];
+        let res = self.call_internal("apply", &[func, args_ptr, args_cnt, self.env])[0];
         tracing::debug!("Apply function returned successfully");
         Ok(res)
     }
@@ -416,6 +423,7 @@ impl<'a> Codegen<'a> {
             SpecialForm::Progn(exprs) => self.translate_exprs(exprs, scope),
             SpecialForm::And(exprs) => self.translate_and(exprs, scope),
             SpecialForm::Or(exprs) => self.translate_or(exprs, scope),
+            SpecialForm::Defvar(exprs) => self.translate_defvar(exprs, scope),
             _ => todo!("Special form not yet implemented: {:?}", special_form),
         }
     }
@@ -636,6 +644,7 @@ impl<'a> Codegen<'a> {
 
         let (mut codegen, new_scope) = Codegen::new(
             self.module,
+            self.data_desc,
             self.builtin_funcs,
             &mut fctx,
             &mut ctx,
@@ -713,13 +722,39 @@ impl<'a> Codegen<'a> {
                     let sym = translate_value(&mut self.builder, symbol.tag());
                     for func in funcs.iter() {
                         let func_val = translate_value(&mut self.builder, *func);
-                        self.call("store_captured", &[sym, value, func_val]);
+                        self.call_internal("store_captured", &[sym, value, func_val]);
                     }
                 }
             }
         }
 
         Ok(result)
+    }
+
+    fn translate_defvar<'s>(
+        &mut self,
+        defvar_expr: &Defvar,
+        scope: &CompileScope<'s>,
+    ) -> CodegenResult<Value> {
+        let text = defvar_expr.symbol.text().as_bytes();
+        let text_len = text.len();
+        let slot = self.builder.create_sized_stack_slot(StackSlotData {
+            kind: StackSlotKind::ExplicitSlot,
+            size: 8 * text_len as u32,
+            align_shift: 0,
+        });
+        for (i, val) in text.iter().enumerate() {
+            let val = self.builder.ins().iconst(types::I8, *val as i64);
+            self.builder.ins().stack_store(val, slot, i as i32 * 1);
+        }
+        let sym = self.builder.ins().stack_addr(types::I64, slot, 0);
+        let sym_len = self.builder.ins().iconst(types::I64, text_len as i64);
+
+        let val = self.translate_expr(defvar_expr.value.as_ref().unwrap(), scope, false)?;
+        
+        let val = self.call_internal("defvar", &[sym, sym_len, val, self.env])[0];
+
+        Ok(val)
     }
 }
 

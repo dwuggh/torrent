@@ -1,8 +1,7 @@
 #![allow(dead_code)]
 
 use std::{
-    alloc::Layout, any::Any, cell::UnsafeCell, hash::Hash, marker::PhantomData, mem::ManuallyDrop,
-    ptr::NonNull,
+    alloc::Layout, any::Any, cell::UnsafeCell, fmt::Debug, hash::Hash, marker::PhantomData, mem::ManuallyDrop, ptr::NonNull
 };
 
 pub mod collector;
@@ -11,10 +10,16 @@ pub mod trace;
 use collector::{dec_rc, inc_rc};
 pub use trace::{Trace, Visitor};
 
-#[derive(Debug)]
 pub struct Gc<T: ?Sized> {
     ptr: NonNull<GcInner<T>>,
     phantom: PhantomData<GcInner<T>>,
+}
+
+impl<T: Debug> Debug for Gc<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let val = self.get();
+        Debug::fmt(val, f)
+    }
 }
 
 // NOTE ops to GcHeader is not thread safe

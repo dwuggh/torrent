@@ -3,6 +3,7 @@ use crate::{
     core::{compiler::ir::*, ident::Ident},
 };
 use std::sync::Arc;
+use chumsky::extra::ParserExtra;
 use thiserror::Error;
 
 #[derive(Error, Debug, Clone)]
@@ -37,6 +38,7 @@ pub enum ConversionError {
     #[error("Invalid argument type in position {position}")]
     InvalidArgumentType { position: usize },
 }
+
 
 pub struct AstToIrConverter;
 
@@ -218,6 +220,7 @@ impl AstToIrConverter {
         if args.is_empty() {
             return Err(ConversionError::InvalidLambdaArgs);
         }
+
 
         let params = Self::parse_lambda_params(&args[0])?;
         let body_nodes = &args[1..];

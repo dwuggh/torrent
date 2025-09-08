@@ -11,7 +11,9 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Copy)]
-pub struct SubrFn {}
+pub struct SubrFn {
+    name: Ident,
+}
 
 pub(crate) type FuncPtr =
     unsafe extern "C" fn(args_ptr: *const Value, argc: u64, env: *const Environment) -> Value;
@@ -31,7 +33,7 @@ pub struct LambdaFn {
 #[derive(Debug, Clone, Trace)]
 pub enum FunctionType {
     #[no_trace]
-    Subr,
+    Subr(SubrFn),
     Lambda(LambdaFn),
 }
 
@@ -45,12 +47,15 @@ pub struct FunctionInner {
 
     #[no_trace]
     pub func_ptr: Option<FuncPtr>,
+
+    // #[no_trace]
+    // signature: FunctionSignature,
 }
 
+#[allow(unused)]
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FunctionSignature {
-    pub func_id: FuncId,
     /// minial argument number required
     pub min_argc: u8,
     pub option_argc: u8,
@@ -83,6 +88,18 @@ impl Function {
                 func_id,
                 func_type: FunctionType::Lambda(closure),
                 func_ptr: None,
+            }),
+        }
+    }
+
+    pub fn new_subr(func_id: FuncId, name: &str, func_ptr: *const u8) -> Self {
+        let fptr = unsafe { cast_func_ptr(func_ptr) };
+        let name = name.into();
+        Self {
+            inner: Gc::new(FunctionInner {
+                func_id,
+                func_type: FunctionType::Subr(SubrFn { name }),
+                func_ptr: Some(fptr),
             }),
         }
     }
