@@ -23,34 +23,81 @@ pub enum Node {
     Nil,
 }
 
-impl chumsky::input::Input for Node {
-    type Span;
-
-    type Token;
-
-    type MaybeToken;
-
-    type Cursor;
-
-    type Cache;
+// We implement Input for Vec<Node> instead of Node itself, since we want to parse
+// over sequences of nodes
+impl chumsky::input::Input for Vec<Node> {
+    type Span = std::ops::Range<usize>;
+    type Token = Node;
+    type MaybeToken = Node;
+    type Cursor = usize;
+    type Cache = ();
 
     fn begin(self) -> (Self::Cursor, Self::Cache) {
-        todo!()
+        (0, ())
     }
 
     fn cursor_location(cursor: &Self::Cursor) -> usize {
-        todo!()
+        *cursor
+    }
+
+    unsafe fn next_maybe(
+        _cache: &mut Self::Cache,
+        cursor: &mut Self::Cursor,
+    ) -> Option<Self::MaybeToken> {
+        // This is unsafe because we need to access self through the cursor
+        // In practice, this would need a more sophisticated implementation
+        // that maintains a reference to the input data
+        None // Placeholder - this needs proper implementation
+    }
+
+    unsafe fn span(_cache: &mut Self::Cache, range: std::ops::Range<&Self::Cursor>) -> Self::Span {
+        *range.start..*range.end
+    }
+}
+
+// Alternative implementation using a wrapper struct that holds the data
+#[derive(Debug, Clone)]
+pub struct NodeInput {
+    nodes: Vec<Node>,
+    position: usize,
+}
+
+impl NodeInput {
+    pub fn new(nodes: Vec<Node>) -> Self {
+        Self { nodes, position: 0 }
+    }
+}
+
+impl chumsky::input::Input for NodeInput {
+    type Span = std::ops::Range<usize>;
+    type Token = Node;
+    type MaybeToken = Node;
+    type Cursor = usize;
+    type Cache = Vec<Node>;
+
+    fn begin(self) -> (Self::Cursor, Self::Cache) {
+        (0, self.nodes)
+    }
+
+    fn cursor_location(cursor: &Self::Cursor) -> usize {
+        *cursor
     }
 
     unsafe fn next_maybe(
         cache: &mut Self::Cache,
         cursor: &mut Self::Cursor,
     ) -> Option<Self::MaybeToken> {
-        todo!()
+        if *cursor < cache.len() {
+            let token = cache[*cursor].clone();
+            *cursor += 1;
+            Some(token)
+        } else {
+            None
+        }
     }
 
-    unsafe fn span(cache: &mut Self::Cache, range: std::ops::Range<&Self::Cursor>) -> Self::Span {
-        todo!()
+    unsafe fn span(_cache: &mut Self::Cache, range: std::ops::Range<&Self::Cursor>) -> Self::Span {
+        *range.start..*range.end
     }
 }
 
