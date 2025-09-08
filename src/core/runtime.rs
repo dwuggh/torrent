@@ -1,12 +1,9 @@
 use super::{env::Environment, function::Function};
-use crate::core::{
-    cons::Cons,
-    function::{FuncPtr, FunctionType},
-    ident::Ident,
-    symbol::Symbol,
-    value::{LispValue, TaggedPtr, Value},
-};
-use anyhow::{anyhow, bail, Result};
+use crate::{core::{
+    cons::Cons, error::{RuntimeError, RuntimeResult}, function::{FuncPtr, FunctionType}, ident::Ident, symbol::Symbol, value::{LispValue, TaggedPtr, Value}
+}, runtime_bail};
+use anyhow::{anyhow, bail};
+type Result<T> = RuntimeResult<T>;
 use proc_macros::{defun, internal_fn};
 
 #[defun(name = "+")]
@@ -15,7 +12,7 @@ fn add(vals: &[Value]) -> Result<Value> {
     let mut result = 0;
     for val in vals.iter() {
         let LispValue::Int(v) = val.untag() else {
-            bail!("type error")
+            runtime_bail!("type error")
         };
         result += v;
     }
@@ -32,8 +29,9 @@ fn apply(func: &Function, args: &[Value], env: &Environment) -> Result<Value> {
 fn funcall(func: Value, args: &[Value], env: &Environment) -> Result<Value> {
     match func.untag() {
         LispValue::Symbol(sym) => {
-            let LispValue::Function(func) = env.load_symbol(sym, true)?.untag() else {
-                bail!("wrong type arg")
+            let val = env.load_symbol(sym, true)?;
+            let LispValue::Function(func) = val.untag() else {
+                return RuntimeError::wrong_type("function", val.get_tag());
             };
             func.run(args, env)
         }
