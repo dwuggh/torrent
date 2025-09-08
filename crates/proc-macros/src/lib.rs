@@ -3,7 +3,8 @@ use proc_macro::{self, TokenStream};
 use proc_macro2::Span;
 use quote::quote;
 use syn::{
-    DataEnum, DataStruct, DeriveInput, Fields, GenericParam, Generics, Ident, Member, Token, Type, parse_macro_input, punctuated::Punctuated,
+    DataEnum, DataStruct, DeriveInput, Fields, GenericParam, Generics, Ident, Member, Token, Type,
+    parse_macro_input, punctuated::Punctuated,
 };
 
 mod defun;

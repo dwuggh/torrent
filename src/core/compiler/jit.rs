@@ -55,16 +55,15 @@ impl JIT {
     pub fn compile_expr(&mut self, expr: &Expr, scope: &CompileScope) -> Result<*const u8> {
         let mut fctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
-        let (mut codegen, new_scope) = Codegen::new(
+        let mut codegen = Codegen::new_empty(
             &mut self.module,
             &self.builtin_funcs,
             &mut fctx,
             &mut ctx,
-            &[],
-            scope,
         )?;
+        let scope = CompileScope::Global;
 
-        let val = codegen.translate_expr(expr, &new_scope, false)?;
+        let val = codegen.translate_expr(expr, &scope, false)?;
 
         let func_id = codegen.func_id;
         codegen.finalize(val);

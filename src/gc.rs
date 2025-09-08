@@ -1,12 +1,7 @@
 #![allow(dead_code)]
 
 use std::{
-    alloc::Layout,
-    any::Any,
-    cell::UnsafeCell,
-    hash::Hash,
-    marker::PhantomData,
-    mem::ManuallyDrop,
+    alloc::Layout, any::Any, cell::UnsafeCell, hash::Hash, marker::PhantomData, mem::ManuallyDrop,
     ptr::NonNull,
 };
 
@@ -15,7 +10,6 @@ pub mod trace;
 
 use collector::{dec_rc, inc_rc};
 pub use trace::{Trace, Visitor};
-
 
 #[derive(Debug)]
 pub struct Gc<T: ?Sized> {

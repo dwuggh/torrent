@@ -3,11 +3,7 @@ use chumsky::Parser;
 use crate::{
     ast::elisp_parser,
     core::{
-        compiler::{
-            ast_to_ir::node_to_ir,
-            jit::JIT,
-            scope::CompileScope,
-        },
+        compiler::{ast_to_ir::node_to_ir, jit::JIT, scope::CompileScope},
         env::Environment,
         value::Value,
     },
@@ -22,11 +18,12 @@ fn main() -> anyhow::Result<()> {
     // tracing::subscriber::set_global_default(subscriber)?;
     tracing_subscriber::fmt::init();
     let mut jit = JIT::default();
-    let text = "(let ((x (lambda (x) 1))) x)";
+    let text = "(let ((x (lambda (x) x))) (x 4))";
     // let text = "((lambda (x) x) 20)";
     // let text = "(let ((x 5)) x)";
     // let text = "2";
     let runtime_env = Box::new(Environment::default());
+    // runtime_env.init_nil_t();
     let ptr = runtime_env.as_ref() as *const Environment;
     // let runtime_env = Box::new(Environment::default());
 
@@ -56,8 +53,8 @@ unsafe fn run_code<O>(
         // Cast the raw pointer to a typed function pointer. This is unsafe, because
         // this is the critical point where you have to trust that the generated code
         // is safe to be called.
-        let code_fn = std::mem::transmute::<_, fn(i64, u64, *const Environment) -> O>(f);
+        let code_fn = std::mem::transmute::<_, fn(*const Environment) -> O>(f);
         // And now we can call it!
-        Ok(code_fn(0, 0, env as *const Environment))
+        Ok(code_fn(env as *const Environment))
     }
 }

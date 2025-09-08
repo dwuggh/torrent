@@ -1,5 +1,5 @@
-use std::sync::LazyLock;
 use std::marker::PhantomData;
+use std::sync::LazyLock;
 
 // include!(concat!(env!("OUT_DIR"), "/sym.rs"));
 // use sym::BUILTIN_SYMBOLS;
@@ -75,6 +75,18 @@ impl From<Ident> for Symbol {
 impl From<&Ident> for Symbol {
     fn from(value: &Ident) -> Self {
         Self::new(*value)
+    }
+}
+
+impl From<&str> for Symbol {
+    fn from(value: &str) -> Self {
+        Self::new(value.into())
+    }
+}
+
+impl From<String> for Symbol {
+    fn from(value: String) -> Self {
+        Self::new(value.into())
     }
 }
 

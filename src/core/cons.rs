@@ -1,7 +1,7 @@
 use proc_macros::Trace;
 
 use crate::{
-    core::value::{LispType, TaggedPtr, Value},
+    core::value::{nil, LispType, TaggedPtr, Value},
     gc::Gc,
 };
 
@@ -50,12 +50,8 @@ impl Cons {
 
     /// Get the length of the list (if it's a proper list)
     pub fn length(&self) -> Option<usize> {
-        if !self.is_proper_list() {
-            return None;
-        }
-
         let mut count = 1;
-        let mut current = *self;
+        let mut current = self.clone();
 
         loop {
             match current.cdr().untag() {
@@ -76,7 +72,7 @@ impl Cons {
         }
 
         let mut result = Vec::new();
-        let mut current = *self;
+        let mut current = self.clone();
 
         loop {
             result.push(current.car());
@@ -96,7 +92,7 @@ impl Cons {
             return None;
         }
 
-        let mut result = Cons::new(values[values.len() - 1], Value::nil());
+        let mut result = Cons::new(values[values.len() - 1], nil());
 
         for value in values.iter().rev().skip(1) {
             result = Cons::new(*value, result.tag());
@@ -107,7 +103,7 @@ impl Cons {
 
     /// Get the nth element of the list (0-indexed)
     pub fn nth(&self, index: usize) -> Option<Value> {
-        let mut current = *self;
+        let mut current = self.clone();
         let mut i = 0;
 
         loop {

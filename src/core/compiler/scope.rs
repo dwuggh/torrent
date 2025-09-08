@@ -45,11 +45,9 @@ impl<'a> From<FrameScope<'a>> for CompileScope<'a> {
 }
 
 impl CompileScope<'_> {
-
     pub fn global() -> Self {
         Self::Global
     }
-
 }
 
 #[derive(Debug, Clone)]

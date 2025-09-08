@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-
 use crate::core::value::{LispType, TaggedPtr};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

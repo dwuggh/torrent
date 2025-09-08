@@ -14,7 +14,6 @@ use crate::core::compiler::ir::{
 use crate::core::compiler::scope::CompileScope;
 use crate::core::compiler::scope::FrameScope;
 use crate::core::compiler::scope::Val;
-use crate::core::env::Environment;
 use crate::core::function::Function;
 use crate::core::string::LispString;
 use crate::core::symbol::Symbol;
@@ -34,6 +33,57 @@ pub struct Codegen<'a> {
 }
 
 impl<'a> Codegen<'a> {
+    pub fn new_empty<'s>(
+        module: &'a mut JITModule,
+        builtin_funcs: &'a HashMap<String, FuncId>,
+        fctx: &'a mut FunctionBuilderContext,
+        ctx: &'a mut Context,
+    ) -> CodegenResult<Self> {
+
+        // make signature
+        let sig = &mut ctx.func.signature;
+        // env arg
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+
+        tracing::debug!(
+            "Function signature created with {} params, {} returns",
+            sig.params.len(),
+            sig.returns.len()
+        );
+
+        let func_id = module.declare_anonymous_function(&ctx.func.signature)?;
+        tracing::debug!("Declared anonymous function with id: {:?}", func_id);
+
+        let mut builder = FunctionBuilder::new(&mut ctx.func, fctx);
+
+        let entry_block = builder.create_block();
+        builder.append_block_params_for_function_params(entry_block);
+        builder.switch_to_block(entry_block);
+        builder.seal_block(entry_block);
+        // builder.block_params(entry_block);
+
+        let block_params = builder.block_params(entry_block);
+        tracing::debug!("Entry block has {} parameters", block_params.len());
+
+        let env = block_params[0];
+
+        let func_runtime_val = Function::new_closure(func_id).tag();
+        let closure_val = translate_value(&mut builder, func_runtime_val);
+
+        let codegen = Self {
+            module,
+            builtin_funcs,
+            builder,
+            func: func_runtime_val,
+            closure: closure_val,
+            env,
+            func_id,
+        };
+
+        Ok(codegen)
+    }
+
     pub fn new<'s>(
         module: &'a mut JITModule,
         builtin_funcs: &'a HashMap<String, FuncId>,
@@ -219,7 +269,10 @@ impl<'a> Codegen<'a> {
                     .builder
                     .ins()
                     .iconst(types::I64, if load_function_cell { 1 } else { 0 });
-                let val = self.call("load_symbol_value", &[sym_val, load_function_cell, self.env])[0];
+                let val = self.call(
+                    "load_symbol_value",
+                    &[sym_val, load_function_cell, self.env],
+                )[0];
                 Some(Val::Value(val))
             }
             CompileScope::Frame(frame) => match frame.slots.get(symbol.name) {
@@ -324,7 +377,7 @@ impl<'a> Codegen<'a> {
 
         let func = self.translate_expr(call.func.as_ref(), scope, true)?;
         let args = self.translate_arg_exprs(&call.args, scope)?;
-        let argc = args.len() + 1;
+        let argc = args.len();
 
         tracing::debug!("Creating stack slot for {} arguments", args.len());
         let slot = self.builder.create_sized_stack_slot(StackSlotData {
@@ -333,19 +386,19 @@ impl<'a> Codegen<'a> {
             align_shift: 0, // 8-byte alignment
         });
 
-        self.builder.ins().stack_store(func, slot, 0);
+        // self.builder.ins().stack_store(func, slot, 0);
         for (i, val) in args.iter().enumerate() {
             tracing::debug!("Storing argument {} to stack", i);
             self.builder
                 .ins()
-                .stack_store(*val, slot, (i + 1) as i32 * 8);
+                .stack_store(*val, slot, i as i32 * 8);
         }
 
         let args_ptr = self.builder.ins().stack_addr(types::I64, slot, 0);
         let args_cnt = self.builder.ins().iconst(types::I64, argc as i64);
 
         tracing::debug!("Calling apply function");
-        let res = self.call("apply", &[args_ptr, args_cnt, self.env])[0];
+        let res = self.call("apply", &[func, args_ptr, args_cnt, self.env])[0];
         tracing::debug!("Apply function returned successfully");
         Ok(res)
     }

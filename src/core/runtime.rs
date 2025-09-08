@@ -9,7 +9,7 @@ use crate::core::{
 use anyhow::{anyhow, Result};
 use proc_macros::{defun, internal_fn};
 
-#[defun]
+#[internal_fn]
 fn apply(func: &Function, args: &[Value], env: &Environment) -> Result<Value> {
     func.run(args, env)
 }
@@ -47,27 +47,8 @@ fn store_symbol_function(symbol: Symbol, func: Value, env: &Environment) {
 }
 
 #[internal_fn]
-fn load_symbol_value(
-    symbol: Symbol,
-    load_function_cell: i64,
-    env: &Environment,
-) -> Option<Value> {
-    let mut data_ref = env.get_or_init_symbol(symbol);
-    let data = data_ref.value_mut().data();
-    if load_function_cell == 1 {
-        let LispValue::Cons(cons) = data.func.untag() else {
-            return None;
-        };
-        let LispValue::Symbol(marker) = cons.car().untag() else {
-            return None;
-        };
-        match marker.name() {
-            "function" => Some(cons.cdr()),
-            _ => return None,
-        }
-    } else {
-        return Some(data.value)
-    }
+fn load_symbol_value(symbol: Symbol, load_function_cell: i64, env: &Environment) -> Option<Value> {
+    env.load_symbol(symbol, load_function_cell == 1)
 }
 
 #[internal_fn]

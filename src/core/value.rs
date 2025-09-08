@@ -4,7 +4,13 @@ use proc_macros::Trace;
 
 use crate::{
     ast::Node,
-    core::{cons::{Cons, ConsInner}, function::Function, map::Map, string::LispString, symbol::Symbol},
+    core::{
+        cons::{Cons, ConsInner},
+        function::Function,
+        map::Map,
+        string::LispString,
+        symbol::Symbol,
+    },
     gc::{Gc, GcInner, Trace},
 };
 
@@ -137,7 +143,7 @@ impl Value {
             match untagged {
                 LispValue::String(string) => string.inc_strong_rc(),
                 // as long as the obarray is traced, its traced
-                LispValue::Symbol(_) => {},
+                LispValue::Symbol(_) => {}
                 LispValue::Vector(vector) => {
                     vector.0.inc_ref_count();
                 }
@@ -242,7 +248,6 @@ impl TaggedPtr for Vector {
         Gc::into_raw(self.0) as u64
     }
 }
-
 
 #[derive(Clone, Trace, Debug)]
 pub struct Vector(Gc<Vec<Value>>);
