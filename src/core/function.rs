@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::core::error::{RuntimeError, RuntimeResult};
 use crate::core::ident::Ident;
 use cranelift_module::FuncId;
 use proc_macros::Trace;
@@ -120,12 +121,12 @@ impl Function {
         self.inner.get().func_ptr
     }
 
-    pub fn run(&self, args: &[Value], env: &Environment) -> anyhow::Result<Value> {
+    pub fn run(&self, args: &[Value], env: &Environment) -> RuntimeResult<Value> {
         let func = self
             .inner
             .get()
             .func_ptr
-            .ok_or(anyhow::anyhow!("no pointer"))?;
+            .ok_or(RuntimeError::internal_error("no function pointer"))?;
         let argc = args.len() as u64;
         let result = unsafe { func(args.as_ptr(), argc, env) };
         Ok(result)

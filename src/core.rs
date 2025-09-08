@@ -8,4 +8,6 @@ pub mod runtime;
 pub mod string;
 pub mod symbol;
 pub mod value;
+
+#[macro_use]
 pub mod error;

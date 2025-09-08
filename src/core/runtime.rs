@@ -2,9 +2,10 @@ use super::{env::Environment, function::Function};
 use crate::{core::{
     cons::Cons, error::{RuntimeError, RuntimeResult}, function::{FuncPtr, FunctionType}, ident::Ident, symbol::Symbol, value::{LispValue, TaggedPtr, Value}
 }, runtime_bail};
-use anyhow::{anyhow, bail};
 type Result<T> = RuntimeResult<T>;
 use proc_macros::{defun, internal_fn};
+
+use crate::runtime_error;
 
 #[defun(name = "+")]
 fn add(vals: &[Value]) -> Result<Value> {
@@ -12,7 +13,7 @@ fn add(vals: &[Value]) -> Result<Value> {
     let mut result = 0;
     for val in vals.iter() {
         let LispValue::Int(v) = val.untag() else {
-            runtime_bail!("type error")
+            runtime_bail!(WrongType, expected: "integer", actual: val.get_tag());
         };
         result += v;
     }
@@ -26,28 +27,32 @@ fn apply(func: &Function, args: &[Value], env: &Environment) -> Result<Value> {
     func.run(args, env)
 }
 
+#[defun]
 fn funcall(func: Value, args: &[Value], env: &Environment) -> Result<Value> {
     match func.untag() {
         LispValue::Symbol(sym) => {
             let val = env.load_symbol(sym, true)?;
             let LispValue::Function(func) = val.untag() else {
-                return RuntimeError::wrong_type("function", val.get_tag());
+                runtime_bail!(WrongType, expected: "function", actual: val.get_tag());
             };
             func.run(args, env)
         }
-        _ => bail!("wrong type arg")
+        _ => runtime_bail!(WrongType, expected: "function", actual: func.get_tag())
     }
-    // env
-    // func.run(args, env)
 }
 
 #[internal_fn]
 fn defvar(name: i64, len: usize, value: Value, env: &Environment) -> Result<Value> {
+    if name == 0 {
+        runtime_bail!(InternalError, message: "null pointer passed to defvar".to_string());
+    }
+    
     let name: &str = unsafe {
-        let ptr: *const u8 = std::mem::transmute(name);
+        let ptr = name as *const u8;
         let slice = std::slice::from_raw_parts(ptr, len);
-        str::from_utf8(slice)?
+        std::str::from_utf8(slice).map_err(|_| RuntimeError::internal_error("invalid UTF-8 in symbol name"))?
     };
+    
     let mut cell = env.get_or_init_symbol(name.into());
     cell.value_mut().data().value = value;
     Ok(value)
@@ -64,12 +69,12 @@ fn store_captured(ident: Ident, value: Value, func: &Function) {
 #[internal_fn]
 fn load_captured(ident: Ident, func: &Function) -> Result<Value> {
     let Some(closure) = func.get_func_type_mut().as_closure_mut() else {
-        return Err(anyhow!("not a closure"));
+        runtime_bail!(InvalidFunction, value: func.clone().tag());
     };
     if let Some(v) = closure.captures.get(&ident) {
         return Ok(*v);
     }
-    Err(anyhow!("failed to load captured value"))
+    runtime_bail!(UnboundSymbol, symbol: ident.into())
 }
 
 #[internal_fn]
@@ -90,21 +95,18 @@ fn load_symbol_value(symbol: Symbol, load_function_cell: u64, env: &Environment)
 fn get_func_ptr(func: Value, env: &Environment) -> Result<FuncPtr> {
     match func.untag() {
         LispValue::Symbol(symbol) => {
-            let func = env
-                .load_symbol(symbol, true)?;
+            let func = env.load_symbol(symbol, true)?;
             let LispValue::Function(func) = func.untag() else {
-                anyhow::bail!("wrong type")
+                runtime_bail!(WrongType, expected: "function", actual: func.get_tag());
             };
-            // TODO assert func is function
             get_func_ptr_from_function(func, env)
         }
         LispValue::Function(func) => get_func_ptr_from_function(func, env),
-
-        _ => anyhow::bail!("wrong type argument"),
+        _ => runtime_bail!(WrongType, expected: "function", actual: func.get_tag()),
     }
 }
 
 fn get_func_ptr_from_function(func: Function, env: &Environment) -> Result<FuncPtr> {
     func.get_func_ptr()
-        .ok_or(anyhow::anyhow!("failed to get pointer"))
+        .ok_or_else(|| RuntimeError::internal_error("failed to get function pointer"))
 }

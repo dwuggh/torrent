@@ -1,8 +1,7 @@
 use dashmap::mapref::one::RefMut;
 
 use crate::core::{
-    symbol::{Symbol, SymbolCell, SymbolMap, INTERNED_SYMBOLS},
-    value::{nil, LispValue, TaggedPtr, Value},
+    error::{RuntimeError, RuntimeResult}, symbol::{Symbol, SymbolCell, SymbolMap, INTERNED_SYMBOLS}, value::{nil, LispValue, TaggedPtr, Value}
 };
 
 // pub(crate) static INTERNED_SYMBOLS: OnceLock<std::sync::Mutex<SymbolMap>>;
@@ -15,21 +14,21 @@ pub struct Environment {
 }
 
 impl Environment {
-    pub fn load_symbol(&self, symbol: Symbol, load_function_cell: bool) -> anyhow::Result<Value> {
+    pub fn load_symbol(&self, symbol: Symbol, load_function_cell: bool) -> RuntimeResult<Value> {
         let Some(mut data_ref) = self.get_symbol_cell(symbol) else {
             return Ok(nil());
         };
         let data = data_ref.value_mut().data();
         if load_function_cell {
             let LispValue::Cons(cons) = data.func.untag() else {
-                anyhow::bail!("wrong type for func cell")
+                return Err(RuntimeError::wrong_type("cons", data.func.get_tag()));
             };
             let LispValue::Symbol(marker) = cons.car().untag() else {
-                anyhow::bail!("wrong type for func cell")
+                return Err(RuntimeError::wrong_type("symbol", cons.car().get_tag()));
             };
             match marker.name() {
                 "function" => Ok(cons.cdr()),
-                _ => anyhow::bail!("wrong type for func cell"),
+                _ => return Err(RuntimeError::internal_error("function cell corrupted"))
             }
         } else {
             return Ok(data.value);
