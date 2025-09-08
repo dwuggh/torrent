@@ -7,7 +7,7 @@ use crate::{
 };
 
 
-type ParseError<'s> = extra::Err<Rich<'s, char>>;
+type ParseError<'s> = extra::Err<Rich<'s, Node>>;
 
 
 pub fn node_to_expr<'s>() -> impl Parser<'s, NodeInput, Expr, ParseError> + Clone {
