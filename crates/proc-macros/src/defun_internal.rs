@@ -4,7 +4,7 @@ use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 use syn::Type;
 
-use crate::defun::{ArgInfo, ArgKind, Function, RetKind};
+use crate::function::{ArgInfo, ArgKind, Function, RetKind, Arg};
 
 pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let body = function.body;
@@ -23,8 +23,9 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let mut c_params: Vec<TokenStream> = Vec::new();
     let mut c_param_idents: Vec<Ident> = Vec::new();
     
-    for (ident, _ty, arg_info) in args.iter() {
-        match &arg_info.kind {
+    for arg in args.iter() {
+        let ident = &arg.ident;
+        match &arg.info.kind {
             ArgKind::Env => {
                 c_params.push(quote! { env: i64 });
                 c_param_idents.push(format_ident!("env"));
@@ -45,7 +46,10 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     }
 
     // Generate the actual function call
-    let call_args = args.iter().map(|(ident, _, _)| quote! { #ident });
+    let call_args = args.iter().map(|arg| {
+        let ident = &arg.ident;
+        quote! { #ident }
+    });
 
     let ret_is_unit = matches!(function.ret_kind, RetKind::Unit);
     let wrapper_ret_ty = if ret_is_unit {
@@ -141,9 +145,16 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
                 }
             }
         }
-        RetKind::Slice(_) => {
-            quote! {
-                return Err("unsupported return type");
+        RetKind::Primitive(_ident) => {
+            if function.fallible {
+                quote! {
+                    match result {
+                        Ok(val) => Ok(val as i64),
+                        Err(_) => Err("call error"),
+                    }
+                }
+            } else {
+                quote! { Ok(result as i64) }
             }
         }
         RetKind::Other => {
@@ -182,7 +193,10 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
             unsafe extern "C" fn #func_name(#(#c_params),*) -> i64 {
                 match #rust_wrapper_name(#(#c_param_idents),*) {
                     Ok(v) => v,
-                    Err(_) => crate::core::value::NIL as i64,
+                    Err(e) => {
+                        tracing::error!("error: {e:?}");
+                        crate::core::value::NIL as i64
+                    }
                 }
             }
         }
@@ -190,7 +204,8 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
 
     // Generate direct parameter signatures for internal functions
     let mut signatures: Vec<TokenStream> = Vec::new();
-    for (_, _, arg_info) in args.iter() {
+    for arg in args.iter() {
+        let arg_info = &arg.info;
         match &arg_info.kind {
             ArgKind::Env => {
                 signatures.push(quote! {
@@ -232,7 +247,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
             jit_builder.symbol(#lisp_name, #func_name as *const u8);
         }
 
-        inventory::submit!(crate::core::compiler::BuiltinFnPlugin::new(#def_func_name, #register_func_name, false));
+        inventory::submit!(crate::core::compiler::BuiltinFnPlugin::new(#def_func_name, #register_func_name, false, #func_name as *const u8));
 
         #[automatically_derived]
         #[doc(hidden)]
@@ -243,6 +258,8 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
             if cfg!(debug_assertions) {
                 eprintln!("[DEBUG] Calling internal function: {}", #lisp_name);
                 eprintln!("[DEBUG] Direct args: {}", stringify!(#(#c_param_idents),*));
+                eprintln!("[DEBUG] Direct args: {}", stringify!(#(#c_params),*));
+                eprintln!("[DEBUG] Direct args: {:?}", &[#(#c_param_idents),*]);
             }
             #(#arg_conversion)*
             if cfg!(debug_assertions) {
@@ -261,11 +278,13 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     }
 }
 
-fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
+fn get_arg_conversion(args: &[Arg]) -> Vec<TokenStream> {
     let mut conversions = Vec::new();
 
     // Convert each argument directly from i64 parameter
-    for (i, (ident, ty, arg_info)) in args.iter().enumerate() {
+    for (i, arg) in args.iter().enumerate() {
+        let arg_info = &arg.info;
+        let ident = &arg.ident;
         let conversion = match &arg_info.kind {
             ArgKind::Env => {
                 quote! {
@@ -286,7 +305,7 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                             };
                         }
                     }
-                    ArgKind::FromValue => {
+                    ArgKind::FromValue(ty) => {
                         quote! {
                             let mut slice_vec = Vec::with_capacity(#argc_ident as usize);
                             unsafe {
@@ -302,15 +321,11 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                     }
                     _ => {
                         quote! {
-                            let mut slice_vec = Vec::with_capacity(#argc_ident as usize);
-                            unsafe {
+                            let #ident = unsafe {
                                 let ptr = #ptr_ident as *const i64;
-                                for j in 0..#argc_ident as usize {
-                                    let converted: #ty = ::std::convert::TryFrom::try_from(ptr.add(j).read())?;
-                                    slice_vec.push(converted);
-                                }
+                                let new_slice = slice::from_raw_parts(ptr, #argc_ident);
+                                new_slice
                             }
-                            let #ident = slice_vec.as_slice();
                         }
                     }
                 }
@@ -341,7 +356,7 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
                     }
                 }
             }
-            ArgKind::FromValue => {
+            ArgKind::FromValue(ty) => {
                 if arg_info.is_ref {
                     let tmp_val = format_ident!("__arg_val_{}", i);
                     let tmp_cast = format_ident!("__arg_cast_{}", i);
@@ -368,7 +383,7 @@ fn get_arg_conversion(args: &[(Ident, Type, ArgInfo)]) -> Vec<TokenStream> {
             }
             _ => {
                 quote! {
-                    let #ident: #ty = ::std::convert::TryFrom::try_from(#ident)?;
+                    let #ident = ::std::convert::TryFrom::try_from(#ident).unwrap();
                 }
             }
         };
