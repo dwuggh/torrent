@@ -214,14 +214,14 @@ impl Value {
     }
 }
 
-macro_rules! impl_try_from_value_variant {
+macro_rules! impl_try_from_value_variant_copy {
     ($($ty:ty => $variant:ident),+ $(,)?) => {
         $(
-            impl<'a> ::std::convert::TryFrom<&'a Value> for $ty {
+            impl ::std::convert::TryFrom<&Value> for $ty {
                 type Error = &'static str;
-                fn try_from(value: &'a Value) -> ::std::result::Result<Self, Self::Error> {
+                fn try_from(value: &Value) -> ::std::result::Result<Self, Self::Error> {
                     match value.untag() {
-                        LispValue::$variant(inner) => Ok(&inner),
+                        LispValue::$variant(inner) => Ok(inner),
                         _ => Err(concat!("expected ", stringify!($variant))),
                     }
                 }
@@ -230,13 +230,33 @@ macro_rules! impl_try_from_value_variant {
     };
 }
 
-// Implement TryFrom<Value> for each inner LispValue variant type.
-impl_try_from_value_variant! {
+macro_rules! impl_try_from_value_variant_ref {
+    ($($ty:ty => $variant:ident),+ $(,)?) => {
+        $(
+            impl<'a> ::std::convert::TryFrom<&'a Value> for $ty {
+                type Error = &'static str;
+                fn try_from(value: &'a Value) -> ::std::result::Result<Self, Self::Error> {
+                    match value.untag() {
+                        LispValue::$variant(inner) => Ok(inner),
+                        _ => Err(concat!("expected ", stringify!($variant))),
+                    }
+                }
+            }
+        )+
+    };
+}
+
+// Implement TryFrom<Value> for copy types (returned by value)
+impl_try_from_value_variant_copy! {
     i64 => Int,
     f64 => Float,
     char => Character,
+    Symbol => Symbol,
+}
+
+// Implement TryFrom<Value> for reference types (returned by reference)
+impl_try_from_value_variant_ref! {
     &'a LispString => String,
-    &'a Symbol => Symbol,
     &'a Vector => Vector,
     &'a Cons => Cons,
     &'a Function => Function,
