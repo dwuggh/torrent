@@ -5,17 +5,20 @@ use proc_macros::Trace;
 use crate::{
     ast::Node,
     core::{
+        compiler::macro_item::MacroItem,
         cons::{Cons, ConsInner},
         function::Function,
         map::Map,
         string::LispString,
         symbol::Symbol,
+        vector::Vector,
+        TaggedPtr,
     },
     gc::{Gc, GcInner, Trace},
 };
 
 #[repr(transparent)]
-#[derive(PartialEq, PartialOrd, Eq, Copy)]
+#[derive(PartialEq, PartialOrd, Eq)]
 pub struct Value(pub u64);
 
 impl std::fmt::Debug for Value {
@@ -42,11 +45,11 @@ impl ::std::hash::Hash for Value {
 
 unsafe impl Trace for Value {
     unsafe fn trace(&self, visitor: crate::gc::Visitor) {
-        self.untag_ref().trace(visitor);
+        // self.untag_ref().trace(visitor);
     }
 
     unsafe fn finalize(&mut self) {
-        ManuallyDrop::new(self.untag()).finalize();
+        todo!()
     }
 }
 
@@ -94,8 +97,26 @@ impl std::fmt::Display for LispType {
 pub const NIL: i64 = LispType::Nil as i64;
 pub const TRUE: i64 = LispType::True as i64;
 
-#[derive(Clone, Trace, Debug)]
-pub enum LispValue {
+#[derive(Clone, Debug)]
+pub enum LispValue<'a> {
+    Nil,
+    True,
+    Int(i64),
+    Float(f64),
+    Character(char),
+    String(&'a LispString),
+    Symbol(Symbol),
+    Vector(&'a Vector),
+    Cons(&'a Cons),
+    Function(&'a Function),
+    Map(&'a Map),
+    /// a macro-only inner type.
+    /// the reason we use this instead of Cons list is to reduce GC overhead.
+    MacroItem(MacroItem),
+}
+
+#[derive(Debug, Trace)]
+pub enum LispValueMut<'a> {
     #[no_trace]
     Nil,
     #[no_trace]
@@ -107,59 +128,63 @@ pub enum LispValue {
     #[no_trace]
     Character(char),
     #[no_trace]
-    String(LispString),
+    String(&'a mut LispString),
+    #[no_trace]
     Symbol(Symbol),
-    Vector(Vector),
-    Cons(Cons),
-    Function(Function),
-    Map(Map),
+    Vector(&'a mut Vector),
+    Cons(&'a mut Cons),
+    Function(&'a mut Function),
+    Map(&'a mut Map),
     /// a macro-only inner type.
     /// the reason we use this instead of Cons list is to reduce GC overhead.
     #[no_trace]
     MacroItem(MacroItem),
 }
 
-#[derive(Clone, Debug)]
-pub enum MacroItem {
-    List(Vec<LispValue>),
-    PrintedRep(String),
-}
-
 impl Value {
-    pub fn untag(self) -> LispValue {
+    pub fn untag(&self) -> LispValue<'_> {
         // let tag = self
-        let data = self.0 >> 8;
+        let data = self.0;
         let tag = self.get_tag();
         unsafe {
             match tag {
                 LispType::Nil => LispValue::Nil,
                 LispType::True => LispValue::True,
-                LispType::Int => LispValue::Int(TaggedPtr::cast(data)),
-                LispType::Float => LispValue::Float(TaggedPtr::cast(data)),
+                LispType::Int => LispValue::Int(*TaggedPtr::untag(data)),
+                LispType::Float => LispValue::Float(*TaggedPtr::untag(data)),
                 LispType::Character => LispValue::Character(char::from_u32(data as u32).unwrap()),
-                LispType::String => LispValue::String(TaggedPtr::cast(data)),
-                LispType::Symbol => LispValue::Symbol(TaggedPtr::cast(data)),
-                LispType::Vector => LispValue::Vector(TaggedPtr::cast(data)),
-                LispType::Cons => LispValue::Cons(TaggedPtr::cast(data)),
-                LispType::Function => LispValue::Function(TaggedPtr::cast(data)),
-                LispType::Map => LispValue::Map(TaggedPtr::cast(data)),
+                LispType::String => LispValue::String(TaggedPtr::untag(data)),
+                LispType::Symbol => LispValue::Symbol(*TaggedPtr::untag(data)),
+                LispType::Vector => LispValue::Vector(TaggedPtr::untag(data)),
+                LispType::Cons => LispValue::Cons(TaggedPtr::untag(data)),
+                LispType::Function => LispValue::Function(TaggedPtr::untag(data)),
+                LispType::Map => LispValue::Map(TaggedPtr::untag(data)),
+            }
+        }
+    }
+    pub fn untag_mut(&self) -> LispValueMut<'_> {
+        // let tag = self
+        let data = self.0;
+        let tag = self.get_tag();
+        unsafe {
+            match tag {
+                LispType::Nil => LispValueMut::Nil,
+                LispType::True => LispValueMut::True,
+                LispType::Int => LispValueMut::Int(*TaggedPtr::untag_mut(data)),
+                LispType::Float => LispValueMut::Float(*TaggedPtr::untag_mut(data)),
+                LispType::Character => LispValueMut::Character(char::from_u32(data as u32).unwrap()),
+                LispType::String => LispValueMut::String(TaggedPtr::untag_mut(data)),
+                LispType::Symbol => LispValueMut::Symbol(*TaggedPtr::untag_mut(data)),
+                LispType::Vector => LispValueMut::Vector(TaggedPtr::untag_mut(data)),
+                LispType::Cons => LispValueMut::Cons(TaggedPtr::untag_mut(data)),
+                LispType::Function => LispValueMut::Function(TaggedPtr::untag_mut(data)),
+                LispType::Map => LispValueMut::Map(TaggedPtr::untag_mut(data)),
             }
         }
     }
 
-    pub fn untag_ref(&self) -> LispValueRef<'_> {
-        LispValueRef {
-            untagged: ManuallyDrop::new(self.untag()),
-            phantom: PhantomData,
-        }
-    }
-
-    pub fn get_tag(self) -> LispType {
+    pub fn get_tag(&self) -> LispType {
         unsafe { std::mem::transmute(self.0 as u8) }
-    }
-
-    pub fn tag<T: TaggedPtr>(val: T) -> Self {
-        TaggedPtr::tag(val)
     }
 
     pub fn from_raw_inc_rc(raw: u64) -> Self {
@@ -189,103 +214,14 @@ impl Value {
     }
 }
 
-impl Deref for LispValueRef<'_> {
-    type Target = LispValue;
-
-    fn deref(&self) -> &Self::Target {
-        &self.untagged
-    }
-}
-
-pub struct LispValueRef<'a> {
-    untagged: ManuallyDrop<LispValue>,
-    phantom: PhantomData<&'a LispValue>,
-}
-
-pub trait TaggedPtr: Sized {
-    const TAG: LispType;
-
-    unsafe fn cast(val: u64) -> Self;
-
-    /// Given the type, return a tagged version of it.
-    fn tag(self) -> Value {
-        unsafe { Value(self.get_untagged_data() << 8 | Self::TAG as u64) }
-    }
-
-    unsafe fn get_untagged_data(self) -> u64;
-}
-
-pub(crate) const MAX_FIXNUM: i64 = i64::MAX >> 8;
-pub(crate) const MIN_FIXNUM: i64 = i64::MIN >> 8;
-impl TaggedPtr for i64 {
-    const TAG: LispType = LispType::Int;
-    unsafe fn cast(val: u64) -> Self {
-        val as i64
-    }
-
-    unsafe fn get_untagged_data(self) -> u64 {
-        self.clamp(MIN_FIXNUM, MAX_FIXNUM) as u64
-    }
-}
-
-impl TaggedPtr for f64 {
-    const TAG: LispType = LispType::Float;
-    unsafe fn cast(val: u64) -> Self {
-        val as f64
-    }
-
-    // TODO
-    unsafe fn get_untagged_data(self) -> u64 {
-        self as u64
-    }
-}
-
-impl TaggedPtr for char {
-    const TAG: LispType = LispType::Character;
-    unsafe fn cast(val: u64) -> Self {
-        char::from_u32(val as u32).unwrap()
-    }
-
-    unsafe fn get_untagged_data(self) -> u64 {
-        self as u64
-    }
-}
-
-impl TaggedPtr for Cons {
-    const TAG: LispType = LispType::Cons;
-
-    unsafe fn cast(val: u64) -> Self {
-        Cons(Gc::from_raw(val as *mut GcInner<ConsInner>))
-    }
-
-    unsafe fn get_untagged_data(self) -> u64 {
-        Gc::into_raw(self.0) as u64
-    }
-}
-
-impl TaggedPtr for Vector {
-    const TAG: LispType = LispType::Vector;
-
-    unsafe fn cast(val: u64) -> Self {
-        Vector(Gc::from_raw(val as *mut GcInner<Vec<Value>>))
-    }
-
-    unsafe fn get_untagged_data(self) -> u64 {
-        Gc::into_raw(self.0) as u64
-    }
-}
-
-#[derive(Clone, Trace, Debug)]
-pub struct Vector(Gc<Vec<Value>>);
-
 macro_rules! impl_try_from_value_variant {
     ($($ty:ty => $variant:ident),+ $(,)?) => {
         $(
-            impl ::std::convert::TryFrom<Value> for $ty {
+            impl<'a> ::std::convert::TryFrom<&'a Value> for $ty {
                 type Error = &'static str;
-                fn try_from(value: Value) -> ::std::result::Result<Self, Self::Error> {
+                fn try_from(value: &'a Value) -> ::std::result::Result<Self, Self::Error> {
                     match value.untag() {
-                        LispValue::$variant(inner) => Ok(inner),
+                        LispValue::$variant(inner) => Ok(&inner),
                         _ => Err(concat!("expected ", stringify!($variant))),
                     }
                 }
@@ -299,18 +235,18 @@ impl_try_from_value_variant! {
     i64 => Int,
     f64 => Float,
     char => Character,
-    LispString => String,
-    Symbol => Symbol,
-    Vector => Vector,
-    Cons => Cons,
-    Function => Function,
-    Map => Map,
+    &'a LispString => String,
+    &'a Symbol => Symbol,
+    &'a Vector => Vector,
+    &'a Cons => Cons,
+    &'a Function => Function,
+    &'a Map => Map,
 }
 
 // Useful blanket: convert Value -> LispValue via untag (infallible).
-impl ::std::convert::TryFrom<Value> for LispValue {
+impl<'a> ::std::convert::TryFrom<&'a Value> for LispValue<'a> {
     type Error = ::std::convert::Infallible;
-    fn try_from(value: Value) -> ::std::result::Result<Self, Self::Error> {
+    fn try_from(value: &'a Value) -> ::std::result::Result<Self, Self::Error> {
         Ok(value.untag())
     }
 }
@@ -326,29 +262,8 @@ impl ::std::convert::TryFrom<Value> for () {
     }
 }
 
-impl<T: TaggedPtr> From<T> for Value {
+impl<'a, T: TaggedPtr<'a>> From<T> for Value {
     fn from(val: T) -> Self {
         val.tag()
-    }
-}
-
-impl From<Node> for LispValue {
-    fn from(node: Node) -> Self {
-        match node {
-            Node::Ident(ident) => LispValue::Symbol(ident.into()),
-            Node::Sexp(nodes) => {
-                let vals = nodes.into_iter().map(Into::into).collect::<Vec<_>>();
-                LispValue::MacroItem(MacroItem::List(vals))
-            }
-            Node::Vector(_nodes) => todo!(),
-            Node::Integer(_) => todo!(),
-            Node::Float(_) => todo!(),
-            Node::Char(_) => todo!(),
-            Node::Str(_) => todo!(),
-            Node::Unquote => todo!(),
-            Node::UnquoteSplice => todo!(),
-            Node::Backquote => todo!(),
-            Node::Nil => todo!(),
-        }
     }
 }
