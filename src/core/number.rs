@@ -14,7 +14,7 @@ pub struct Float(f64);
 pub struct Character(char);
 
 impl TaggedPtr for Integer {
-    const TAG = LispType::Int;
+    const TAG: LispType = LispType::Int;
 
     type Data = i64;
 
@@ -69,7 +69,7 @@ impl From<Integer> for i64 {
 }
 
 impl TaggedPtr for Float {
-    const TAG = LispType::Float;
+    const TAG: LispType = LispType::Float;
     type Data = f64;
     type Inner = Float;
 
@@ -101,7 +101,7 @@ impl From<Float> for f64 {
 }
 
 impl TaggedPtr for Character {
-    const TAG = LispType::Character;
+    const TAG: LispType = LispType::Character;
     type Data = char;
     type Inner = Character;
 
