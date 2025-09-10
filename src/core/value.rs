@@ -37,6 +37,10 @@ pub fn nil() -> Value {
     Value(NIL as u64)
 }
 
+pub fn tru() -> Value {
+    Value(TRUE as u64)
+}
+
 unsafe impl Trace for Value {
     unsafe fn trace(&self, visitor: crate::gc::Visitor) {
         // self.untag_ref().trace(visitor);
@@ -49,7 +53,17 @@ unsafe impl Trace for Value {
 
 impl Clone for Value {
     fn clone(&self) -> Self {
-        Self::from_raw_inc_rc(self.0)
+        let val = Self(self.0);
+        let val = val.untag();
+        val.clone().tag()
+    }
+}
+
+impl Drop for Value {
+    fn drop(&mut self) {
+        let val = Self(self.0);
+        let _untagged = val.untag();
+        // now untagged should be dropped, causing dec_rc to happen
     }
 }
 
@@ -203,42 +217,22 @@ impl Value {
     pub fn get_tag(&self) -> LispType {
         get_tag(self.0 as i64)
     }
+}
 
-    pub fn from_raw_inc_rc(raw: u64) -> Self {
-        let val = Value(raw);
-        let tag = val.get_tag();
-        
-        unsafe {
-            match tag {
-                LispType::String => {
-                    let string = LispString::as_ref_unchecked(&val);
-                    string.0.inc_ref_count();
-                }
-                LispType::Vector => {
-                    let vector = Vector::as_ref_unchecked(&val);
-                    vector.0.inc_ref_count();
-                }
-                LispType::Cons => {
-                    let cons = Cons::as_ref_unchecked(&val);
-                    cons.0.inc_ref_count();
-                }
-                LispType::Function => {
-                    let function = Function::as_ref_unchecked(&val);
-                    function.0.inc_ref_count();
-                }
-                LispType::HashTable => {
-                    let map = HashTable::as_ref_unchecked(&val);
-                    map.0.inc_ref_count();
-                }
-                LispType::Symbol => {
-                    // symbol do not need tracing, because:
-                    // - global symbols are stored in environments. as long as the
-                    // environment(obarray) is traced, every symbol's cell is traced
-                    // - local captured variable is traced inside function.
-                }
-                _ => (),
-            }
+impl LispValue {
+    pub fn tag(self) -> Value {
+        match self {
+            LispValue::Nil => nil(),
+            LispValue::True => tru(),
+            LispValue::Int(integer) => integer.tag(),
+            LispValue::Float(float) => float.tag(),
+            LispValue::Character(character) => character.tag(),
+            LispValue::String(lisp_string) => lisp_string.tag(),
+            LispValue::Symbol(symbol) => symbol.tag(),
+            LispValue::Vector(vector) => vector.tag(),
+            LispValue::Cons(cons) => cons.tag(),
+            LispValue::Function(function) => function.tag(),
+            LispValue::HashTable(hash_table) => hash_table.tag(),
         }
-        val
     }
 }

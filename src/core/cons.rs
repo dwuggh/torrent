@@ -1,32 +1,35 @@
 use proc_macros::Trace;
 
 use crate::{
-    core::value::{nil, LispType, TaggedPtr, Value},
-    gc::Gc,
+    core::value::{nil, LispType, Value},
+    core::TaggedPtr,
+    gc::{Gc, GcInner},
 };
 
 #[derive(Clone, Trace, Debug)]
-pub struct Cons(pub Gc<ConsInner>);
+pub struct Cons(pub Gc<LispCons>);
 
 #[derive(Clone, Trace, Debug)]
-pub struct ConsInner {
+pub struct LispCons {
     car: Value,
     cdr: Value,
 }
 
+impl_tagged_ptr_for_gc!(Cons, LispType::Cons, LispCons);
+
 impl Cons {
     pub fn new(car: Value, cdr: Value) -> Self {
-        Self(Gc::new(ConsInner { car, cdr }))
+        Self(Gc::new(LispCons { car, cdr }))
     }
 
     /// Get the car (first element) of the cons cell
-    pub fn car(&self) -> Value {
-        self.0.get().car
+    pub fn car(&self) -> &Value {
+        &self.0.get().car
     }
 
     /// Get the cdr (rest) of the cons cell
-    pub fn cdr(&self) -> Value {
-        self.0.get().cdr
+    pub fn cdr(&self) -> &Value {
+        &self.0.get().cdr
     }
 
     /// Set the car (first element) of the cons cell
