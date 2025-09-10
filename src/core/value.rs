@@ -110,7 +110,7 @@ impl TryFrom<Value> for LispValue {
             LispType::Int => LispValue::Int(Integer::untag(value)?),
             LispType::Float => LispValue::Float(Float::untag(value)?),
             LispType::Character => LispValue::Character(Character::untag(value)?),
-            LispType::String => LispValue::String(unsafe { TaggedPtr::untag(value.0) }),
+            LispType::String => LispValue::String(TaggedPtr::untag(value.0)),
             LispType::Symbol => LispValue::Symbol(unsafe { *TaggedPtr::untag(value.0) }),
             LispType::Vector => LispValue::Vector(unsafe { TaggedPtr::untag(value.0) }),
             LispType::Cons => LispValue::Cons(unsafe { TaggedPtr::untag(value.0) }),
