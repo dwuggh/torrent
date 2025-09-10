@@ -205,36 +205,40 @@ impl Value {
     }
 
     pub fn from_raw_inc_rc(raw: u64) -> Self {
-        let val = ManuallyDrop::new(Value(raw));
-        let untagged = ManuallyDrop::new(val.untag());
+        let val = Value(raw);
+        let tag = val.get_tag();
+        
         unsafe {
-            match &*untagged {
-                LispValue::String(string) => string.inc_strong_rc(),
-                // as long as the obarray is traced, its traced
-                LispValue::Symbol(_symbol) => {
+            match tag {
+                LispType::String => {
+                    let string = LispString::as_ref_unchecked(&val);
+                    string.0.inc_ref_count();
+                }
+                LispType::Vector => {
+                    let vector = Vector::as_ref_unchecked(&val);
+                    vector.0.inc_ref_count();
+                }
+                LispType::Cons => {
+                    let cons = Cons::as_ref_unchecked(&val);
+                    cons.0.inc_ref_count();
+                }
+                LispType::Function => {
+                    let function = Function::as_ref_unchecked(&val);
+                    function.0.inc_ref_count();
+                }
+                LispType::HashTable => {
+                    let map = HashTable::as_ref_unchecked(&val);
+                    map.0.inc_ref_count();
+                }
+                LispType::Symbol => {
                     // symbol do not need tracing, because:
                     // - global symbols are stored in environments. as long as the
                     // environment(obarray) is traced, every symbol's cell is traced
                     // - local captured variable is traced inside function.
                 }
-                LispValue::String(string) => {
-                    string.0.inc_ref_count();
-                }
-                LispValue::Vector(vector) => {
-                    vector.0.inc_ref_count();
-                }
-                LispValue::Cons(cons) => {
-                    cons.0.inc_ref_count();
-                }
-                LispValue::Function(function) => {
-                    function.0.inc_ref_count();
-                }
-                LispValue::HashTable(map) => {
-                    map.0.inc_ref_count();
-                }
                 _ => (),
             }
         }
-        *val
+        val
     }
 }
