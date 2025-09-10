@@ -91,41 +91,24 @@ impl std::fmt::Display for LispType {
 pub const NIL: i64 = LispType::Nil as i64;
 pub const TRUE: i64 = LispType::True as i64;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Trace)]
 pub enum LispValue {
+    #[no_trace]
     Nil,
+    #[no_trace]
     True,
+    #[no_trace]
     Int(Integer),
+    #[no_trace]
     Float(Float),
+    #[no_trace]
     Character(Character),
     String(LispString),
     Symbol(Symbol),
     Vector(Vector),
     Cons(Cons),
     Function(Function),
-    Map(HashTable),
-}
-
-impl TryFrom<Value> for LispValue {
-    type Error = TaggedPtrError;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        let tag = get_tag(value.0 as i64);
-        let result = match tag {
-            LispType::Nil => LispValue::Nil,
-            LispType::True => LispValue::True,
-            LispType::Int => LispValue::Int(Integer::untag(value)?),
-            LispType::Float => LispValue::Float(Float::untag(value)?),
-            LispType::Character => LispValue::Character(Character::untag(value)?),
-            LispType::String => LispValue::String(LispString::untag(value)?),
-            LispType::Symbol => LispValue::Symbol(Symbol::untag(value)?),
-            LispType::Vector => LispValue::Vector(Vector::untag(value)?),
-            LispType::Cons => LispValue::Cons(Cons::untag(value)?),
-            LispType::Function => LispValue::Function(Function::untag(value)?),
-            LispType::HashTable => LispValue::Map(HashTable::untag(value)?),
-        };
-        Ok(result)
-    }
+    HashTable(HashTable),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -135,34 +118,27 @@ pub enum LispValueRef<'a> {
     Int(i64),
     Float(f64),
     Character(char),
-    String(&'a String),
     Symbol(Symbol),
+    String(&'a String),
     Vector(&'a Vec<Value>),
     Cons(&'a LispCons),
     Function(&'a LispFunction),
     HashTable(&'a LispHashTable),
 }
 
-#[derive(Debug, Trace)]
+#[derive(Debug)]
 pub enum LispValueMut<'a> {
-    #[no_trace]
     Nil,
-    #[no_trace]
     True,
-    #[no_trace]
     Int(i64),
-    #[no_trace]
     Float(f64),
-    #[no_trace]
     Character(char),
-    #[no_trace]
-    String(&'a mut String),
-    #[no_trace]
     Symbol(Symbol),
+    String(&'a mut String),
     Vector(&'a mut Vec<Value>),
     Cons(&'a mut LispCons),
     Function(&'a mut LispFunction),
-    Map(&'a mut LispHashTable),
+    HashTable(&'a mut LispHashTable),
 }
 
 impl Value {
@@ -179,7 +155,7 @@ impl Value {
             LispType::Vector => LispValue::Vector(Vector::untag(self).unwrap()),
             LispType::Cons => LispValue::Cons(Cons::untag(self).unwrap()),
             LispType::Function => LispValue::Function(Function::untag(self).unwrap()),
-            LispType::HashTable => LispValue::Map(HashTable::untag(self).unwrap()),
+            LispType::HashTable => LispValue::HashTable(HashTable::untag(self).unwrap()),
         }
     }
 
@@ -193,11 +169,11 @@ impl Value {
                 LispType::Float => LispValueRef::Float(*Float::as_ref_unchecked(self)),
                 LispType::Character => LispValueRef::Character(*Character::as_ref_unchecked(self)),
                 LispType::String => LispValueRef::String(LispString::as_ref_unchecked(self)),
-                LispType::Symbol => LispValueRef::Symbol(Symbol::untag(*self).unwrap()),
+                LispType::Symbol => LispValueRef::Symbol(Symbol::as_ref_unchecked(self).into()),
                 LispType::Vector => LispValueRef::Vector(Vector::as_ref_unchecked(self)),
                 LispType::Cons => LispValueRef::Cons(Cons::as_ref_unchecked(self)),
                 LispType::Function => LispValueRef::Function(Function::as_ref_unchecked(self)),
-                LispType::HashTable => LispValueRef::Map(HashTable::as_ref_unchecked(self)),
+                LispType::HashTable => LispValueRef::HashTable(HashTable::as_ref_unchecked(self)),
             }
         }
     }
@@ -212,11 +188,14 @@ impl Value {
                 LispType::Float => LispValueMut::Float(*Float::as_mut_unchecked(self)),
                 LispType::Character => LispValueMut::Character(*Character::as_mut_unchecked(self)),
                 LispType::String => LispValueMut::String(LispString::as_mut_unchecked(self)),
-                LispType::Symbol => LispValueMut::Symbol(Symbol::untag(*self).unwrap()),
+                LispType::Symbol => {
+                    let ident = *Symbol::as_mut_unchecked(self);
+                    LispValueMut::Symbol(ident.into())
+                },
                 LispType::Vector => LispValueMut::Vector(Vector::as_mut_unchecked(self)),
                 LispType::Cons => LispValueMut::Cons(Cons::as_mut_unchecked(self)),
                 LispType::Function => LispValueMut::Function(Function::as_mut_unchecked(self)),
-                LispType::Map => LispValueMut::Map(HashTable::as_mut_unchecked(self)),
+                LispType::HashTable => LispValueMut::HashTable(HashTable::as_mut_unchecked(self)),
             }
         }
     }
@@ -226,13 +205,21 @@ impl Value {
     }
 
     pub fn from_raw_inc_rc(raw: u64) -> Self {
-        let val = Value(raw);
-        let untagged = val.untag();
+        let val = ManuallyDrop::new(Value(raw));
+        let untagged = ManuallyDrop::new(val.untag());
         unsafe {
-            match untagged {
+            match &*untagged {
                 LispValue::String(string) => string.inc_strong_rc(),
                 // as long as the obarray is traced, its traced
-                LispValue::Symbol(_) => {}
+                LispValue::Symbol(_symbol) => {
+                    // symbol do not need tracing, because:
+                    // - global symbols are stored in environments. as long as the
+                    // environment(obarray) is traced, every symbol's cell is traced
+                    // - local captured variable is traced inside function.
+                }
+                LispValue::String(string) => {
+                    string.0.inc_ref_count();
+                }
                 LispValue::Vector(vector) => {
                     vector.0.inc_ref_count();
                 }
@@ -242,12 +229,12 @@ impl Value {
                 LispValue::Function(function) => {
                     function.0.inc_ref_count();
                 }
-                LispValue::Map(map) => {
+                LispValue::HashTable(map) => {
                     map.0.inc_ref_count();
                 }
                 _ => (),
             }
         }
-        val
+        *val
     }
 }
