@@ -162,7 +162,7 @@ pub enum LispValueMut<'a> {
     Vector(&'a mut Vec<Value>),
     Cons(&'a mut LispCons),
     Function(&'a mut LispFunction),
-    Map(&'a mut HashTable),
+    Map(&'a mut LispHashTable),
 }
 
 impl Value {
@@ -189,18 +189,34 @@ impl Value {
             match tag {
                 LispType::Nil => LispValueRef::Nil,
                 LispType::True => LispValueRef::True,
-                LispType::Int => LispValueRef::Int(Integer::untag(*self).unwrap().value()),
-                LispType::Float => LispValueRef::Float(Float::untag(*self).unwrap().value()),
-                LispType::Character => {
-                    LispValueRef::Character(Character::untag(*self).unwrap().value())
-                }
-
+                LispType::Int => LispValueRef::Int(*Integer::as_ref_unchecked(self)),
+                LispType::Float => LispValueRef::Float(*Float::as_ref_unchecked(self)),
+                LispType::Character => LispValueRef::Character(*Character::as_ref_unchecked(self)),
                 LispType::String => LispValueRef::String(LispString::as_ref_unchecked(self)),
                 LispType::Symbol => LispValueRef::Symbol(Symbol::untag(*self).unwrap()),
-                LispType::Vector => LispValueRef::Vector(&Vector::untag(*self).unwrap()),
-                LispType::Cons => LispValueRef::Cons(&Cons::untag(*self).unwrap()),
-                LispType::Function => LispValueRef::Function(&Function::untag(*self).unwrap()),
-                LispType::HashTable => LispValueRef::Map(&HashTable::untag(*self).unwrap()),
+                LispType::Vector => LispValueRef::Vector(Vector::as_ref_unchecked(self)),
+                LispType::Cons => LispValueRef::Cons(Cons::as_ref_unchecked(self)),
+                LispType::Function => LispValueRef::Function(Function::as_ref_unchecked(self)),
+                LispType::HashTable => LispValueRef::Map(HashTable::as_ref_unchecked(self)),
+            }
+        }
+    }
+
+    pub fn as_mut(&mut self) -> LispValueMut<'_> {
+        let tag = self.get_tag();
+        unsafe {
+            match tag {
+                LispType::Nil => LispValueMut::Nil,
+                LispType::True => LispValueMut::True,
+                LispType::Int => LispValueMut::Int(*Integer::as_mut_unchecked(self)),
+                LispType::Float => LispValueMut::Float(*Float::as_mut_unchecked(self)),
+                LispType::Character => LispValueMut::Character(*Character::as_mut_unchecked(self)),
+                LispType::String => LispValueMut::String(LispString::as_mut_unchecked(self)),
+                LispType::Symbol => LispValueMut::Symbol(Symbol::untag(*self).unwrap()),
+                LispType::Vector => LispValueMut::Vector(Vector::as_mut_unchecked(self)),
+                LispType::Cons => LispValueMut::Cons(Cons::as_mut_unchecked(self)),
+                LispType::Function => LispValueMut::Function(Function::as_mut_unchecked(self)),
+                LispType::Map => LispValueMut::Map(HashTable::as_mut_unchecked(self)),
             }
         }
     }
