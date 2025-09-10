@@ -3,11 +3,18 @@ use std::{marker::PhantomData, mem::ManuallyDrop, ops::Deref};
 use proc_macros::Trace;
 
 use crate::{
-    ast::Node,
     core::{
-        compiler::macro_item::MacroItem, cons::{Cons, ConsInner}, function::{Function, FunctionInner}, map::Map, number::{Character, Float, Integer}, string::LispString, symbol::Symbol, tagged_ptr::{get_tag, TaggedPtrError}, vector::Vector, TaggedPtr
+        cons::{Cons, LispCons},
+        function::{Function, LispFunction},
+        map::{HashTable, LispHashTable},
+        number::{Character, Float, Integer},
+        string::LispString,
+        symbol::Symbol,
+        tagged_ptr::{get_tag, TaggedPtrError},
+        vector::Vector,
+        TaggedPtr,
     },
-    gc::{Gc, GcInner, Trace},
+    gc::Trace,
 };
 
 #[repr(transparent)]
@@ -16,7 +23,7 @@ pub struct Value(pub u64);
 
 impl std::fmt::Debug for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.untag().fmt(f)
+        self.as_ref().fmt(f)
     }
 }
 
@@ -59,7 +66,7 @@ pub enum LispType {
     Vector,
     Cons,
     Function,
-    Map,
+    HashTable,
 }
 
 impl std::fmt::Display for LispType {
@@ -75,7 +82,7 @@ impl std::fmt::Display for LispType {
             LispType::Vector => "vector",
             LispType::Cons => "cons",
             LispType::Function => "function",
-            LispType::Map => "hash-table",
+            LispType::HashTable => "hash-table",
         };
         write!(f, "{}", type_name)
     }
@@ -96,7 +103,7 @@ pub enum LispValue {
     Vector(Vector),
     Cons(Cons),
     Function(Function),
-    Map(Map),
+    Map(HashTable),
 }
 
 impl TryFrom<Value> for LispValue {
@@ -115,7 +122,7 @@ impl TryFrom<Value> for LispValue {
             LispType::Vector => LispValue::Vector(Vector::untag(value)?),
             LispType::Cons => LispValue::Cons(Cons::untag(value)?),
             LispType::Function => LispValue::Function(Function::untag(value)?),
-            LispType::Map => LispValue::Map(Map::untag(value)?),
+            LispType::HashTable => LispValue::Map(HashTable::untag(value)?),
         };
         Ok(result)
     }
@@ -128,12 +135,12 @@ pub enum LispValueRef<'a> {
     Int(i64),
     Float(f64),
     Character(char),
-    String(&'a LispString),
+    String(&'a String),
     Symbol(Symbol),
-    Vector(&'a Vector),
-    Cons(&'a Cons),
-    Function(&'a Function),
-    Map(&'a Map),
+    Vector(&'a Vec<Value>),
+    Cons(&'a LispCons),
+    Function(&'a LispFunction),
+    HashTable(&'a LispHashTable),
 }
 
 #[derive(Debug, Trace)]
@@ -153,47 +160,50 @@ pub enum LispValueMut<'a> {
     #[no_trace]
     Symbol(Symbol),
     Vector(&'a mut Vec<Value>),
-    Cons(&'a mut ConsInner),
-    Function(&'a mut FunctionInner),
-    Map(&'a mut Map),
+    Cons(&'a mut LispCons),
+    Function(&'a mut LispFunction),
+    Map(&'a mut HashTable),
 }
 
 impl Value {
-
-    pub fn untag(&self) -> LispValue {
+    pub fn untag(self) -> LispValue {
         let tag = self.get_tag();
         match tag {
             LispType::Nil => LispValue::Nil,
             LispType::True => LispValue::True,
-            LispType::Int => LispValue::Int(Integer::untag(*self).unwrap()),
-            LispType::Float => LispValue::Float(Float::untag(*self).unwrap()),
-            LispType::Character => LispValue::Character(Character::untag(*self).unwrap()),
-            LispType::String => LispValue::String(LispString::untag(*self).unwrap()),
-            LispType::Symbol => LispValue::Symbol(Symbol::untag(*self).unwrap()),
-            LispType::Vector => LispValue::Vector(Vector::untag(*self).unwrap()),
-            LispType::Cons => LispValue::Cons(Cons::untag(*self).unwrap()),
-            LispType::Function => LispValue::Function(Function::untag(*self).unwrap()),
-            LispType::Map => LispValue::Map(Map::untag(*self).unwrap()),
+            LispType::Int => LispValue::Int(Integer::untag(self).unwrap()),
+            LispType::Float => LispValue::Float(Float::untag(self).unwrap()),
+            LispType::Character => LispValue::Character(Character::untag(self).unwrap()),
+            LispType::String => LispValue::String(LispString::untag(self).unwrap()),
+            LispType::Symbol => LispValue::Symbol(Symbol::untag(self).unwrap()),
+            LispType::Vector => LispValue::Vector(Vector::untag(self).unwrap()),
+            LispType::Cons => LispValue::Cons(Cons::untag(self).unwrap()),
+            LispType::Function => LispValue::Function(Function::untag(self).unwrap()),
+            LispType::HashTable => LispValue::Map(HashTable::untag(self).unwrap()),
         }
     }
 
     pub fn as_ref(&self) -> LispValueRef<'_> {
         let tag = self.get_tag();
-        match tag {
-            LispType::Nil => LispValueRef::Nil,
-            LispType::True => LispValueRef::True,
-            LispType::Int => LispValueRef::Int(Integer::untag(*self).unwrap().value()),
-            LispType::Float => LispValueRef::Float(Float::untag(*self).unwrap().value()),
-            LispType::Character => LispValueRef::Character(Character::untag(*self).unwrap().value()),
-            LispType::String => LispValueRef::String(&LispString::untag(*self).unwrap()),
-            LispType::Symbol => LispValueRef::Symbol(Symbol::untag(*self).unwrap()),
-            LispType::Vector => LispValueRef::Vector(&Vector::untag(*self).unwrap()),
-            LispType::Cons => LispValueRef::Cons(&Cons::untag(*self).unwrap()),
-            LispType::Function => LispValueRef::Function(&Function::untag(*self).unwrap()),
-            LispType::Map => LispValueRef::Map(&Map::untag(*self).unwrap()),
+        unsafe {
+            match tag {
+                LispType::Nil => LispValueRef::Nil,
+                LispType::True => LispValueRef::True,
+                LispType::Int => LispValueRef::Int(Integer::untag(*self).unwrap().value()),
+                LispType::Float => LispValueRef::Float(Float::untag(*self).unwrap().value()),
+                LispType::Character => {
+                    LispValueRef::Character(Character::untag(*self).unwrap().value())
+                }
+
+                LispType::String => LispValueRef::String(LispString::as_ref_unchecked(self)),
+                LispType::Symbol => LispValueRef::Symbol(Symbol::untag(*self).unwrap()),
+                LispType::Vector => LispValueRef::Vector(&Vector::untag(*self).unwrap()),
+                LispType::Cons => LispValueRef::Cons(&Cons::untag(*self).unwrap()),
+                LispType::Function => LispValueRef::Function(&Function::untag(*self).unwrap()),
+                LispType::HashTable => LispValueRef::Map(&HashTable::untag(*self).unwrap()),
+            }
         }
     }
-
 
     pub fn get_tag(&self) -> LispType {
         get_tag(self.0 as i64)
@@ -214,7 +224,7 @@ impl Value {
                     cons.0.inc_ref_count();
                 }
                 LispValue::Function(function) => {
-                    function.inner.inc_ref_count();
+                    function.0.inc_ref_count();
                 }
                 LispValue::Map(map) => {
                     map.0.inc_ref_count();
@@ -223,90 +233,5 @@ impl Value {
             }
         }
         val
-    }
-}
-
-macro_rules! impl_try_from_value_variant_copy {
-    ($($ty:ty => $variant:ident),+ $(,)?) => {
-        $(
-            impl ::std::convert::TryFrom<&Value> for $ty {
-                type Error = &'static str;
-                fn try_from(value: &Value) -> ::std::result::Result<Self, Self::Error> {
-                    match value.untag() {
-                        LispValue::$variant(inner) => Ok(inner),
-                        _ => Err(concat!("expected ", stringify!($variant))),
-                    }
-                }
-            }
-        )+
-    };
-}
-
-macro_rules! impl_try_from_value_variant_ref {
-    ($($ty:ty => $variant:ident),+ $(,)?) => {
-        $(
-            impl<'a> ::std::convert::TryFrom<&'a Value> for $ty {
-                type Error = &'static str;
-                fn try_from(value: &'a Value) -> ::std::result::Result<Self, Self::Error> {
-                    match value.untag() {
-                        LispValue::$variant(inner) => Ok(inner),
-                        _ => Err(concat!("expected ", stringify!($variant))),
-                    }
-                }
-            }
-        )+
-    };
-}
-
-// Implement TryFrom<Value> for copy types (returned by value)
-impl_try_from_value_variant_copy! {
-    i64 => Int,
-    f64 => Float,
-    char => Character,
-    Symbol => Symbol,
-}
-
-// Implement TryFrom<Value> for reference types (returned by reference)
-impl_try_from_value_variant_ref! {
-    &'a LispString => String,
-    &'a Vector => Vector,
-    &'a Cons => Cons,
-    &'a Function => Function,
-    &'a Map => Map,
-}
-
-impl From<Integer> for Value {
-    fn from(val: Integer) -> Self {
-        val.tag()
-    }
-}
-
-impl From<Float> for Value {
-    fn from(val: Float) -> Self {
-        val.tag()
-    }
-}
-
-impl From<Character> for Value {
-    fn from(val: Character) -> Self {
-        val.tag()
-    }
-}
-
-impl From<i64> for Value {
-    fn from(val: i64) -> Self {
-        Integer::new(val).tag()
-    }
-}
-
-impl From<f64> for Value {
-    fn from(val: f64) -> Self {
-        Float::new(val).tag()
-    }
-}
-
-impl From<char> for Value {
-    fn from(val: char) -> Self {
-        Character::new(val).tag()
     }
 }
