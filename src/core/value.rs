@@ -103,19 +103,19 @@ impl TryFrom<Value> for LispValue {
     type Error = TaggedPtrError;
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
-        let tag = get_tag(value.0);
+        let tag = get_tag(value.0 as i64);
         let result = match tag {
             LispType::Nil => LispValue::Nil,
             LispType::True => LispValue::True,
             LispType::Int => LispValue::Int(Integer::untag(value)?),
             LispType::Float => LispValue::Float(Float::untag(value)?),
             LispType::Character => LispValue::Character(Character::untag(value)?),
-            LispType::String => LispValue::String(TaggedPtr::untag(value.0)),
-            LispType::Symbol => LispValue::Symbol(unsafe { *TaggedPtr::untag(value.0) }),
-            LispType::Vector => LispValue::Vector(unsafe { TaggedPtr::untag(value.0) }),
-            LispType::Cons => LispValue::Cons(unsafe { TaggedPtr::untag(value.0) }),
-            LispType::Function => LispValue::Function(unsafe { TaggedPtr::untag(value.0) }),
-            LispType::Map => LispValue::Map(unsafe { TaggedPtr::untag(value.0) }),
+            LispType::String => LispValue::String(LispString::untag(value)?),
+            LispType::Symbol => LispValue::Symbol(Symbol::untag(value)?),
+            LispType::Vector => LispValue::Vector(Vector::untag(value)?),
+            LispType::Cons => LispValue::Cons(Cons::untag(value)?),
+            LispType::Function => LispValue::Function(Function::untag(value)?),
+            LispType::Map => LispValue::Map(Map::untag(value)?),
         };
         Ok(result)
     }
@@ -161,69 +161,42 @@ pub enum LispValueMut<'a> {
 impl Value {
 
     pub fn untag(&self) -> LispValue {
-        // let tag = self
-        let data = self.0;
         let tag = self.get_tag();
-        unsafe {
-            match tag {
-                LispType::Nil => LispValue::Nil,
-                LispType::True => LispValue::True,
-                LispType::Int => LispValue::Int(*TaggedPtr::untag(data)),
-                LispType::Float => LispValue::Float(*TaggedPtr::untag(data)),
-                LispType::Character => LispValue::Character(char::from_u32(data as u32).unwrap()),
-                LispType::String => LispValue::String(TaggedPtr::untag(data)),
-                LispType::Symbol => LispValue::Symbol(*TaggedPtr::untag(data)),
-                LispType::Vector => LispValue::Vector(TaggedPtr::untag(data)),
-                LispType::Cons => LispValue::Cons(TaggedPtr::untag(data)),
-                LispType::Function => LispValue::Function(TaggedPtr::untag(data)),
-                LispType::Map => LispValue::Map(TaggedPtr::untag(data)),
-            }
+        match tag {
+            LispType::Nil => LispValue::Nil,
+            LispType::True => LispValue::True,
+            LispType::Int => LispValue::Int(Integer::untag(*self).unwrap()),
+            LispType::Float => LispValue::Float(Float::untag(*self).unwrap()),
+            LispType::Character => LispValue::Character(Character::untag(*self).unwrap()),
+            LispType::String => LispValue::String(LispString::untag(*self).unwrap()),
+            LispType::Symbol => LispValue::Symbol(Symbol::untag(*self).unwrap()),
+            LispType::Vector => LispValue::Vector(Vector::untag(*self).unwrap()),
+            LispType::Cons => LispValue::Cons(Cons::untag(*self).unwrap()),
+            LispType::Function => LispValue::Function(Function::untag(*self).unwrap()),
+            LispType::Map => LispValue::Map(Map::untag(*self).unwrap()),
         }
     }
 
     pub fn as_ref(&self) -> LispValueRef<'_> {
-        let data = self.0;
         let tag = self.get_tag();
-        unsafe {
-            match tag {
-                LispType::Nil => LispValueRef::Nil,
-                LispType::True => LispValueRef::True,
-                LispType::Int => LispValueRef::Int(*TaggedPtr::untag(data)),
-                LispType::Float => LispValueRef::Float(*TaggedPtr::untag(data)),
-                LispType::Character => LispValueRef::Character(char::from_u32(data as u32).unwrap()),
-                LispType::String => LispValueRef::String(TaggedPtr::untag(data)),
-                LispType::Symbol => LispValueRef::Symbol(*TaggedPtr::untag(data)),
-                LispType::Vector => LispValueRef::Vector(TaggedPtr::untag(data)),
-                LispType::Cons => LispValueRef::Cons(TaggedPtr::untag(data)),
-                LispType::Function => LispValueRef::Function(TaggedPtr::untag(data)),
-                LispType::Map => LispValueRef::Map(TaggedPtr::untag(data)),
-            }
+        match tag {
+            LispType::Nil => LispValueRef::Nil,
+            LispType::True => LispValueRef::True,
+            LispType::Int => LispValueRef::Int(Integer::untag(*self).unwrap().value()),
+            LispType::Float => LispValueRef::Float(Float::untag(*self).unwrap().value()),
+            LispType::Character => LispValueRef::Character(Character::untag(*self).unwrap().value()),
+            LispType::String => LispValueRef::String(&LispString::untag(*self).unwrap()),
+            LispType::Symbol => LispValueRef::Symbol(Symbol::untag(*self).unwrap()),
+            LispType::Vector => LispValueRef::Vector(&Vector::untag(*self).unwrap()),
+            LispType::Cons => LispValueRef::Cons(&Cons::untag(*self).unwrap()),
+            LispType::Function => LispValueRef::Function(&Function::untag(*self).unwrap()),
+            LispType::Map => LispValueRef::Map(&Map::untag(*self).unwrap()),
         }
     }
 
-    pub fn as_mut(&self) -> LispValueMut<'_> {
-        // let tag = self
-        let data = self.0;
-        let tag = self.get_tag();
-        unsafe {
-            match tag {
-                LispType::Nil => LispValueMut::Nil,
-                LispType::True => LispValueMut::True,
-                LispType::Int => LispValueMut::Int(*TaggedPtr::as_mut_unchecked(data)),
-                LispType::Float => LispValueMut::Float(*TaggedPtr::untag_mut(data)),
-                LispType::Character => LispValueMut::Character(char::from_u32(data as u32).unwrap()),
-                LispType::String => LispValueMut::String(TaggedPtr::untag_mut(data)),
-                LispType::Symbol => LispValueMut::Symbol(*TaggedPtr::untag_mut(data)),
-                LispType::Vector => LispValueMut::Vector(TaggedPtr::untag_mut(data)),
-                LispType::Cons => LispValueMut::Cons(TaggedPtr::untag_mut(data)),
-                LispType::Function => LispValueMut::Function(TaggedPtr::untag_mut(data)),
-                LispType::Map => LispValueMut::Map(TaggedPtr::untag_mut(data)),
-            }
-        }
-    }
 
     pub fn get_tag(&self) -> LispType {
-        unsafe { std::mem::transmute(self.0 as u8) }
+        get_tag(self.0 as i64)
     }
 
     pub fn from_raw_inc_rc(raw: u64) -> Self {

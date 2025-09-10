@@ -78,6 +78,26 @@ impl TaggedPtr for Float {
     }
 }
 
+impl AsRef<f64> for Float {
+    fn as_ref(&self) -> &f64 {
+        &self.0
+    }
+}
+
+impl AsMut<f64> for Float {
+    fn as_mut(&mut self) -> &mut f64 {
+        &mut self.0
+    }
+}
+
+impl TryFrom<*mut Float> for Float {
+    type Error = Infallible;
+
+    fn try_from(value: *mut Float) -> Result<Self, Self::Error> {
+        Ok(Self(f64::from_bits(value as u64)))
+    }
+}
+
 impl Float {
     pub fn new(value: f64) -> Self {
         Self(value)
@@ -107,6 +127,27 @@ impl TaggedPtr for Character {
 
     unsafe fn to_raw(&self) -> u64 {
         self.0 as u32 as u64
+    }
+}
+
+impl AsRef<char> for Character {
+    fn as_ref(&self) -> &char {
+        &self.0
+    }
+}
+
+impl AsMut<char> for Character {
+    fn as_mut(&mut self) -> &mut char {
+        &mut self.0
+    }
+}
+
+impl TryFrom<*mut Character> for Character {
+    type Error = Infallible;
+
+    fn try_from(value: *mut Character) -> Result<Self, Self::Error> {
+        let char_val = char::from_u32(value as u32).unwrap_or('\0');
+        Ok(Self(char_val))
     }
 }
 
