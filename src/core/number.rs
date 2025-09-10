@@ -45,3 +45,89 @@ impl TryFrom<*mut Integer> for Integer {
         Ok(Self(value as i64))
     }
 }
+
+impl Integer {
+    pub fn new(value: i64) -> Self {
+        Self(value)
+    }
+    
+    pub fn value(&self) -> i64 {
+        self.0
+    }
+}
+
+impl From<i64> for Integer {
+    fn from(value: i64) -> Self {
+        Self(value)
+    }
+}
+
+impl From<Integer> for i64 {
+    fn from(value: Integer) -> Self {
+        value.0
+    }
+}
+
+impl TaggedPtr for Float {
+    const TAG = LispType::Float;
+    type Data = f64;
+    type Inner = Float;
+
+    unsafe fn to_raw(&self) -> u64 {
+        self.0.to_bits()
+    }
+}
+
+impl Float {
+    pub fn new(value: f64) -> Self {
+        Self(value)
+    }
+    
+    pub fn value(&self) -> f64 {
+        self.0
+    }
+}
+
+impl From<f64> for Float {
+    fn from(value: f64) -> Self {
+        Self(value)
+    }
+}
+
+impl From<Float> for f64 {
+    fn from(value: Float) -> Self {
+        value.0
+    }
+}
+
+impl TaggedPtr for Character {
+    const TAG = LispType::Character;
+    type Data = char;
+    type Inner = Character;
+
+    unsafe fn to_raw(&self) -> u64 {
+        self.0 as u32 as u64
+    }
+}
+
+impl Character {
+    pub fn new(value: char) -> Self {
+        Self(value)
+    }
+    
+    pub fn value(&self) -> char {
+        self.0
+    }
+}
+
+impl From<char> for Character {
+    fn from(value: char) -> Self {
+        Self(value)
+    }
+}
+
+impl From<Character> for char {
+    fn from(value: Character) -> Self {
+        value.0
+    }
+}

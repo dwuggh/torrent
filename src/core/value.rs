@@ -108,9 +108,16 @@ impl TryFrom<Value> for LispValue {
             LispType::Nil => LispValue::Nil,
             LispType::True => LispValue::True,
             LispType::Int => LispValue::Int(Integer::untag(value)?),
-            _ => todo!()
+            LispType::Float => LispValue::Float(Float::untag(value)?),
+            LispType::Character => LispValue::Character(Character::untag(value)?),
+            LispType::String => LispValue::String(unsafe { TaggedPtr::untag(value.0) }),
+            LispType::Symbol => LispValue::Symbol(unsafe { *TaggedPtr::untag(value.0) }),
+            LispType::Vector => LispValue::Vector(unsafe { TaggedPtr::untag(value.0) }),
+            LispType::Cons => LispValue::Cons(unsafe { TaggedPtr::untag(value.0) }),
+            LispType::Function => LispValue::Function(unsafe { TaggedPtr::untag(value.0) }),
+            LispType::Map => LispValue::Map(unsafe { TaggedPtr::untag(value.0) }),
         };
-        todo!()
+        Ok(result)
     }
 }
 
@@ -146,7 +153,7 @@ pub enum LispValueMut<'a> {
     #[no_trace]
     Symbol(Symbol),
     Vector(&'a mut Vec<Value>),
-    Cons(&'a mut ConsInner,
+    Cons(&'a mut ConsInner),
     Function(&'a mut FunctionInner),
     Map(&'a mut Map),
 }
@@ -175,7 +182,23 @@ impl Value {
     }
 
     pub fn as_ref(&self) -> LispValueRef<'_> {
-        todo!()
+        let data = self.0;
+        let tag = self.get_tag();
+        unsafe {
+            match tag {
+                LispType::Nil => LispValueRef::Nil,
+                LispType::True => LispValueRef::True,
+                LispType::Int => LispValueRef::Int(*TaggedPtr::untag(data)),
+                LispType::Float => LispValueRef::Float(*TaggedPtr::untag(data)),
+                LispType::Character => LispValueRef::Character(char::from_u32(data as u32).unwrap()),
+                LispType::String => LispValueRef::String(TaggedPtr::untag(data)),
+                LispType::Symbol => LispValueRef::Symbol(*TaggedPtr::untag(data)),
+                LispType::Vector => LispValueRef::Vector(TaggedPtr::untag(data)),
+                LispType::Cons => LispValueRef::Cons(TaggedPtr::untag(data)),
+                LispType::Function => LispValueRef::Function(TaggedPtr::untag(data)),
+                LispType::Map => LispValueRef::Map(TaggedPtr::untag(data)),
+            }
+        }
     }
 
     pub fn as_mut(&self) -> LispValueMut<'_> {
@@ -279,8 +302,38 @@ impl_try_from_value_variant_ref! {
     &'a Map => Map,
 }
 
-// impl<'a, T: TaggedPtr<'a>> From<T> for Value {
-//     fn from(val: T) -> Self {
-//         val.tag()
-//     }
-// }
+impl From<Integer> for Value {
+    fn from(val: Integer) -> Self {
+        val.tag()
+    }
+}
+
+impl From<Float> for Value {
+    fn from(val: Float) -> Self {
+        val.tag()
+    }
+}
+
+impl From<Character> for Value {
+    fn from(val: Character) -> Self {
+        val.tag()
+    }
+}
+
+impl From<i64> for Value {
+    fn from(val: i64) -> Self {
+        Integer::new(val).tag()
+    }
+}
+
+impl From<f64> for Value {
+    fn from(val: f64) -> Self {
+        Float::new(val).tag()
+    }
+}
+
+impl From<char> for Value {
+    fn from(val: char) -> Self {
+        Character::new(val).tag()
+    }
+}
