@@ -59,6 +59,14 @@ impl Clone for Value {
     }
 }
 
+impl Copy for Value {}
+
+impl From<Cons> for Value {
+    fn from(cons: Cons) -> Self {
+        cons.tag()
+    }
+}
+
 impl Drop for Value {
     fn drop(&mut self) {
         let val = Self(self.0);
