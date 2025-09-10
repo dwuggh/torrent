@@ -5,20 +5,13 @@ use proc_macros::Trace;
 use crate::{
     ast::Node,
     core::{
-        compiler::macro_item::MacroItem,
-        cons::{Cons, ConsInner},
-        function::Function,
-        map::Map,
-        string::LispString,
-        symbol::Symbol,
-        vector::Vector,
-        TaggedPtr,
+        compiler::macro_item::MacroItem, cons::{Cons, ConsInner}, function::{Function, FunctionInner}, map::Map, number::{Character, Float, Integer}, string::LispString, symbol::Symbol, tagged_ptr::{get_tag, TaggedPtrError}, vector::Vector, TaggedPtr
     },
     gc::{Gc, GcInner, Trace},
 };
 
 #[repr(transparent)]
-#[derive(PartialEq, PartialOrd, Eq)]
+#[derive(PartialEq, PartialOrd, Eq, Hash)]
 pub struct Value(pub u64);
 
 impl std::fmt::Debug for Value {
@@ -29,18 +22,12 @@ impl std::fmt::Debug for Value {
 
 impl Default for Value {
     fn default() -> Self {
-        Self(NIL as u64)
+        nil()
     }
 }
 
 pub fn nil() -> Value {
-    Value::default()
-}
-
-impl ::std::hash::Hash for Value {
-    fn hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
-    }
+    Value(NIL as u64)
 }
 
 unsafe impl Trace for Value {
@@ -60,7 +47,7 @@ impl Clone for Value {
 }
 
 #[repr(u8)]
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum LispType {
     Int = 0,
     Nil,
@@ -98,7 +85,37 @@ pub const NIL: i64 = LispType::Nil as i64;
 pub const TRUE: i64 = LispType::True as i64;
 
 #[derive(Clone, Debug)]
-pub enum LispValue<'a> {
+pub enum LispValue {
+    Nil,
+    True,
+    Int(Integer),
+    Float(Float),
+    Character(Character),
+    String(LispString),
+    Symbol(Symbol),
+    Vector(Vector),
+    Cons(Cons),
+    Function(Function),
+    Map(Map),
+}
+
+impl TryFrom<Value> for LispValue {
+    type Error = TaggedPtrError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        let tag = get_tag(value.0);
+        let result = match tag {
+            LispType::Nil => LispValue::Nil,
+            LispType::True => LispValue::True,
+            LispType::Int => LispValue::Int(Integer::untag(value)?),
+            _ => todo!()
+        };
+        todo!()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum LispValueRef<'a> {
     Nil,
     True,
     Int(i64),
@@ -110,9 +127,6 @@ pub enum LispValue<'a> {
     Cons(&'a Cons),
     Function(&'a Function),
     Map(&'a Map),
-    /// a macro-only inner type.
-    /// the reason we use this instead of Cons list is to reduce GC overhead.
-    MacroItem(MacroItem),
 }
 
 #[derive(Debug, Trace)]
@@ -128,21 +142,18 @@ pub enum LispValueMut<'a> {
     #[no_trace]
     Character(char),
     #[no_trace]
-    String(&'a mut LispString),
+    String(&'a mut String),
     #[no_trace]
     Symbol(Symbol),
-    Vector(&'a mut Vector),
-    Cons(&'a mut Cons),
-    Function(&'a mut Function),
+    Vector(&'a mut Vec<Value>),
+    Cons(&'a mut ConsInner,
+    Function(&'a mut FunctionInner),
     Map(&'a mut Map),
-    /// a macro-only inner type.
-    /// the reason we use this instead of Cons list is to reduce GC overhead.
-    #[no_trace]
-    MacroItem(MacroItem),
 }
 
 impl Value {
-    pub fn untag(&self) -> LispValue<'_> {
+
+    pub fn untag(&self) -> LispValue {
         // let tag = self
         let data = self.0;
         let tag = self.get_tag();
@@ -162,7 +173,12 @@ impl Value {
             }
         }
     }
-    pub fn untag_mut(&self) -> LispValueMut<'_> {
+
+    pub fn as_ref(&self) -> LispValueRef<'_> {
+        todo!()
+    }
+
+    pub fn as_mut(&self) -> LispValueMut<'_> {
         // let tag = self
         let data = self.0;
         let tag = self.get_tag();
@@ -170,7 +186,7 @@ impl Value {
             match tag {
                 LispType::Nil => LispValueMut::Nil,
                 LispType::True => LispValueMut::True,
-                LispType::Int => LispValueMut::Int(*TaggedPtr::untag_mut(data)),
+                LispType::Int => LispValueMut::Int(*TaggedPtr::as_mut_unchecked(data)),
                 LispType::Float => LispValueMut::Float(*TaggedPtr::untag_mut(data)),
                 LispType::Character => LispValueMut::Character(char::from_u32(data as u32).unwrap()),
                 LispType::String => LispValueMut::String(TaggedPtr::untag_mut(data)),
@@ -263,27 +279,8 @@ impl_try_from_value_variant_ref! {
     &'a Map => Map,
 }
 
-// Useful blanket: convert Value -> LispValue via untag (infallible).
-impl<'a> ::std::convert::TryFrom<&'a Value> for LispValue<'a> {
-    type Error = ::std::convert::Infallible;
-    fn try_from(value: &'a Value) -> ::std::result::Result<Self, Self::Error> {
-        Ok(value.untag())
-    }
-}
-
-// Optional convenience: treat Nil as unit type.
-impl ::std::convert::TryFrom<Value> for () {
-    type Error = &'static str;
-    fn try_from(value: Value) -> ::std::result::Result<Self, Self::Error> {
-        match value.untag() {
-            LispValue::Nil => Ok(()),
-            _ => Err("expected Nil"),
-        }
-    }
-}
-
-impl<'a, T: TaggedPtr<'a>> From<T> for Value {
-    fn from(val: T) -> Self {
-        val.tag()
-    }
-}
+// impl<'a, T: TaggedPtr<'a>> From<T> for Value {
+//     fn from(val: T) -> Self {
+//         val.tag()
+//     }
+// }
