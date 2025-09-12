@@ -1,174 +1,203 @@
 use std::convert::Infallible;
 
-use crate::core::{value::LispType, TaggedPtr};
-
+use crate::core::{object::LispType, TaggedPtr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Integer(i64);
+pub struct LispInteger(pub i64);
+pub type Integer = i64;
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
-pub struct Float(f64);
-
+pub struct LispFloat(pub f64);
+pub type Float = f64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Character(char);
+pub struct LispCharacter(pub Character);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Character(pub u64);
 
-impl TaggedPtr for Integer {
+impl Character {
+    pub fn new(c: char) -> Self {
+        Self(c as u64)
+    }
+    /// Tries to convert the `Char64` back into a standard `char`.
+    /// Returns `None` if the value is out of range or not a valid character.
+    pub fn to_char(&self) -> Option<char> {
+        // First, try to convert the u64 to a u32.
+        // Then, try to convert the u32 into a valid char.
+        u32::try_from(self.0).ok().and_then(std::char::from_u32)
+    }
+}
+
+impl From<char> for Character {
+    fn from(c: char) -> Self {
+        Self(c as u64)
+    }
+}
+
+impl std::fmt::Display for Character {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Use the `to_char` method we just created.
+        // If it returns `None`, fall back to the replacement character.
+        let c = self.to_char().unwrap_or(' ');
+        write!(f, "{}", c)
+    }
+}
+
+impl TaggedPtr for LispInteger {
     const TAG: LispType = LispType::Int;
 
     type Data = i64;
 
-    type Inner = Integer;
+    type Inner = LispInteger;
 
     unsafe fn to_raw(&self) -> u64 {
         self.0 as u64
     }
-
 }
 
-impl AsRef<i64> for Integer {
+impl AsRef<i64> for LispInteger {
     fn as_ref(&self) -> &i64 {
         &self.0
     }
 }
 
-impl AsMut<i64> for Integer {
+impl AsMut<i64> for LispInteger {
     fn as_mut(&mut self) -> &mut i64 {
         &mut self.0
     }
 }
 
-impl TryFrom<*mut Integer> for Integer {
+impl TryFrom<*mut LispInteger> for LispInteger {
     type Error = Infallible;
 
-    fn try_from(value: *mut Integer) -> Result<Self, Self::Error> {
+    fn try_from(value: *mut LispInteger) -> Result<Self, Self::Error> {
         Ok(Self(value as i64))
     }
 }
 
-impl Integer {
+impl LispInteger {
     pub fn new(value: i64) -> Self {
         Self(value)
     }
-    
+
     pub fn value(&self) -> i64 {
         self.0
     }
 }
 
-impl From<i64> for Integer {
+impl From<i64> for LispInteger {
     fn from(value: i64) -> Self {
         Self(value)
     }
 }
 
-impl From<Integer> for i64 {
-    fn from(value: Integer) -> Self {
+impl From<LispInteger> for i64 {
+    fn from(value: LispInteger) -> Self {
         value.0
     }
 }
 
-impl TaggedPtr for Float {
+impl TaggedPtr for LispFloat {
     const TAG: LispType = LispType::Float;
     type Data = f64;
-    type Inner = Float;
+    type Inner = LispFloat;
 
     unsafe fn to_raw(&self) -> u64 {
         self.0.to_bits()
     }
 }
 
-impl AsRef<f64> for Float {
+impl AsRef<f64> for LispFloat {
     fn as_ref(&self) -> &f64 {
         &self.0
     }
 }
 
-impl AsMut<f64> for Float {
+impl AsMut<f64> for LispFloat {
     fn as_mut(&mut self) -> &mut f64 {
         &mut self.0
     }
 }
 
-impl TryFrom<*mut Float> for Float {
+impl TryFrom<*mut LispFloat> for LispFloat {
     type Error = Infallible;
 
-    fn try_from(value: *mut Float) -> Result<Self, Self::Error> {
+    fn try_from(value: *mut LispFloat) -> Result<Self, Self::Error> {
         Ok(Self(f64::from_bits(value as u64)))
     }
 }
 
-impl Float {
+impl LispFloat {
     pub fn new(value: f64) -> Self {
         Self(value)
     }
-    
+
     pub fn value(&self) -> f64 {
         self.0
     }
 }
 
-impl From<f64> for Float {
+impl From<f64> for LispFloat {
     fn from(value: f64) -> Self {
         Self(value)
     }
 }
 
-impl From<Float> for f64 {
-    fn from(value: Float) -> Self {
+impl From<LispFloat> for f64 {
+    fn from(value: LispFloat) -> Self {
         value.0
     }
 }
 
-impl TaggedPtr for Character {
+impl TaggedPtr for LispCharacter {
     const TAG: LispType = LispType::Character;
-    type Data = char;
-    type Inner = Character;
+    type Data = Character;
+    type Inner = LispCharacter;
 
     unsafe fn to_raw(&self) -> u64 {
-        self.0 as u32 as u64
+        self.0.0 as u64
     }
 }
 
-impl AsRef<char> for Character {
-    fn as_ref(&self) -> &char {
+impl AsRef<Character> for LispCharacter {
+    fn as_ref(&self) -> &Character {
         &self.0
     }
 }
 
-impl AsMut<char> for Character {
-    fn as_mut(&mut self) -> &mut char {
+impl AsMut<Character> for LispCharacter {
+    fn as_mut(&mut self) -> &mut Character {
         &mut self.0
     }
 }
 
-impl TryFrom<*mut Character> for Character {
+impl TryFrom<*mut LispCharacter> for LispCharacter {
     type Error = Infallible;
 
-    fn try_from(value: *mut Character) -> Result<Self, Self::Error> {
+    fn try_from(value: *mut LispCharacter) -> Result<Self, Self::Error> {
         let char_val = char::from_u32(value as u32).unwrap_or('\0');
-        Ok(Self(char_val))
+        Ok(Self::new(char_val))
     }
 }
 
-impl Character {
+impl LispCharacter {
     pub fn new(value: char) -> Self {
-        Self(value)
+        Self(Character::new(value))
     }
-    
+
     pub fn value(&self) -> char {
-        self.0
+        self.0.to_char().unwrap()
     }
 }
 
-impl From<char> for Character {
+impl From<char> for LispCharacter {
     fn from(value: char) -> Self {
-        Self(value)
+        Self::new(value)
     }
 }
 
-impl From<Character> for char {
-    fn from(value: Character) -> Self {
-        value.0
+impl From<LispCharacter> for char {
+    fn from(value: LispCharacter) -> Self {
+        value.value()
     }
 }

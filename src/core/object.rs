@@ -43,11 +43,20 @@ pub fn tru() -> Object {
 
 unsafe impl Trace for Object {
     unsafe fn trace(&self, visitor: crate::gc::Visitor) {
+        match self.as_ref() {
+            ObjectRef::Str(str) => str.trace(visitor),
+            ObjectRef::Vector(vector) => vector.trace(visitor),
+            ObjectRef::Cons(cons) => cons.trace(visitor),
+            ObjectRef::Function(function) => function.trace(visitor),
+            ObjectRef::HashTable(hash_table) => hash_table.trace(visitor),
+            _ => {}
+        }
         // self.untag_ref().trace(visitor);
     }
 
     unsafe fn finalize(&mut self) {
-        todo!()
+        let new_this = Object(self.0);
+        new_this.untag();
     }
 }
 
@@ -67,6 +76,8 @@ impl From<LispCons> for Object {
 
 impl Drop for Object {
     fn drop(&mut self) {
+        let new_this = Object(self.0);
+        new_this.untag();
     }
 }
 
@@ -165,13 +176,19 @@ impl Object {
     pub fn untag(self) -> LispObject {
         let tag = self.get_tag();
         match tag {
-            LispType::Nil => LispObject::Nil,
-            LispType::True => LispObject::True,
+            LispType::Nil => {
+                std::mem::forget(self);
+                LispObject::Nil
+            }
+            LispType::True => {
+                std::mem::forget(self);
+                LispObject::True
+            }
             LispType::Int => LispObject::Int(LispInteger::untag(self).unwrap()),
             LispType::Float => LispObject::Float(LispFloat::untag(self).unwrap()),
             LispType::Character => LispObject::Character(LispCharacter::untag(self).unwrap()),
             LispType::Str => LispObject::Str(LispStr::untag(self).unwrap()),
-            LispType::Symbol => LispObject::Symbol(Symbol::untag(self).unwrap()),
+            LispType::Symbol => LispObject::Symbol(LispSymbol::untag(self).unwrap()),
             LispType::Vector => LispObject::Vector(LispVector::untag(self).unwrap()),
             LispType::Cons => LispObject::Cons(LispCons::untag(self).unwrap()),
             LispType::Function => LispObject::Function(LispFunction::untag(self).unwrap()),
@@ -185,11 +202,11 @@ impl Object {
             match tag {
                 LispType::Nil => ObjectRef::Nil,
                 LispType::True => ObjectRef::True,
-                LispType::Int => ObjectRef::Int(*LispInteger::as_ref_unchecked(self)),
-                LispType::Float => ObjectRef::Float(*LispFloat::as_ref_unchecked(self)),
-                LispType::Character => ObjectRef::Character(*LispCharacter::as_ref_unchecked(self)),
+                LispType::Int => ObjectRef::Int(self.try_into().unwrap()),
+                LispType::Float => ObjectRef::Float(self.try_into().unwrap()),
+                LispType::Character => ObjectRef::Character(self.try_into().unwrap()),
                 LispType::Str => ObjectRef::Str(LispStr::as_ref_unchecked(self)),
-                LispType::Symbol => ObjectRef::Symbol(*Symbol::as_ref_unchecked(self)),
+                LispType::Symbol => ObjectRef::Symbol(self.try_into().unwrap()),
                 LispType::Vector => ObjectRef::Vector(LispVector::as_ref_unchecked(self)),
                 LispType::Cons => ObjectRef::Cons(LispCons::as_ref_unchecked(self)),
                 LispType::Function => ObjectRef::Function(LispFunction::as_ref_unchecked(self)),
@@ -204,14 +221,11 @@ impl Object {
             match tag {
                 LispType::Nil => ObjectMut::Nil,
                 LispType::True => ObjectMut::True,
-                LispType::Int => ObjectMut::Int(*LispInteger::as_mut_unchecked(self)),
-                LispType::Float => ObjectMut::Float(*LispFloat::as_mut_unchecked(self)),
-                LispType::Character => ObjectMut::Character(*LispCharacter::as_mut_unchecked(self)),
+                LispType::Int => ObjectMut::Int(self.try_into().unwrap()),
+                LispType::Float => ObjectMut::Float(self.try_into().unwrap()),
+                LispType::Character => ObjectMut::Character(self.try_into().unwrap()),
                 LispType::Str => ObjectMut::Str(LispStr::as_mut_unchecked(self)),
-                LispType::Symbol => {
-                    let ident = *Symbol::as_mut_unchecked(self);
-                    ObjectMut::Symbol(ident.into())
-                },
+                LispType::Symbol => ObjectMut::Symbol(self.try_into().unwrap()),
                 LispType::Vector => ObjectMut::Vector(LispVector::as_mut_unchecked(self)),
                 LispType::Cons => ObjectMut::Cons(LispCons::as_mut_unchecked(self)),
                 LispType::Function => ObjectMut::Function(LispFunction::as_mut_unchecked(self)),
@@ -244,7 +258,6 @@ impl LispObject {
 }
 
 impl<'a> ObjectRef<'a> {
-
     pub fn tag(&self) -> LispType {
         match self {
             ObjectRef::Nil => LispType::Nil,
@@ -268,8 +281,11 @@ macro_rules! impl_try_from_for_object {
             type Error = &'static str;
 
             fn try_from(value: &'a Object) -> Result<Self, Self::Error> {
-                let val = <$lispname as TaggedPtr>::as_ref(&value).unwrap();
-                Ok(val)
+                tracing::debug!("in try_into: {value:?}, {}", value.0);
+                match <$lispname as TaggedPtr>::as_ref(&value) {
+                    Some(val) => Ok(val),
+                    None => Err("wrong type"),
+                }
             }
         }
 
@@ -277,17 +293,52 @@ macro_rules! impl_try_from_for_object {
             type Error = &'static str;
 
             fn try_from(value: &'a Object) -> Result<Self, Self::Error> {
-                let val = <$lispname as TaggedPtr>::as_mut(&value).unwrap();
-                Ok(val)
+                match <$lispname as TaggedPtr>::as_mut(&value) {
+                    Some(val) => Ok(val),
+                    None => Err("wrong type"),
+                }
             }
         }
-
     };
 }
 
+macro_rules! impl_try_from_for_primitive {
+    ($name:ident, $lispname:ident) => {
+        impl TryFrom<&Object> for $name {
+            type Error = &'static str;
+
+            fn try_from(value: &Object) -> Result<Self, Self::Error> {
+                if get_tag(value.0 as i64) == $lispname::TAG {
+                    let val = $lispname::untag_ptr(value.0) as u64;
+                    // let val = Self::untag_ptr(value.0) as u64;
+                    Ok(unsafe { std::mem::transmute(val) })
+                } else {
+                    Err("wrong")
+                }
+            }
+        }
+        impl TryFrom<&mut Object> for $name {
+            type Error = &'static str;
+
+            fn try_from(value: &mut Object) -> Result<Self, Self::Error> {
+                if get_tag(value.0 as i64) == $lispname::TAG {
+                    let val = $lispname::untag_ptr(value.0) as u64;
+                    // let val = Self::untag_ptr(value.0) as u64;
+                    Ok(unsafe { std::mem::transmute(val) })
+                } else {
+                    Err("wrong")
+                }
+            }
+        }
+    };
+}
+
+impl_try_from_for_primitive!(Integer, LispInteger);
+impl_try_from_for_primitive!(Float, LispFloat);
+impl_try_from_for_primitive!(Character, LispCharacter);
+impl_try_from_for_primitive!(Symbol, LispSymbol);
 
 impl_try_from_for_object!(Str, LispStr);
-impl_try_from_for_object!(Symbol, LispSymbol);
 impl_try_from_for_object!(Vector, LispVector);
 impl_try_from_for_object!(Cons, LispCons);
 impl_try_from_for_object!(Function, LispFunction);

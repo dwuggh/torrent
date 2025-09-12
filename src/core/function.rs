@@ -7,7 +7,8 @@ use proc_macros::Trace;
 
 use crate::core::env::Environment;
 use crate::{
-    core::value::{LispType, TaggedPtr, Value},
+    core::object::{LispType, Object},
+    core::TaggedPtr,
     gc::{Gc, GcInner},
 };
 
@@ -17,7 +18,7 @@ pub struct SubrFn {
 }
 
 pub(crate) type FuncPtr =
-    unsafe extern "C" fn(args_ptr: *const Value, argc: u64, env: *const Environment) -> Value;
+    unsafe extern "C" fn(args_ptr: *const Object, argc: u64, env: *const Environment) -> Object;
 
 pub unsafe fn cast_func_ptr(ptr: *const u8) -> FuncPtr {
     std::mem::transmute(ptr)
@@ -28,7 +29,7 @@ pub unsafe fn cast_func_ptr(ptr: *const u8) -> FuncPtr {
 pub struct LambdaFn {
     // Captured environment as a GC’d map of Value -> Value (key is typically a Symbol tagged as Value).
     #[no_trace]
-    pub captures: HashMap<Ident, Value>,
+    pub captures: HashMap<Ident, Object>,
 }
 
 #[derive(Debug, Clone, Trace)]
@@ -39,7 +40,7 @@ pub enum FunctionType {
 }
 
 #[derive(Debug, Clone, Trace)]
-pub struct FunctionInner {
+pub struct Function {
     #[no_trace]
     pub func_id: FuncId,
 
@@ -48,7 +49,6 @@ pub struct FunctionInner {
 
     #[no_trace]
     pub func_ptr: Option<FuncPtr>,
-
     // #[no_trace]
     // signature: FunctionSignature,
 }
@@ -65,9 +65,8 @@ pub struct FunctionSignature {
 }
 
 #[derive(Debug, Clone, Trace)]
-pub struct Function {
-    pub(crate) inner: Gc<FunctionInner>,
-}
+pub struct LispFunction(pub(crate) Gc<Function>);
+impl_tagged_ptr_for_gc!(LispFunction, LispType::Function, Function);
 
 impl FunctionType {
     pub fn as_closure_mut(&mut self) -> Option<&mut LambdaFn> {
@@ -79,51 +78,49 @@ impl FunctionType {
     }
 }
 
-impl Function {
+impl LispFunction {
     pub fn new_closure(func_id: FuncId) -> Self {
         let closure = LambdaFn {
             captures: HashMap::new(),
         };
-        Self {
-            inner: Gc::new(FunctionInner {
-                func_id,
-                func_type: FunctionType::Lambda(closure),
-                func_ptr: None,
-            }),
-        }
+        let inner = Gc::new(Function {
+            func_id,
+            func_type: FunctionType::Lambda(closure),
+            func_ptr: None,
+        });
+        Self(inner)
     }
 
     pub fn new_subr(func_id: FuncId, name: &str, func_ptr: *const u8) -> Self {
         let fptr = unsafe { cast_func_ptr(func_ptr) };
         let name = name.into();
-        Self {
-            inner: Gc::new(FunctionInner {
-                func_id,
-                func_type: FunctionType::Subr(SubrFn { name }),
-                func_ptr: Some(fptr),
-            }),
-        }
+        let inner = Gc::new(Function {
+            func_id,
+            func_type: FunctionType::Subr(SubrFn { name }),
+            func_ptr: Some(fptr),
+        });
+        Self(inner)
     }
 
     pub fn func_id(&self) -> FuncId {
-        self.inner.get().func_id
+        self.0.get().func_id
     }
 
     pub fn get_func_type_mut(&self) -> &mut FunctionType {
-        &mut self.inner.get_mut().func_type
+        &mut self.0.get_mut().func_type
     }
 
     pub fn set_func_ptr(&self, func_ptr: *const u8) {
-        unsafe { self.inner.get_mut().func_ptr = Some(cast_func_ptr(func_ptr)) }
+        unsafe { self.0.get_mut().func_ptr = Some(cast_func_ptr(func_ptr)) }
     }
 
     pub fn get_func_ptr(&self) -> Option<FuncPtr> {
-        self.inner.get().func_ptr
+        self.0.get().func_ptr
     }
 
-    pub fn run(&self, args: &[Value], env: &Environment) -> RuntimeResult<Value> {
+    pub fn run(&self, args: &[Object], env: &Environment) -> RuntimeResult<Object> {
         let func = self
-            .inner
+            .0
             .get()
             .func_ptr
             .ok_or(RuntimeError::internal_error("no function pointer"))?;
@@ -133,16 +130,19 @@ impl Function {
     }
 }
 
-impl TaggedPtr for Function {
-    const TAG: super::value::LispType = LispType::Function;
-
-    unsafe fn cast(val: u64) -> Self {
-        Function {
-            inner: Gc::from_raw(val as *mut GcInner<FunctionInner>),
-        }
+impl Function {
+    
+    pub fn run(&self, args: &[Object], env: &Environment) -> RuntimeResult<Object> {
+        let func = self
+            .func_ptr
+            .ok_or(RuntimeError::internal_error("no function pointer"))?;
+        let argc = args.len() as u64;
+        let result = unsafe { func(args.as_ptr(), argc, env) };
+        Ok(result)
     }
 
-    unsafe fn get_untagged_data(self) -> u64 {
-        Gc::into_raw(self.inner) as u64
+    pub fn get_func_type_mut(&mut self) -> &mut FunctionType {
+        &mut self.func_type
     }
+
 }

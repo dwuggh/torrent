@@ -4,7 +4,10 @@ use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 use syn::{Error, Type};
 
-use crate::{defun::inventory_submit, function::{Arg, ArgKind, Function, RetKind}};
+use crate::{
+    defun::inventory_submit,
+    function::{Arg, ArgKind, Function, RetKind},
+};
 
 pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let body = function.body;
@@ -59,7 +62,10 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
                 quote! {
                     match result {
                         Ok(_) => Ok(crate::core::value::NIL as i64),
-                        Err(_) => Err("call error"),
+                        Err(e) => {
+                            tracing::error!("error: {e:?}");
+                            Err("call error")
+                        }
                     }
                 }
             } else {
@@ -73,7 +79,10 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
                 quote! {
                     match result {
                         Ok(val) => Ok(val.0 as i64),
-                        Err(_) => Err("call error"),
+                        Err(e) => {
+                            tracing::error!("error: {e:?}");
+                            Err("call error")
+                        }
                     }
                 }
             } else {
@@ -88,7 +97,10 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
                             let v: crate::core::value::Value = val.tag();
                             Ok(v.0 as i64)
                         }
-                        Err(_) => Err("call error"),
+                        Err(e) => {
+                            tracing::error!("error: {e:?}");
+                            Err("call error")
+                        }
                     }
                 }
             } else {
@@ -103,7 +115,10 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
                 quote! {
                     match result {
                         Ok(val) => Ok(val as i64),
-                        Err(_) => Err("call error"),
+                        Err(e) => {
+                            tracing::error!("error: {e:?}");
+                            Err("call error")
+                        }
                     }
                 }
             } else {
@@ -135,7 +150,10 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
                             };
                             Ok(ret)
                         }
-                        Err(_) => Err("call error"),
+                        Err(e) => {
+                            tracing::error!("error: {e:?}");
+                            Err("call error")
+                        }
                     }
                 }
             } else {
@@ -166,7 +184,10 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
                 quote! {
                     match result {
                         Ok(val) => Ok(#val),
-                        Err(_) => Err("call error"),
+                        Err(e) => {
+                            tracing::error!("error: {e:?}");
+                            Err("call error")
+                        }
                     }
                 }
             } else {
@@ -227,9 +248,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         ) -> #wrapper_ret_ty {
             if cfg!(debug_assertions) {
                 eprintln!("[DEBUG] Calling internal function: {}", #lisp_name);
-                eprintln!("[DEBUG] Direct args: {}", stringify!(#(#c_param_idents),*));
                 eprintln!("[DEBUG] Direct args: {}", stringify!(#(#c_params),*));
-                eprintln!("[DEBUG] Direct args: {:?}", &[#(#c_param_idents),*]);
             }
             #(#arg_conversion)*
             if cfg!(debug_assertions) {
@@ -264,7 +283,7 @@ fn get_arg_conversion(args: &[Arg]) -> Vec<TokenStream> {
             ArgKind::Slice(inner_kind) => {
                 let ptr_ident = format_ident!("{}_ptr", ident);
                 let argc_ident = format_ident!("{}_argc", ident);
-                
+
                 match inner_kind.as_ref() {
                     ArgKind::Value => {
                         quote! {
@@ -274,7 +293,7 @@ fn get_arg_conversion(args: &[Arg]) -> Vec<TokenStream> {
                             };
                         }
                     }
-                    ArgKind::FromValue(ty) => {
+                    ArgKind::LispValue(ty) => {
                         quote! {
                             let mut slice_vec = Vec::with_capacity(#argc_ident as usize);
                             unsafe {
@@ -334,29 +353,14 @@ fn get_arg_conversion(args: &[Arg]) -> Vec<TokenStream> {
                     }
                 }
             }
-            ArgKind::FromValue(ty) => {
-                if arg.info.is_ref {
-                    let tmp_val = format_ident!("__arg_val_{}", i);
-                    let tmp_cast = format_ident!("__arg_cast_{}", i);
-                    let mut_val = if arg.info.is_mut {
-                        quote! { mut }
-                    } else {
-                        quote! {}
-                    };
-                    let ref_tok = if arg.info.is_mut {
-                        quote! { &mut #tmp_cast }
-                    } else {
-                        quote! { &#tmp_cast }
-                    };
-                    quote! {
-                        let #mut_val #tmp_val = crate::core::value::Value(#ident as u64);
-                        let #mut_val #tmp_cast: #ty = ::std::convert::TryFrom::try_from(#tmp_val)?;
-                        let #ident = #ref_tok;
-                    }
+            ArgKind::LispValue(ty) => {
+                let mut_val = if arg.info.is_mut {
+                    quote! { mut }
                 } else {
-                    quote! {
-                        let #ident: #ty = ::std::convert::TryFrom::try_from(crate::core::value::Value(#ident as u64))?;
-                    }
+                    quote! {}
+                };
+                quote! {
+                    let #ident: &#mut_val #ty = TaggedPtr::untag_mut_checked(#ident as u64)?;
                 }
             }
             ArgKind::Primitive(ty) => {

@@ -1,8 +1,9 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
+use crate::core::function::LispFunction;
 use crate::core::ident::Ident;
-use crate::core::value::Value as RuntimeValue;
+use crate::core::object::Object;
 use cranelift::prelude::*;
 
 use crate::core::{env::Environment, symbol::Symbol};
@@ -10,7 +11,7 @@ use crate::core::{env::Environment, symbol::Symbol};
 #[derive(Clone)]
 pub struct FrameScope<'a> {
     pub slots: ParamSlots,
-    pub lexical_binds: Option<RefCell<HashMap<Ident, HashSet<RuntimeValue>>>>,
+    pub lexical_binds: Option<RefCell<HashMap<Ident, Vec<LispFunction>>>>,
     pub is_func: bool,
     pub parent: &'a CompileScope<'a>,
 }

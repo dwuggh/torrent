@@ -1,5 +1,3 @@
-use crate::core::function::FunctionSignature;
-
 pub type DeclSubr = for<'a> fn(
     module: &'a mut cranelift_jit::JITModule,
 ) -> anyhow::Result<(String, cranelift_module::FuncId)>;
@@ -44,5 +42,6 @@ mod codegen;
 pub mod error;
 pub mod ir;
 pub mod jit;
-pub mod scope;
+pub mod macro_item;
 pub mod node_parser;
+pub mod scope;

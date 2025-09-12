@@ -12,7 +12,6 @@ pub enum Node {
     Ident(Ident),
     Sexp(Vec<Node>),
     Vector(Vec<Node>),
-    // Value(Value),
     Integer(i64),
     Float(f64),
     Char(char),
@@ -68,7 +67,6 @@ impl<'s> chumsky::input::Input<'s> for NodeInput {
         *range.start..*range.end
     }
 }
-
 
 impl Node {
     // Predicates

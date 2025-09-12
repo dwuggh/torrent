@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 
 use std::{
-    alloc::Layout, any::Any, cell::UnsafeCell, fmt::Debug, hash::Hash, marker::PhantomData, mem::ManuallyDrop, ptr::NonNull
+    alloc::Layout, any::Any, cell::UnsafeCell, fmt::Debug, hash::Hash, marker::PhantomData,
+    mem::ManuallyDrop, ptr::NonNull,
 };
 
 pub mod collector;
@@ -145,6 +146,30 @@ impl<T: Trace> From<T> for Gc<T> {
     }
 }
 
+impl<T> TryFrom<*mut GcInner<T>> for Gc<T> {
+    type Error = &'static str;
+
+    fn try_from(value: *mut GcInner<T>) -> Result<Self, Self::Error> {
+        let ptr = NonNull::new(value).ok_or("null pointer")?;
+        Ok(Self {
+            ptr,
+            phantom: PhantomData,
+        })
+    }
+}
+
+impl<T> AsRef<T> for GcInner<T> {
+    fn as_ref(&self) -> &T {
+        unsafe { self.data.get().as_ref().unwrap() }
+    }
+}
+
+impl<T> AsMut<T> for GcInner<T> {
+    fn as_mut(&mut self) -> &mut T {
+        self.data.get_mut()
+    }
+}
+
 impl<T: ?Sized> Clone for Gc<T> {
     fn clone(&self) -> Gc<T> {
         inc_rc(self.ptr);
@@ -192,6 +217,10 @@ impl<T: ?Sized> Gc<T> {
 
     pub(crate) fn as_ptr(this: &Self) -> *mut GcInner<T> {
         this.ptr.as_ptr()
+    }
+
+    pub(crate) fn to_raw(&self) -> *mut GcInner<T> {
+        self.ptr.as_ptr()
     }
 
     pub(crate) fn into_raw(gc: Self) -> *mut GcInner<T> {

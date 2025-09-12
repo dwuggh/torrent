@@ -1,3 +1,5 @@
+use proc_macro2::TokenStream;
+use quote::{format_ident, quote};
 use syn::{Error, Ident};
 
 pub(crate) struct Arg {
@@ -15,12 +17,20 @@ pub(crate) struct ArgInfo {
 #[derive(PartialEq, Debug, Clone)]
 pub(crate) enum ArgKind {
     Env,
-    Value,
+    /// an Object. can be referenced, but should not be mut refed.
+    /// don't accept LispObject for now, because the methods for object is convenient enough.
+    Object,
+    /// i64, f64, etc. This will behave differently between defun and internal_fn.
+    /// This is converted to Number types in defun, and is loaded directly in internal_fn.
     Primitive(Ident),
-    /// those impls From<Value> and TaggedPtr.
-    FromValue(Ident),
+    /// things like LispFunction or LispVector, the data inside GC pointer. this type
+    /// must be referenced.
+    ObjectRef(Ident),
+    /// &optional equivalent.
     Option(Box<ArgKind>),
+    /// &rest equivallent.
     Slice(Box<ArgKind>),
+    /// internal_fn used only.
     Other(syn::Type),
 }
 
@@ -29,7 +39,7 @@ impl ArgKind {
         match self {
             ArgKind::Other(_) => true,
             ArgKind::Slice(inner) => inner.is_other(),
-            _ => false
+            _ => false,
         }
     }
 }
@@ -38,9 +48,8 @@ impl ArgKind {
 pub(crate) enum RetKind {
     Unit,                 // no return
     Primitive(String),    // i64, u64, etc.
-    Value,                // crate::core::value::Value
-    IntoValue,            // types convertible into Value
-    Option(Box<RetKind>), // Option<...> where inner is Value or IntoValue
+    Object,               // crate::core::object::Object
+    Option(Box<RetKind>), // Option<...> where inner is Object
     Other,
 }
 
@@ -108,7 +117,10 @@ fn parse_signature(sig: &syn::Signature) -> Result<Vec<Arg>, Error> {
                     }
                 };
 
-                args.push(Arg { info: arg_info, ident });
+                args.push(Arg {
+                    info: arg_info,
+                    ident,
+                });
             }
         }
     }
@@ -147,11 +159,10 @@ fn classify_return_type(ty: &syn::Type) -> RetKind {
                     let inner = classify_return_type(inner_ty);
                     RetKind::Option(Box::new(inner))
                 }
-                // Exact Value-like
-                n if is_value_name(n) => RetKind::Value,
-                n if is_lisp_value_name(n) => RetKind::IntoValue,
+                // Exact Object-like
+                n if is_object_name(n) => RetKind::Object,
                 n if is_primitive_name(n) => RetKind::Primitive(n.to_string()),
-                // Convertible into Value (align with get_object_kind FromValue set)
+                // Convertible into Object (align with get_object_kind FromValue set)
                 _ => RetKind::Other,
             }
         }
@@ -199,23 +210,29 @@ fn get_arg_type(ty: &syn::Type) -> Result<ArgInfo, Error> {
     })
 }
 
-fn is_value_name(ident: &str) -> bool {
+fn is_object_name(ident: &str) -> bool {
     match ident {
-        "Value" | "RuntimeValue" => true,
+        "Object" => true,
         _ => false,
     }
 }
 
-fn is_lisp_value_name(ident: &str) -> bool {
+// TODO move types to another crate so we can reuse function there
+fn is_object_ref_name(ident: &str) -> bool {
     match ident {
-        "LispString" | "Symbol" | "Vector" | "Cons" | "Function" | "Map" | "Number" => true,
+        "String" | "Cons" | "Function" | "HashTable" | "Integer" | "Float"
+        | "Character" | "Vector" => true,
         _ => false,
     }
+}
+
+fn is_lisp_object_name(ident: &str) -> bool {
+    ident.strip_prefix("Lisp").is_some_and(is_object_ref_name)
 }
 
 fn is_primitive_name(ident: &str) -> bool {
     match ident {
-        "i64" | "u64" | "usize" | "u32" => true,
+        "Symbol" | "i64" | "u64" | "usize" | "u32" => true,
         _ => false,
     }
 }
@@ -223,10 +240,10 @@ fn is_primitive_name(ident: &str) -> bool {
 fn get_object_kind(type_path: &syn::TypePath) -> Option<ArgKind> {
     let outer_type = type_path.path.segments.last().unwrap();
     let ident = outer_type.ident.to_string();
-    if is_value_name(&ident) {
-        Some(ArgKind::Value)
-    } else if is_lisp_value_name(&ident) {
-        Some(ArgKind::FromValue(outer_type.ident.to_owned()))
+    if is_object_name(&ident) {
+        Some(ArgKind::Object)
+    } else if is_object_ref_name(&ident) {
+        Some(ArgKind::ObjectRef(outer_type.ident.to_owned()))
     } else if is_primitive_name(&ident) {
         Some(ArgKind::Primitive(outer_type.ident.to_owned()))
     } else if outer_type.ident == "Environment" {
@@ -248,4 +265,52 @@ fn get_generic_param(outer_type: &syn::PathSegment) -> Option<&syn::Type> {
 
 fn get_path_ident_name(type_path: &syn::TypePath) -> String {
     type_path.path.segments.last().unwrap().ident.to_string()
+}
+
+pub fn construct_return(
+    fallible: bool,
+    success: TokenStream,
+    fallback: TokenStream,
+) -> TokenStream {
+    if fallible {
+        quote! {
+            match result {
+                Ok(val) => {
+                    #success
+                },
+                Err(e) => {
+                    tracing::error!("error: {e:?}");
+                    Err("call error")
+                }
+            }
+        }
+    } else {
+        quote! {
+            #fallback
+        }
+    }
+}
+
+pub fn construct_objectref(is_mut: bool, cnt: usize, ident: &Ident, ty: &Ident) -> TokenStream {
+    let mut_val = if is_mut {
+        quote! {mut}
+    } else {
+        quote! {}
+    };
+    let object = quote! { crate::core::object::Object };
+    let method_name = format_ident!("as_{}", if is_mut { "mut" } else { "ref" });
+    let tmp = format_ident!("__arg_val_{}", cnt);
+    quote! {
+        let #tmp = #object(#ident as u64);
+        let #ident: &#mut_val #ty = (&#tmp).try_into()?;
+    }
+}
+
+pub fn construct_return_nodrop(val: &str) -> TokenStream {
+    let val = format_ident!("{val}");
+    quote! {
+        let result = Ok(#val.0 as i64);
+        std::mem::forget(#val);
+        result
+    }
 }

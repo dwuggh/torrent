@@ -8,10 +8,10 @@ use syn::{
 };
 
 mod defun;
-mod defun_new;
 mod defun_internal;
-mod variantly;
+// mod defun_new;
 mod function;
+mod variantly;
 
 #[proc_macro_attribute]
 pub fn defun(attr_ts: TokenStream, fn_ts: TokenStream) -> TokenStream {
@@ -31,8 +31,8 @@ pub fn internal_fn(attr_ts: TokenStream, fn_ts: TokenStream) -> TokenStream {
     let function = parse_macro_input!(fn_ts as function::Function);
 
     match NestedMeta::parse_meta_list(attr_ts.into()) {
-        Ok(args) => match defun_new::Spec::from_list(&args) {
-            Ok(spec) => defun_new::expand(function, spec).into(),
+        Ok(args) => match defun_internal::Spec::from_list(&args) {
+            Ok(spec) => defun_internal::expand(function, spec).into(),
             Err(e) => TokenStream::from(e.write_errors()),
         },
         Err(e) => TokenStream::from(DError::from(e).write_errors()),

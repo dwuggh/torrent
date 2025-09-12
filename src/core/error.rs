@@ -1,11 +1,9 @@
 use thiserror::Error;
 
-use crate::{
-    core::{
-        ident::Ident,
-        symbol::Symbol,
-        value::{LispType, Value},
-    },
+use crate::core::{
+    ident::Ident,
+    symbol::Symbol,
+    object::{LispType, Object},
 };
 
 /// Runtime errors that can occur during Lisp execution
@@ -49,7 +47,7 @@ pub enum RuntimeError {
 
     // Function call errors
     #[error("Invalid function: {value:?}")]
-    InvalidFunction { value: Value },
+    InvalidFunction { value: Object },
 
     #[error("Function {name} is not defined")]
     UndefinedFunction { name: Ident },
@@ -69,37 +67,37 @@ pub enum RuntimeError {
 
     // List and sequence errors
     #[error("Wrong type argument: {value:?} is not a list")]
-    NotAList { value: Value },
+    NotAList { value: Object },
 
     #[error("Wrong type argument: {value:?} is not a sequence")]
-    NotASequence { value: Value },
+    NotASequence { value: Object },
 
     #[error("List index out of bounds: {index}")]
     IndexOutOfBounds { index: usize },
 
     #[error("Cannot take car of {value:?}")]
-    CannotTakeCar { value: Value },
+    CannotTakeCar { value: Object },
 
     #[error("Cannot take cdr of {value:?}")]
-    CannotTakeCdr { value: Value },
+    CannotTakeCdr { value: Object },
 
     // String errors
     #[error("String index out of bounds: {index} in string of length {length}")]
     StringIndexOutOfBounds { index: usize, length: usize },
 
     #[error("Invalid string operation on {value:?}")]
-    InvalidStringOperation { value: Value },
+    InvalidStringOperation { value: Object },
 
     // Vector errors
     #[error("Vector index out of bounds: {index} in vector of length {length}")]
     VectorIndexOutOfBounds { index: usize, length: usize },
 
     #[error("Wrong type argument: {value:?} is not a vector")]
-    NotAVector { value: Value },
+    NotAVector { value: Object },
 
     // Control flow errors
     #[error("No catch for tag: {tag:?}")]
-    NoCatch { tag: Value },
+    NoCatch { tag: Object },
 
     #[error("Invalid throw without catch")]
     InvalidThrow,
@@ -118,10 +116,10 @@ pub enum RuntimeError {
     UnhandledError { condition: String },
 
     #[error("Invalid error condition: {value:?}")]
-    InvalidCondition { value: Value },
+    InvalidCondition { value: Object },
 
     #[error("Signal: {signal} with data: {data:?}")]
-    Signal { signal: Symbol, data: Value },
+    Signal { signal: Symbol, data: Object },
 
     // I/O errors
     #[error("File not found: {filename}")]
@@ -157,7 +155,7 @@ pub enum RuntimeError {
     MalformedSpecialForm { form: String },
 
     #[error("Invalid lambda list: {lambda_list:?}")]
-    InvalidLambdaList { lambda_list: Value },
+    InvalidLambdaList { lambda_list: Object },
 
     // Memory and resource errors
     #[error("Out of memory")]
@@ -252,7 +250,7 @@ impl RuntimeError {
     }
 
     /// Create an invalid function error
-    pub fn invalid_function(value: Value) -> Self {
+    pub fn invalid_function(value: Object) -> Self {
         Self::InvalidFunction { value }
     }
 
@@ -335,9 +333,9 @@ impl RuntimeError {
             | Self::BreakOutsideLoop
             | Self::ContinueOutsideLoop => "control-flow-error",
 
-            Self::UnhandledError { .. }
-            | Self::InvalidCondition { .. }
-            | Self::Signal { .. } => "condition-error",
+            Self::UnhandledError { .. } | Self::InvalidCondition { .. } | Self::Signal { .. } => {
+                "condition-error"
+            }
 
             Self::FileNotFound { .. }
             | Self::PermissionDenied { .. }
@@ -374,7 +372,7 @@ impl RuntimeError {
 }
 
 /// Result type for runtime operations
-pub type RuntimeResult<T = Value> = Result<T, RuntimeError>;
+pub type RuntimeResult<T = Object> = Result<T, RuntimeError>;
 
 /// Helper trait for converting values to runtime errors
 pub trait IntoRuntimeError {

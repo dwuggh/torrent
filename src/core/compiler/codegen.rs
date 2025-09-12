@@ -8,28 +8,22 @@ use cranelift_module::FuncId;
 use cranelift_module::Module;
 
 use crate::core::compiler::error::{CodegenError, CodegenResult};
-use crate::core::compiler::ir::Arg;
-use crate::core::compiler::ir::Defvar;
-use crate::core::compiler::ir::{
-    Call, Expr, If, Lambda, Let, Literal, Number, Quote, QuoteKind, QuotedData, SpecialForm,
-};
+use crate::core::compiler::ir::*;
 use crate::core::compiler::scope::CompileScope;
 use crate::core::compiler::scope::FrameScope;
 use crate::core::compiler::scope::Val;
-use crate::core::function::Function;
-use crate::core::string::LispString;
+use crate::core::function::LispFunction;
+use crate::core::string::LispStr;
 use crate::core::symbol::Symbol;
-use crate::core::value::TaggedPtr;
-use crate::core::value::NIL;
-use crate::core::value::TRUE;
-use crate::Value as RuntimeValue;
+use crate::core::object::NIL;
+use crate::core::object::TRUE;
+use crate::core::TaggedPtr;
 
 pub struct Codegen<'a> {
     module: &'a mut JITModule,
     data_desc: &'a mut DataDescription,
     builder: FunctionBuilder<'a>,
-    closure: Value,
-    func: RuntimeValue,
+    func: LispFunction,
     pub func_id: FuncId,
     env: Value,
     builtin_funcs: &'a HashMap<String, FuncId>,
@@ -71,16 +65,16 @@ impl<'a> Codegen<'a> {
 
         let env = block_params[0];
 
-        let func_runtime_val = Function::new_closure(func_id).tag();
-        let closure_val = translate_value(&mut builder, func_runtime_val);
+        let func = LispFunction::new_closure(func_id);
+        // let closure_val = translate_value(&mut builder, func_runtime_val);
 
         let codegen = Self {
             module,
             data_desc,
             builtin_funcs,
             builder,
-            func: func_runtime_val,
-            closure: closure_val,
+            func,
+            // closure: closure_val,
             env,
             func_id,
         };
@@ -151,16 +145,14 @@ impl<'a> Codegen<'a> {
 
         let new_scope = FrameScope::new(variables, parent_scope, false, true).into();
 
-        let func_runtime_val = Function::new_closure(func_id).tag();
-        let closure_val = translate_value(&mut builder, func_runtime_val);
+        let func = LispFunction::new_closure(func_id);
 
         let codegen = Self {
             module,
             data_desc,
             builtin_funcs,
             builder,
-            func: func_runtime_val,
-            closure: closure_val,
+            func,
             env,
             func_id,
         };
@@ -187,6 +179,7 @@ impl<'a> Codegen<'a> {
         exprs: &[Expr],
         scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
+        // TODO need to drop other values
         exprs
             .iter()
             .map(|e| self.translate_expr(e, scope, false))
@@ -194,7 +187,7 @@ impl<'a> Codegen<'a> {
             .unwrap_or(Ok(self.nil()))
     }
 
-    pub fn finalize(mut self, val: Value) -> RuntimeValue {
+    pub fn finalize(mut self, val: Value) -> LispFunction {
         self.builder.ins().return_(&[val]);
         self.builder.finalize();
         self.func
@@ -252,7 +245,12 @@ impl<'a> Codegen<'a> {
                         .ins()
                         .iconst(types::I64, Into::<i64>::into(ident));
 
-                    self.call_internal("load_captured", &[ident_val, self.closure, self.env])[0]
+                    let closure = self
+                        .builder
+                        .ins()
+                        .iconst(types::I64, self.func.raw() as i64);
+
+                    self.call_internal("load_captured", &[ident_val, closure, self.env])[0]
                 }
             })
     }
@@ -267,7 +265,7 @@ impl<'a> Codegen<'a> {
         match scope {
             CompileScope::Global => {
                 // let val = Environment::default().load_symbol(symbol, load_function_cell)?;
-                let sym_val = self.translate_value(symbol.tag());
+                let sym_val = self.builder.ins().iconst(types::I64, symbol.raw() as i64);
                 let load_function_cell = self
                     .builder
                     .ins()
@@ -287,7 +285,7 @@ impl<'a> Codegen<'a> {
                             if let Some(captured) =
                                 lexical_binds.borrow_mut().get_mut(&symbol.into())
                             {
-                                captured.insert(self.func);
+                                captured.push(self.func.clone());
                             }
                         }
                         Some(Val::Ident(symbol.into()))
@@ -314,10 +312,6 @@ impl<'a> Codegen<'a> {
             .collect()
     }
 
-    fn translate_value(&mut self, val: RuntimeValue) -> Value {
-        translate_value(&mut self.builder, val)
-    }
-
     pub fn translate_expr<'s>(
         &mut self,
         expr: &Expr,
@@ -340,20 +334,20 @@ impl<'a> Codegen<'a> {
 
     fn translate_literal(&mut self, literal: &Literal) -> CodegenResult<Value> {
         match literal {
-            Literal::Number(Number::FixedInteger(n)) => {
-                let val = RuntimeValue::tag(*n).0 as i64;
+            Literal::Number(Number::Integer(n)) => {
+                let val = n.raw() as i64;
                 Ok(self.builder.ins().iconst(types::I64, val))
             }
             Literal::Number(Number::Real(f)) => {
-                let val = RuntimeValue::tag(*f).0 as i64;
+                let val = f.raw() as i64;
                 Ok(self.builder.ins().iconst(types::I64, val))
             }
             Literal::Character(c) => {
-                let val = RuntimeValue::tag(*c).0 as i64;
+                let val = c.raw() as i64;
                 Ok(self.builder.ins().iconst(types::I64, val))
             }
             Literal::String(s) => {
-                let val = RuntimeValue::tag(LispString::from_str(s)).0 as i64;
+                let val = s.raw() as i64;
                 Ok(self.builder.ins().iconst(types::I64, val))
             }
         }
@@ -377,12 +371,38 @@ impl<'a> Codegen<'a> {
             "Translating function call with {} arguments",
             call.args.len()
         );
-        // match *call.func {
-        //     Expr::Symbol(ident) => {
-        //         todo!()
-        //     }
-        //     _ => ()
-        // };
+        match *call.func {
+            // Expr::Symbol(ident) => {
+            //     match ident.text() {
+            //         "+" => {
+            //             let l = &call.args[0];
+            //             let r = &call.args[1];
+            //             let l = self.translate_expr(l, scope, false)?;
+            //             let r = self.translate_expr(r, scope, false)?;
+            //             let res = self.builder.ins().iadd(l, r);
+            //             return Ok(res);
+            //         }
+            //         "-" => {
+            //             let l = &call.args[0];
+            //             let r = &call.args[1];
+            //             let l = self.translate_expr(l, scope, false)?;
+            //             let r = self.translate_expr(r, scope, false)?;
+            //             let res = self.builder.ins().isub(l, r);
+            //             return Ok(res);
+            //         }
+            //         "<" => {
+            //             let l = &call.args[0];
+            //             let r = &call.args[1];
+            //             let l = self.translate_expr(l, scope, false)?;
+            //             let r = self.translate_expr(r, scope, false)?;
+            //             let res = self.builder.ins().icmp(IntCC::SignedLessThan, l, r);
+            //             return Ok(res);
+            //         }
+            //         _ => ()
+            //     }
+            // }
+            _ => ()
+        };
 
         let func = self.translate_expr(call.func.as_ref(), scope, true)?;
         let args = self.translate_arg_exprs(&call.args, scope)?;
@@ -436,6 +456,7 @@ impl<'a> Codegen<'a> {
         let cond_val = self.translate_expr(&if_expr.cond, scope, false)?;
         let nil = self.nil();
         let cond = self.builder.ins().icmp(IntCC::NotEqual, cond_val, nil);
+        // let cond = cond_val;
         let then_block = self.builder.create_block();
         let else_block = self.builder.create_block();
         let merge_block = self.builder.create_block();
@@ -613,7 +634,7 @@ impl<'a> Codegen<'a> {
             QuotedData::Literal(literal) => self.translate_literal(literal),
             QuotedData::Symbol(ident) => {
                 let symbol: Symbol = (*ident).into();
-                let val = RuntimeValue::tag(symbol).0 as i64;
+                let val = symbol.raw() as i64;
                 Ok(self.builder.ins().iconst(types::I64, val))
             }
             QuotedData::List(_items) => {
@@ -669,11 +690,10 @@ impl<'a> Codegen<'a> {
         tracing::debug!("Finalizing lambda function definitions");
         self.module.finalize_definitions()?;
         let func_ptr = self.module.get_finalized_function(func_id);
-        let closure: Function = func.try_into().unwrap();
-        closure.set_func_ptr(func_ptr);
+        func.set_func_ptr(func_ptr);
 
-        let result = self.translate_value(func);
-        Ok(result)
+        let func_val = self.builder.ins().iconst(types::I64, func.raw() as i64);
+        Ok(func_val)
     }
 
     fn translate_let_expr<'s>(
@@ -719,9 +739,9 @@ impl<'a> Codegen<'a> {
                     let var = frame.slots.get(*ident).unwrap();
                     let value = self.builder.use_var(var);
                     let symbol: Symbol = ident.into();
-                    let sym = translate_value(&mut self.builder, symbol.tag());
+                    let sym = self.builder.ins().iconst(types::I64, symbol.raw() as i64);
                     for func in funcs.iter() {
-                        let func_val = translate_value(&mut self.builder, *func);
+                        let func_val = self.builder.ins().iconst(types::I64, func.raw() as i64);
                         self.call_internal("store_captured", &[sym, value, func_val]);
                     }
                 }
@@ -751,13 +771,9 @@ impl<'a> Codegen<'a> {
         let sym_len = self.builder.ins().iconst(types::I64, text_len as i64);
 
         let val = self.translate_expr(defvar_expr.value.as_ref().unwrap(), scope, false)?;
-        
+
         let val = self.call_internal("defvar", &[sym, sym_len, val, self.env])[0];
 
         Ok(val)
     }
-}
-
-fn translate_value(builder: &mut FunctionBuilder, val: RuntimeValue) -> Value {
-    builder.ins().iconst(types::I64, val.0 as i64)
 }

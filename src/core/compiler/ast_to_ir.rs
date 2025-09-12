@@ -1,9 +1,8 @@
 use crate::{
     ast::Node,
-    core::{compiler::ir::*, ident::Ident},
+    core::{compiler::ir::*, ident::Ident, number::{LispCharacter, LispFloat, LispInteger}, string::LispStr},
 };
 use std::sync::Arc;
-use chumsky::extra::ParserExtra;
 use thiserror::Error;
 
 #[derive(Error, Debug, Clone)]
@@ -39,7 +38,6 @@ pub enum ConversionError {
     InvalidArgumentType { position: usize },
 }
 
-
 pub struct AstToIrConverter;
 
 impl AstToIrConverter {
@@ -51,13 +49,13 @@ impl AstToIrConverter {
         match node {
             Node::Ident(ident) => Ok(Expr::Symbol(ident)),
 
-            Node::Integer(n) => Ok(Expr::Literal(Literal::Number(Number::FixedInteger(n)))),
+            Node::Integer(n) => Ok(Expr::Literal(Literal::Number(Number::Integer(LispInteger(n))))),
 
-            Node::Float(f) => Ok(Expr::Literal(Literal::Number(Number::Real(f)))),
+            Node::Float(f) => Ok(Expr::Literal(Literal::Number(Number::Real(LispFloat(f))))),
 
-            Node::Char(c) => Ok(Expr::Literal(Literal::Character(c))),
+            Node::Char(c) => Ok(Expr::Literal(Literal::Character(c.into()))),
 
-            Node::Str(s) => Ok(Expr::Literal(Literal::String(s))),
+            Node::Str(s) => Ok(Expr::Literal(Literal::String(LispStr::new(s)))),
 
             Node::Nil => Ok(Expr::Nil), // or create a Nil literal type
 
@@ -220,7 +218,6 @@ impl AstToIrConverter {
         if args.is_empty() {
             return Err(ConversionError::InvalidLambdaArgs);
         }
-
 
         let params = Self::parse_lambda_params(&args[0])?;
         let body_nodes = &args[1..];
@@ -829,12 +826,12 @@ impl AstToIrConverter {
     ) -> Result<QuotedData, ConversionError> {
         match node {
             Node::Ident(ident) => Ok(QuotedData::Symbol(*ident)),
-            Node::Integer(n) => Ok(QuotedData::Literal(Literal::Number(Number::FixedInteger(
-                *n,
+            Node::Integer(n) => Ok(QuotedData::Literal(Literal::Number(Number::Integer(LispInteger(*n))))),
+            Node::Float(f) => Ok(QuotedData::Literal(Literal::Number(Number::Real(LispFloat(*f))))),
+            Node::Char(c) => Ok(QuotedData::Literal(Literal::Character(LispCharacter::new(*c)))),
+            Node::Str(s) => Ok(QuotedData::Literal(Literal::String(LispStr::from_str(
+                s,
             )))),
-            Node::Float(f) => Ok(QuotedData::Literal(Literal::Number(Number::Real(*f)))),
-            Node::Char(c) => Ok(QuotedData::Literal(Literal::Character(*c))),
-            Node::Str(s) => Ok(QuotedData::Literal(Literal::String(s.clone()))),
             Node::Nil => Ok(QuotedData::Symbol(Ident::from("nil"))),
 
             Node::Vector(nodes) => {
@@ -899,7 +896,7 @@ mod tests {
         let expr = node_to_ir(node).unwrap();
         assert!(matches!(
             expr,
-            Expr::Literal(Literal::Number(Number::FixedInteger(42)))
+            Expr::Literal(Literal::Number(Number::Integer(LispInteger(42))))
         ));
     }
 

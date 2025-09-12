@@ -4,7 +4,7 @@ use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 use syn::{Error, Type};
 
-use crate::function::{Arg, ArgKind, Function, RetKind};
+use crate::function::{construct_objectref, construct_return, construct_return_nodrop, Arg, ArgKind, Function, RetKind};
 
 pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let body = function.body;
@@ -36,120 +36,73 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         quote! { #ident }
     });
 
+    let nil = quote! {
+        crate::core::object::NIL
+    };
+
     // let ret_is_unit = matches!(function.ret_kind, RetKind::Unit);
     let wrapper_ret_ty = quote! { ::std::result::Result<i64, &'static str> };
 
     let wrapper_result = match &function.ret_kind {
-        RetKind::Unit => {
-            if function.fallible {
-                quote! {
-                    match result {
-                        Ok(val) => Ok(val),
-                        Err(_) => Err("call error"),
-                    }
-                }
-            } else {
-                quote! {
-                    Ok(result)
-                }
-            }
-        }
-        RetKind::Value => {
-            if function.fallible {
-                quote! {
-                    match result {
-                        Ok(val) => Ok(val.0 as i64),
-                        Err(_) => Err("call error"),
-                    }
-                }
-            } else {
-                quote! { Ok(result.0 as i64) }
-            }
-        }
-        RetKind::IntoValue => {
-            if function.fallible {
-                quote! {
-                    match result {
-                        Ok(val) => {
-                            let v: crate::core::value::Value = val.tag();
-                            Ok(v.0 as i64)
-                        }
-                        Err(_) => Err("call error"),
-                    }
-                }
-            } else {
-                quote! {
-                    // TODO check if this is correct
-                    let v: crate::core::value::Value = result.tag();
-                    Ok(v.0 as i64)
-                }
-            }
-        }
+        RetKind::Unit => construct_return(
+            function.fallible,
+            quote! {
+                Ok(#nil as i64)
+            },
+            quote! {
+                Ok(#nil as i64)
+            },
+        ),
+        RetKind::Object => construct_return(
+            function.fallible,
+            construct_return_nodrop("val"),
+            construct_return_nodrop("result"),
+        ),
         RetKind::Option(inner) => {
             let some_to_value = match inner.as_ref() {
-                RetKind::Value => quote! { v },
-                RetKind::IntoValue => quote! {{
-                    let vv: crate::core::value::Value = v.tag();
-                    vv
-                }},
-                _ => quote! {{
-                    let vv: crate::core::value::Value = ::std::convert::Into::into(v);
-                    vv
-                }},
+                RetKind::Object => quote! { v },
+                // TODO
+                // RetKind::Primitive(ty) => quote! {{
+                //     let vv: crate::core::value::Value = v.tag();
+                //     vv
+                // }},
+                _ => panic!("invalid return type!")
             };
-            if function.fallible {
+            construct_return(
+                function.fallible,
                 quote! {
-                    match result {
-                        Ok(opt) => {
-                            let ret = match opt {
-                                Some(v) => {
-                                    let __val = { #some_to_value };
-                                    __val.0 as i64
-                                }
-                                None => crate::core::value::NIL as i64,
-                            };
-                            Ok(ret)
+                    let ret = match val {
+                        Some(v) => {
+                            let __val = { #some_to_value };
+                            __val.0 as i64
                         }
-                        Err(_) => Err("call error"),
-                    }
-                }
-            } else {
+                        None => #nil as i64,
+                    };
+                    Ok(ret)
+                },
                 quote! {
                     let ret = match result {
                         Some(v) => {
                             let __val = { #some_to_value };
                             __val.0 as i64
                         }
-                        None => crate::core::value::NIL as i64,
+                        None => #nil as i64,
                     };
                     Ok(ret)
-                }
-            }
+                },
+            )
         }
-        RetKind::Primitive(_ident) => {
-            if function.fallible {
-                quote! {
-                    match result {
-                        Ok(val) => Ok(val as i64),
-                        Err(_) => Err("call error"),
-                    }
-                }
-            } else {
-                quote! { Ok(result as i64) }
-            }
-        }
-        RetKind::Other => {
-            if function.fallible {
-                quote! {
-                    match result {
-                        Ok(val) => Ok(val as *const u8 as i64),
-                        Err(_) => Err("call error"),
-                    }
-                }
-            } else {
-                quote! { Ok(result as *const u8 as i64) }
-            }
-        }
+        // TODO
+        // RetKind::Primitive(_ident) => construct_return(
+        //     function.fallible,
+        //     quote! {
+        //         Ok(val as i64)
+        //     },
+        //     quote! {
+        //         Ok(result as i64)
+        //     },
+        // ),
+        _ => panic!("invalid return type"),
     };
 
     let extern_fn = quote! {
@@ -160,7 +113,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::error!("error: {e:?}");
-                    crate::core::value::NIL as i64
+                    #nil as i64
                 }
             }
         }
@@ -191,17 +144,13 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
             #(#c_params),*
         ) -> #wrapper_ret_ty {
             if cfg!(debug_assertions) {
-                eprintln!("[DEBUG] Calling defun function: {}", #lisp_name);
-                eprintln!("[DEBUG] args_ptr: 0x{:x}, args_cnt: {}", args_ptr, args_cnt);
+                tracing::trace!("[DEBUG] Calling defun function: {}", #lisp_name);
             }
             let args_cnt_u: usize = args_cnt as usize;
             #(#arg_conversion)*
-            if cfg!(debug_assertions) {
-                eprintln!("[DEBUG] About to call Rust function: {}", stringify!(#subr));
-            }
             let result = #subr(#(#call_args),*);
             if cfg!(debug_assertions) {
-                eprintln!("[DEBUG] Rust function {} returned", stringify!(#subr));
+                tracing::trace!("[DEBUG] Rust function {} returned", stringify!(#subr));
             }
             #wrapper_result
         }
@@ -214,6 +163,11 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
 
 fn get_arg_conversion(args: &[Arg]) -> Vec<TokenStream> {
     let mut conversions = Vec::new();
+
+    let object = quote! { crate::core::object::Object };
+    let nil = quote! {
+        crate::core::object::NIL
+    };
 
     // Find the minimum required arguments (non-optional, non-slice)
     let mut required_args: usize = 0;
@@ -264,83 +218,60 @@ fn get_arg_conversion(args: &[Arg]) -> Vec<TokenStream> {
             ArgKind::Slice(inner_kind) => {
                 // Slice arguments consume all remaining arguments
                 let slice_conversion = match inner_kind.as_ref() {
-                    ArgKind::Value => {
+                    ArgKind::Object => {
                         quote! {
                             let slice_len = args_cnt_u - #i;
-                            if cfg!(debug_assertions) {
-                                eprintln!("[DEBUG] Creating Value slice of length {} starting at arg {}", slice_len, #i);
-                            }
                             let #ident = unsafe {
                                 let ptr = args_ptr as *const i64;
                                 let slice_ptr = ptr.add(#i);
-                                std::slice::from_raw_parts(slice_ptr as *const crate::core::value::Value, slice_len)
+                                std::slice::from_raw_parts(slice_ptr as *const #object, slice_len)
                             };
                         }
                     }
-                    ArgKind::FromValue(ty) => {
-                        // For FromValue slices, we need to convert each element
-                        quote! {
-                            let slice_len = args_cnt_u - #i;
-                            let mut slice_vec = Vec::with_capacity(slice_len);
-                            unsafe {
-                                let ptr = args_ptr as *const i64;
-                                for j in 0..slice_len {
-                                    let arg_val = ptr.add(#i + j).read();
-                                    let val = crate::core::value::Value(arg_val as u64);
-                                    let converted: #ty = ::std::convert::TryFrom::try_from(val)?;
-                                    slice_vec.push(converted);
-                                }
-                            }
-                            let #ident = slice_vec.as_slice();
-                        }
-                    }
-                    // ArgKind::Other(ty) => {
-                    //     quote! {
-                    //         let slice_len = args_cnt_u - #i;
-                    //         let mut slice_vec = Vec::with_capacity(slice_len);
-                    //         unsafe {
-                    //             let ptr = args_ptr as *const i64;
-                    //             for j in 0..slice_len {
-                    //                 let arg_val = ptr.add(#i + j).read();
-                    //                 let converted: #ty = ::std::convert::TryFrom::try_from(arg_val)?;
-                    //                 slice_vec.push(converted);
-                    //             }
-                    //         }
-                    //         let #ident = slice_vec.as_slice();
-                    //     }
-                    // }
                     _ => {
                         panic!("cannot convert: wrong arg type")
                     }
                 };
                 slice_conversion
             }
+            ArgKind::Object => {
+                let load_arg = quote! {
+                    let arg_val = unsafe {
+                        let ptr = args_ptr as *const i64;
+                        ptr.add(#i).read()
+                    };
+                };
+
+                if arg_info.is_ref {
+                    let tmp = format_ident!("__arg_val_{}", i);
+                    quote! {
+                        #load_arg
+                        let #tmp = #object(arg_val as u64);
+                        let #ident = &#tmp;
+                    }
+                } else {
+                    quote! {
+                        #load_arg
+                        let #ident = #object(arg_val as u64);
+                    }
+                }
+            }
             ArgKind::Option(inner_kind) => {
                 // Optional arguments - check if we have enough arguments
                 let option_conversion = match inner_kind.as_ref() {
-                    ArgKind::Value => {
+                    ArgKind::Object => {
                         if arg_info.is_ref {
                             let tmp = format_ident!("__arg_val_{}", i);
-                            let mut_tok = if arg_info.is_mut {
-                                quote! { mut }
-                            } else {
-                                quote! {}
-                            };
-                            let ref_tok = if arg_info.is_mut {
-                                quote! { &mut #tmp }
-                            } else {
-                                quote! { &#tmp }
-                            };
                             quote! {
-                                let (#mut_tok #tmp, #ident) = if args_cnt_u > #i {
+                                let (#tmp, #ident) = if args_cnt_u > #i {
                                     let arg_val = unsafe {
                                         let ptr = args_ptr as *const i64;
                                         ptr.add(#i).read()
                                     };
-                                    let val = crate::core::value::Value(arg_val as u64);
-                                    (val, Some(#ref_tok))
+                                    let val = #object(arg_val as u64);
+                                    (val, Some(&#tmp))
                                 } else {
-                                    (crate::core::value::Value(crate::core::value::NIL as u64), None)
+                                    (#object(#nil as u64), None)
                                 };
                             }
                         } else {
@@ -350,54 +281,37 @@ fn get_arg_conversion(args: &[Arg]) -> Vec<TokenStream> {
                                         let ptr = args_ptr as *const i64;
                                         ptr.add(#i).read()
                                     };
-                                    Some(crate::core::value::Value(arg_val as u64))
+                                    Some(#object(arg_val as u64))
                                 } else {
                                     None
                                 };
                             }
                         }
                     }
-                    ArgKind::FromValue(ty) => {
-                        if arg_info.is_ref {
-                            let tmp_val = format_ident!("__arg_val_{}", i);
-                            let tmp_cast = format_ident!("__arg_cast_{}", i);
-                            let mut_val = if arg_info.is_mut {
-                                quote! { mut }
-                            } else {
-                                quote! {}
+                    ArgKind::ObjectRef(ty) => {
+                        let load_arg = quote! {
+                            let arg_val = unsafe {
+                                let ptr = args_ptr as *const i64;
+                                ptr.add(#i).read()
                             };
-                            let ref_tok = if arg_info.is_mut {
-                                quote! { &mut #tmp_cast }
-                            } else {
-                                quote! { &#tmp_cast }
-                            };
-                            quote! {
-                                let (#mut_val #tmp_cast, #ident) = if args_cnt_u > #i {
-                                    let arg_val = unsafe {
-                                        let ptr = args_ptr as *const i64;
-                                        ptr.add(#i).read()
-                                    };
-                                    let #mut_val #tmp_val = crate::core::value::Value(arg_val as u64);
-                                    let converted: #ty = ::std::convert::TryFrom::try_from(#tmp_val)?;
-                                    (converted, Some(#ref_tok))
-                                } else {
-                                    (Default::default(), None)
-                                };
-                            }
+                        };
+                        let tmp_cast = format_ident!("__arg_cast_{}", i);
+                        let ref_tok = if arg_info.is_mut {
+                            quote! { &mut #tmp_cast }
                         } else {
-                            quote! {
-                                let #ident = if args_cnt_u > #i {
-                                    let arg_val = unsafe {
-                                        let ptr = args_ptr as *const i64;
-                                        ptr.add(#i).read()
-                                    };
-                                    let val = crate::core::value::Value(arg_val as u64);
-                                    let converted: #ty = ::std::convert::TryFrom::try_from(val)?;
-                                    Some(converted)
-                                } else {
-                                    None
-                                };
-                            }
+                            quote! { &#tmp_cast }
+                        };
+                        let prog = construct_objectref(arg.info.is_mut, i, &format_ident!("converted"), ty);
+                        quote! {
+                            let (#tmp_cast, #ident) = if args_cnt_u > #i {
+                                #load_arg
+                                // let #tmp = #object(#ident as u64);
+                                // let converted: &#mut_val #ty = crate::core::TaggedPtr::#method_name(&#tmp).ok_or("wrong type argument")?;
+                                #prog
+                                (converted, Some(#ref_tok))
+                            } else {
+                                (Default::default(), None)
+                            };
                         }
                     }
                     _ => {
@@ -406,75 +320,62 @@ fn get_arg_conversion(args: &[Arg]) -> Vec<TokenStream> {
                 };
                 option_conversion
             }
-            ArgKind::Value => {
+            ArgKind::ObjectRef(ty) => {
                 let load_arg = quote! {
                     let arg_val = unsafe {
                         let ptr = args_ptr as *const i64;
-                        if cfg!(debug_assertions) {
-                            eprintln!("[DEBUG] Loading arg {} from ptr: 0x{:x} + {}", #i, ptr as usize, #i);
-                        }
                         ptr.add(#i).read()
                     };
-                    if cfg!(debug_assertions) {
-                        eprintln!("[DEBUG] Loaded arg {} value: 0x{:x}", #i, arg_val as u64);
-                    }
                 };
 
-                if arg_info.is_ref {
-                    let tmp = format_ident!("__arg_val_{}", i);
-                    let mut_tok = if arg_info.is_mut {
-                        quote! { mut }
-                    } else {
-                        quote! {}
-                    };
-                    let ref_tok = if arg_info.is_mut {
-                        quote! { &mut #tmp }
-                    } else {
-                        quote! { &#tmp }
-                    };
-                    quote! {
-                        #load_arg
-                        let #mut_tok #tmp = crate::core::value::Value(arg_val as u64);
-                        let #ident = #ref_tok;
-                    }
-                } else {
-                    quote! {
-                        #load_arg
-                        let #ident = crate::core::value::Value(arg_val as u64);
-                    }
+                let prog = construct_objectref(arg.info.is_mut, i, ident, ty);
+                quote! {
+                    #load_arg
+                    #prog
                 }
             }
-            ArgKind::FromValue(ty) => {
+            ArgKind::Primitive(ty) => {
                 let load_arg = quote! {
                     let arg_val = unsafe {
                         let ptr = args_ptr as *const i64;
                         ptr.add(#i).read()
                     };
                 };
-
-                if arg_info.is_ref {
-                    let tmp_val = format_ident!("__arg_val_{}", i);
-                    let tmp_cast = format_ident!("__arg_cast_{}", i);
-                    let mut_val = if arg_info.is_mut {
-                        quote! { mut }
-                    } else {
-                        quote! {}
-                    };
-                    let ref_tok = if arg_info.is_mut {
-                        quote! { &mut #tmp_cast }
-                    } else {
-                        quote! { &#tmp_cast }
-                    };
-                    quote! {
-                        #load_arg
-                        let #mut_val #tmp_val = crate::core::value::Value(arg_val as u64);
-                        let #mut_val #tmp_cast: #ty = ::std::convert::TryFrom::try_from(#tmp_val)?;
-                        let #ident = #ref_tok;
+                let tmp = format_ident!("__arg_val_{}", i);
+                match &ty.to_string() as &str {
+                    "Symbol" => {
+                        quote! {
+                            #load_arg
+                            let #tmp = #object(arg_val as u64);
+                            let #ident: #ty = (&#tmp).try_into()?;
+                        }
                     }
-                } else {
-                    quote! {
-                        #load_arg
-                        let #ident: #ty = ::std::convert::TryFrom::try_from(crate::core::value::Value(arg_val as u64))?;
+                    "i64" | "u64" => {
+                        quote! {
+                            #load_arg
+                            let #tmp = #object(arg_val as u64);
+                            let #ident: crate::core::number::Integer = (&#tmp).try_into()?;
+                            let #ident: #ty = #ident as #ty;
+                        }
+                    }
+                    "f64" => {
+                        quote! {
+                            #load_arg
+                            let #tmp = #object(arg_val as u64);
+                            let #ident: crate::core::number::Float = (&#tmp).try_into()?;
+                            let #ident: #ty = #ident as #ty;
+                        }
+                    }
+                    "char" => {
+                        quote! {
+                            #load_arg
+                            let #tmp = #object(arg_val as u64);
+                            let #ident: crate::core::number::Character = (&#tmp).try_into()?;
+                            let #ident: #ty = #ident as #ty;
+                        }
+                    }
+                    _ => {
+                        panic!("wrong primitive type!")
                     }
                 }
             }

@@ -7,18 +7,12 @@ use std::sync::LazyLock;
 use dashmap::DashMap;
 use proc_macros::Trace;
 
-use crate::core::compiler::scope::Val;
 use crate::core::ident::Ident;
-use crate::core::value::nil;
+use crate::core::object::nil;
 use crate::gc::Trace;
-use crate::{
-    core::value::{TaggedPtr, Value},
-    gc::Gc,
-};
+use crate::{core::object::Object, core::TaggedPtr, gc::Gc};
 
-use super::value::LispType;
-
-pub static INTERNED_SYMBOLS: LazyLock<SymbolMap> = LazyLock::new(|| SymbolMap::with_capacity(100));
+use super::object::LispType;
 
 #[derive(Debug, Default)]
 pub struct SymbolMap {
@@ -65,10 +59,13 @@ pub struct Symbol {
     pub name: Ident,
     phantom: PhantomData<SymbolCell>,
 }
+pub type LispSymbol = Symbol;
 
 impl std::fmt::Debug for Symbol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Symbol").field("name", &self.name()).finish()
+        f.debug_struct("Symbol")
+            .field("name", &self.name())
+            .finish()
     }
 }
 
@@ -115,22 +112,85 @@ impl Symbol {
     }
 }
 
-impl TaggedPtr for Symbol {
-    const TAG: LispType = LispType::Symbol;
+impl TryFrom<*mut Ident> for Symbol {
+    type Error = ();
 
-    unsafe fn cast(val: u64) -> Self {
-        Symbol {
-            name: val.into(),
-            phantom: PhantomData,
-        }
-    }
-
-    unsafe fn get_untagged_data(self) -> u64 {
-        self.name.into()
+    fn try_from(value: *mut Ident) -> Result<Self, Self::Error> {
+        Ok(unsafe {
+            let ident: Ident = std::mem::transmute(value as u64);
+            Self::new(ident)
+        })
     }
 }
 
-#[derive(Debug, Trace, Clone, Copy)]
+impl TryFrom<*mut Symbol> for Symbol {
+    type Error = ();
+
+    fn try_from(value: *mut Symbol) -> Result<Self, Self::Error> {
+        Ok(unsafe {
+            tracing::debug!("symbol's tryinto: {:?}", value as u64);
+            std::mem::transmute(value as u64)
+        })
+    }
+}
+
+impl TaggedPtr for Symbol {
+    const TAG: LispType = LispType::Symbol;
+
+    type Data = Symbol;
+
+    type Inner = Symbol;
+
+    unsafe fn to_raw(&self) -> u64 {
+        self.name.into()
+    }
+
+    // fn raw(&self) -> u64 {
+    //     unsafe { self.to_raw() | Self::TAG as u64 }
+    // }
+
+    // fn untag_ptr(val: u64) -> *mut Self::Inner {
+    //     let untagged = val ^ Self::TAG as u64;
+    //     tracing::info!("calling untag_ptr: untagged: {untagged}");
+    //     // untagged as *mut Self::Inner
+    //     unsafe { std::mem::transmute(untagged) }
+    // }
+
+    unsafe fn as_ref_unchecked(val: &Object) -> &Self::Data {
+        unimplemented!()
+    }
+
+    // NOTE this function does not check for tag match
+    unsafe fn as_mut_unchecked(val: &Object) -> &mut Self::Data {
+        unimplemented!()
+    }
+
+    fn untag(val: Object) -> Result<Self, super::tagged_ptr::TaggedPtrError> {
+
+        if super::tagged_ptr::get_tag(val.0 as i64) == Self::TAG {
+            let sym = (&val).try_into().unwrap();
+            std::mem::forget(val);
+            Ok(sym)
+        } else {
+            Err(super::tagged_ptr::TaggedPtrError::TypeMisMatch)
+        }
+        
+    }
+}
+
+impl AsRef<Symbol> for Symbol {
+    fn as_ref(&self) -> &Symbol {
+        self
+    }
+}
+
+impl AsMut<Symbol> for Symbol {
+    fn as_mut(&mut self) -> &mut Symbol {
+        self
+    }
+}
+
+#[derive(Debug, Trace, Clone)]
 pub struct SymbolCellData {
     #[no_trace]
     pub name: Symbol,
@@ -138,8 +198,8 @@ pub struct SymbolCellData {
     pub interned: bool,
     #[no_trace]
     pub special: bool,
-    pub func: Value,
-    pub value: Value,
+    pub func: Object,
+    pub value: Object,
 }
 
 #[derive(Debug, Trace, Clone)]

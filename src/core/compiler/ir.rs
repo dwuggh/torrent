@@ -1,4 +1,4 @@
-use crate::core::ident::Ident;
+use crate::core::{ident::Ident, number::{LispCharacter, LispFloat, LispInteger}, string::LispStr};
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -9,6 +9,16 @@ pub enum Expr {
     Vector(Vec<Expr>),
     Call(Call),
     SpecialForm(SpecialForm),
+}
+
+pub enum Var {
+    Symbol(Ident),
+    Local(Local),
+}
+
+pub struct Local {
+    ident: Ident,
+    id: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -231,13 +241,67 @@ pub enum QuotedData {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Number {
-    FixedInteger(i64),
-    Real(f64),
+    Integer(LispInteger),
+    Real(LispFloat),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
     Number(Number),
-    Character(char),
-    String(String),
+    Character(LispCharacter),
+    String(LispStr),
 }
+
+// impl TryFrom<LispValue> for Expr {
+//     type Error = RuntimeError;
+
+//     fn try_from(value: LispValue) -> Result<Self, Self::Error> {
+//         let node: Node = value.try_into()?;
+
+//         let expr = node_to_ir(node).map_err(|e| RuntimeError::MacroExpansionError {
+//             message: e.to_string(),
+//         })?;
+//         Ok(expr)
+//     }
+// }
+
+// impl TryFrom<LispValue> for Node {
+//     type Error = RuntimeError;
+
+//     fn try_from(value: LispValue) -> Result<Self, Self::Error> {
+//         let result = match value {
+//             LispValue::Nil => Self::Nil,
+//             LispValue::True => Self::Ident(Ident::from_string("t")),
+//             LispValue::Int(i) => Self::Integer(i),
+//             LispValue::Float(f) => Self::Float(f),
+//             LispValue::Character(c) => Self::Char(c),
+//             LispValue::String(lisp_string) => Self::Str(lisp_string.to_string()),
+//             LispValue::Symbol(symbol) => Self::Ident(symbol.name),
+//             LispValue::MacroItem(macro_item) => macro_item.try_into()?,
+//             _ => {
+//                 let err = Err(RuntimeError::MacroExpansionError {
+//                     message: format!("failed at {value:?}"),
+//                 });
+//                 return err;
+//             }
+//         };
+//         Ok(result)
+//     }
+// }
+
+// impl TryFrom<MacroItem> for Node {
+//     type Error = RuntimeError;
+//     fn try_from(value: MacroItem) -> Result<Self, Self::Error> {
+//         match value {
+//             MacroItem::List(lisp_values) => {
+//                 let mut sexp = Vec::new();
+//                 for val in lisp_values.into_iter() {
+//                     let node: Node = val.try_into()?;
+//                     sexp.push(node);
+//                 }
+//                 Ok(Node::Sexp(sexp))
+//             }
+//             _ => todo!(),
+//         }
+//     }
+// }

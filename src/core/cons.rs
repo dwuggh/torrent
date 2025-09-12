@@ -1,178 +1,73 @@
 use proc_macros::Trace;
 
 use crate::{
-    core::value::{nil, LispType, Value},
-    core::TaggedPtr,
+    core::{object::{nil, LispType, Object, ObjectRef}, TaggedPtr},
     gc::{Gc, GcInner},
 };
 
 #[derive(Clone, Trace, Debug)]
-pub struct Cons(pub Gc<LispCons>);
+pub struct LispCons(pub Gc<Cons>);
 
 #[derive(Clone, Trace, Debug)]
-pub struct LispCons {
-    car: Value,
-    cdr: Value,
+pub struct Cons {
+    car: Object,
+    cdr: Object,
 }
 
-impl_tagged_ptr_for_gc!(Cons, LispType::Cons, LispCons);
+impl_tagged_ptr_for_gc!(LispCons, LispType::Cons, Cons);
 
-impl Cons {
-    pub fn new(car: Value, cdr: Value) -> Self {
-        Self(Gc::new(LispCons { car, cdr }))
+impl LispCons {
+    pub fn new(car: Object, cdr: Object) -> Self {
+        Self(Gc::new(Cons { car, cdr }))
     }
 
     /// Get the car (first element) of the cons cell
-    pub fn car(&self) -> &Value {
+    pub fn car(&self) -> &Object {
         &self.0.get().car
     }
 
     /// Get the cdr (rest) of the cons cell
-    pub fn cdr(&self) -> &Value {
+    pub fn cdr(&self) -> &Object {
         &self.0.get().cdr
     }
 
     /// Set the car (first element) of the cons cell
-    pub fn set_car(&mut self, value: Value) {
+    pub fn set_car(&mut self, value: Object) {
         self.0.get_mut().car = value;
     }
 
     /// Set the cdr (rest) of the cons cell
-    pub fn set_cdr(&mut self, value: Value) {
+    pub fn set_cdr(&mut self, value: Object) {
         self.0.get_mut().cdr = value;
-    }
-
-    /// Check if this cons cell is a proper list (ends with nil)
-    pub fn is_proper_list(&self) -> bool {
-        match self.cdr().as_ref() {
-            crate::core::value::LispValueRef::Nil => true,
-            crate::core::value::LispValueRef::Cons(next_cons) => next_cons.is_proper_list(),
-            _ => false, // Improper list (dotted pair)
-        }
-    }
-
-    /// Get the length of the list (if it's a proper list)
-    pub fn length(&self) -> Option<usize> {
-        let mut count = 1;
-        let mut current = *self.cdr();
-
-        loop {
-            match current.as_ref() {
-                crate::core::value::LispValueRef::Nil => return Some(count),
-                crate::core::value::LispValueRef::Cons(next_cons) => {
-                    current = *next_cons.cdr();
-                    count += 1;
-                }
-                _ => return None, // Improper list
-            }
-        }
-    }
-
-    /// Convert the cons list to a Vec<Value> (if it's a proper list)
-    pub fn to_vec(&self) -> Option<Vec<Value>> {
-        if !self.is_proper_list() {
-            return None;
-        }
-
-        let mut result = Vec::new();
-        let mut current = Value::from(self.clone());
-
-        loop {
-            match current.as_ref() {
-                crate::core::value::LispValueRef::Cons(cons) => {
-                    result.push(*cons.car());
-                    current = *cons.cdr();
-                }
-                crate::core::value::LispValueRef::Nil => return Some(result),
-                _ => unreachable!(), // We already checked it's a proper list
-            }
-        }
-    }
-
-    /// Create a cons list from a Vec<Value>
-    pub fn from_vec(values: Vec<Value>) -> Option<Self> {
-        if values.is_empty() {
-            return None;
-        }
-
-        let mut result = Cons::new(values[values.len() - 1], nil());
-
-        for value in values.iter().rev().skip(1) {
-            result = Cons::new(*value, result.tag());
-        }
-
-        Some(result)
-    }
-
-    /// Get the nth element of the list (0-indexed)
-    pub fn nth(&self, index: usize) -> Option<Value> {
-        let mut current = Value::from(self.clone());
-        let mut i = 0;
-
-        loop {
-            match current.as_ref() {
-                crate::core::value::LispValueRef::Cons(cons) => {
-                    if i == index {
-                        return Some(*cons.car());
-                    }
-                    current = *cons.cdr();
-                    i += 1;
-                }
-                crate::core::value::LispValueRef::Nil => return None,
-                _ => return None, // Improper list
-            }
-        }
-    }
-
-    /// Append another list to this one (creates a new list)
-    pub fn append(&self, other: Value) -> Self {
-        match self.cdr().as_ref() {
-            crate::core::value::LispValueRef::Nil => Cons::new(*self.car(), other),
-            crate::core::value::LispValueRef::Cons(cdr_cons) => {
-                Cons::new(*self.car(), cdr_cons.append(other).tag())
-            }
-            _ => {
-                // Improper list, just replace the cdr
-                Cons::new(*self.car(), other)
-            }
-        }
-    }
-
-    /// Reverse the list (if it's a proper list)
-    pub fn reverse(&self) -> Option<Self> {
-        let values = self.to_vec()?;
-        let mut reversed = values;
-        reversed.reverse();
-        Self::from_vec(reversed)
     }
 }
 
-impl LispCons {
+impl Cons {
     /// Get the car (first element) of the cons cell
-    pub fn car(&self) -> &Value {
+    pub fn car(&self) -> &Object {
         &self.car
     }
 
     /// Get the cdr (rest) of the cons cell
-    pub fn cdr(&self) -> &Value {
+    pub fn cdr(&self) -> &Object {
         &self.cdr
     }
 
     /// Set the car (first element) of the cons cell
-    pub fn set_car(&mut self, value: Value) {
+    pub fn set_car(&mut self, value: Object) {
         self.car = value;
     }
 
     /// Set the cdr (rest) of the cons cell
-    pub fn set_cdr(&mut self, value: Value) {
+    pub fn set_cdr(&mut self, value: Object) {
         self.cdr = value;
     }
 
     /// Check if this cons cell is a proper list (ends with nil)
     pub fn is_proper_list(&self) -> bool {
         match self.cdr.as_ref() {
-            crate::core::value::LispValueRef::Nil => true,
-            crate::core::value::LispValueRef::Cons(next_cons) => next_cons.is_proper_list(),
+            ObjectRef::Nil => true,
+            ObjectRef::Cons(next_cons) => next_cons.is_proper_list(),
             _ => false, // Improper list (dotted pair)
         }
     }
@@ -180,13 +75,13 @@ impl LispCons {
     /// Get the length of the list (if it's a proper list)
     pub fn length(&self) -> Option<usize> {
         let mut count = 1;
-        let mut current = self.cdr;
+        let mut current = self.cdr.as_ref();
 
         loop {
-            match current.as_ref() {
-                crate::core::value::LispValueRef::Nil => return Some(count),
-                crate::core::value::LispValueRef::Cons(next_cons) => {
-                    current = *next_cons.cdr();
+            match current {
+                ObjectRef::Nil => return Some(count),
+                ObjectRef::Cons(next_cons) => {
+                    current = next_cons.cdr().as_ref();
                     count += 1;
                 }
                 _ => return None, // Improper list
@@ -195,41 +90,41 @@ impl LispCons {
     }
 
     /// Convert the cons list to a Vec<Value> (if it's a proper list)
-    pub fn to_vec(&self) -> Option<Vec<Value>> {
+    pub fn to_vec(&self) -> Option<Vec<Object>> {
         if !self.is_proper_list() {
             return None;
         }
 
         let mut result = Vec::new();
-        let mut current = Value::from(Cons(Gc::new(self.clone())));
+        let mut current = ObjectRef::Cons(self);
 
         loop {
-            match current.as_ref() {
-                crate::core::value::LispValueRef::Cons(cons) => {
-                    result.push(*cons.car());
-                    current = *cons.cdr();
+            match current {
+                ObjectRef::Cons(cons) => {
+                    result.push(cons.car().clone());
+                    current = cons.cdr().as_ref();
                 }
-                crate::core::value::LispValueRef::Nil => return Some(result),
+                ObjectRef::Nil => return Some(result),
                 _ => unreachable!(), // We already checked it's a proper list
             }
         }
     }
 
     /// Create a cons list from a Vec<Value>
-    pub fn from_vec(values: Vec<Value>) -> Option<LispCons> {
+    pub fn from_vec(mut values: Vec<Object>) -> Option<Cons> {
         if values.is_empty() {
             return None;
         }
 
-        let mut result = LispCons {
-            car: values[values.len() - 1],
+        let mut result = Cons {
+            car: values.pop().unwrap(),
             cdr: nil(),
         };
 
-        for value in values.iter().rev().skip(1) {
-            result = LispCons {
-                car: *value,
-                cdr: Cons(Gc::new(result)).tag(),
+        for value in values.into_iter().rev() {
+            result = Cons {
+                car: value,
+                cdr: LispCons(Gc::new(result)).tag(),
             };
         }
 
@@ -237,40 +132,40 @@ impl LispCons {
     }
 
     /// Get the nth element of the list (0-indexed)
-    pub fn nth(&self, index: usize) -> Option<Value> {
-        let mut current = Value::from(Cons(Gc::new(self.clone())));
+    pub fn nth(&self, index: usize) -> Option<&Object> {
+        let mut current = ObjectRef::Cons(self);
         let mut i = 0;
 
         loop {
-            match current.as_ref() {
-                crate::core::value::LispValueRef::Cons(cons) => {
+            match current {
+                ObjectRef::Cons(cons) => {
                     if i == index {
-                        return Some(*cons.car());
+                        return Some(cons.car());
                     }
-                    current = *cons.cdr();
+                    current = cons.cdr().as_ref();
                     i += 1;
                 }
-                crate::core::value::LispValueRef::Nil => return None,
+                ObjectRef::Nil => return None,
                 _ => return None, // Improper list
             }
         }
     }
 
     /// Append another list to this one (creates a new list)
-    pub fn append(&self, other: Value) -> LispCons {
+    pub fn append(&self, other: Object) -> Cons {
         match self.cdr.as_ref() {
-            crate::core::value::LispValueRef::Nil => LispCons {
-                car: self.car,
+            ObjectRef::Nil => Cons {
+                car: self.car.clone(),
                 cdr: other,
             },
-            crate::core::value::LispValueRef::Cons(cdr_cons) => LispCons {
-                car: self.car,
-                cdr: Cons(Gc::new(cdr_cons.append(other))).tag(),
+            ObjectRef::Cons(cdr_cons) => Cons {
+                car: self.car.clone(),
+                cdr: LispCons(Gc::new(cdr_cons.append(other))).tag(),
             },
             _ => {
                 // Improper list, just replace the cdr
-                LispCons {
-                    car: self.car,
+                Cons {
+                    car: self.car.clone(),
                     cdr: other,
                 }
             }
@@ -278,7 +173,7 @@ impl LispCons {
     }
 
     /// Reverse the list (if it's a proper list)
-    pub fn reverse(&self) -> Option<LispCons> {
+    pub fn reverse(&self) -> Option<Cons> {
         let values = self.to_vec()?;
         let mut reversed = values;
         reversed.reverse();

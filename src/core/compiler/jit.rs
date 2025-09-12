@@ -12,9 +12,9 @@ use crate::core::compiler::codegen::Codegen;
 use crate::core::compiler::ir::Expr;
 use crate::core::compiler::BuiltinFnPlugin;
 use crate::core::env::Environment;
-use crate::core::function::Function;
+use crate::core::function::LispFunction;
 use crate::core::runtime::store_symbol_function;
-use crate::core::value::TaggedPtr;
+use crate::core::TaggedPtr;
 use anyhow::Result;
 
 pub struct JIT {
@@ -26,8 +26,10 @@ pub struct JIT {
 impl JIT {
     pub fn new(env: &Environment) -> Self {
         let mut flag_builder = settings::builder();
-        flag_builder.set("use_colocated_libcalls", "false").unwrap();
+        flag_builder.set("use_colocated_libcalls", "true").unwrap();
         flag_builder.set("is_pic", "false").unwrap();
+        flag_builder.set("opt_level", "speed").unwrap();
+        flag_builder.set("enable_verifier", "false").unwrap();
         let isa_builder = cranelift_native::builder().unwrap_or_else(|msg| {
             panic!("host machine is not supported: {}", msg);
         });
@@ -45,8 +47,9 @@ impl JIT {
         let mut builtin_funcs = HashMap::new();
         for func in inventory::iter::<BuiltinFnPlugin> {
             let (name, id) = (func.decl_subr)(&mut module).unwrap();
+            tracing::debug!("loading function {name:?}...");
             if func.lisp_subr {
-                let func = Function::new_subr(id, &name, func.ptr());
+                let func = LispFunction::new_subr(id, &name, func.ptr());
                 store_symbol_function(name.into(), func.tag(), env);
             } else {
                 builtin_funcs.insert(name, id);
@@ -80,6 +83,7 @@ impl JIT {
         self.module.finalize_definitions()?;
         let f = self.module.get_finalized_function(func_id);
         self.module.clear_context(&mut ctx);
+        println!("compile done");
         Ok(f)
     }
 }

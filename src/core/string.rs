@@ -1,45 +1,56 @@
 use std::sync::Arc;
 
-use crate::core::value::{LispType, TaggedPtr};
+use proc_macros::Trace;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LispString(Arc<String>);
+use crate::core::object::{LispType, Object};
+use crate::core::TaggedPtr;
+use crate::gc::Gc;
 
-impl LispString {
-    pub fn new(string: impl Into<Arc<String>>) -> Self {
-        Self(string.into())
+#[repr(align(16))]
+#[derive(Debug, Clone, PartialEq, Eq, Trace)]
+pub struct LispStr(pub Gc<Str>);
+
+#[derive(Debug, Clone, PartialEq, Eq, Trace)]
+pub struct Str(String);
+
+impl std::fmt::Display for Str {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl Str {
+    pub fn new(_0: String) -> Self {
+        Self(_0)
+    }
+}
+
+impl_tagged_ptr_for_gc!(LispStr, LispType::Str, Str);
+
+impl std::fmt::Display for LispStr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.get().fmt(f)
+    }
+}
+
+impl LispStr {
+    pub fn new(string: impl Into<String>) -> Self {
+        Self(Gc::new(Str::new(string.into())))
     }
 
     pub fn from_str(str: impl AsRef<str>) -> Self {
-        Self(Arc::from(str.as_ref().to_string()))
-    }
-
-    pub unsafe fn inc_strong_rc(&self) {
-        Arc::increment_strong_count(&self.0);
+        Self::new(str.as_ref())
     }
 }
 
-impl AsRef<Arc<String>> for LispString {
-    fn as_ref(&self) -> &Arc<String> {
-        &self.0
-    }
-}
-
-impl AsRef<str> for LispString {
+impl AsRef<str> for LispStr {
     fn as_ref(&self) -> &str {
-        &self.0
+        self.0.get().as_ref()
     }
 }
 
-impl TaggedPtr for LispString {
-    const TAG: LispType = LispType::Float;
-    unsafe fn cast(val: u64) -> Self {
-        let string = Arc::from_raw(val as *const String);
-        Self::new(string)
-    }
-
-    // TODO
-    unsafe fn get_untagged_data(self) -> u64 {
-        self.0.as_ptr() as u64
+impl AsRef<str> for Str {
+    fn as_ref(&self) -> &str {
+        self.0.as_str()
     }
 }
