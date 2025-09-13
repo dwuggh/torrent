@@ -137,21 +137,35 @@ macro_rules! impl_tagged_ptr_for_gc {
 
 pub trait Tagged: Sized {
     const TAG: LispType;
-    type Data<'a>: TryFrom<Self>;
+    type Data<'a>: Copy;
+    type DataMut<'a>;
 
-    unsafe fn to_raw(self) -> u64 {
+    /// get the pointer or value for `Self` without tagging
+    unsafe fn to_raw(&self) -> u64 {
         unimplemented!()
     }
     
+    /// restore `Self` for the already untagged `raw`
     unsafe fn from_raw(raw: u64) -> Self {
         unimplemented!()
     }
 
+    unsafe fn to_tagged(&self) -> u64 {
+        self.to_raw() << 8 | Self::TAG as u64
+    }
 
-    fn untag(val: Object) -> Result<Self, TaggedPtrError>;
+    unsafe fn from_tagged(val: u64) -> Self {
+        Self::from_raw(val >> 8)
+    }
 
-    /// Given the type, consume `Self`, return `Value`.
-    /// NOTE this must ensure reference count is aligned
-    fn tag(self) -> Object;
+    unsafe fn cast<'a>(val: u64) -> Self::Data<'a>;
+    unsafe fn cast_mut<'a>(val: u64) -> Self::DataMut<'a>;
 
 }
+
+#[derive(Debug, Clone)]
+struct Obj<T: Tagged>(pub T);
+#[derive(Debug, Clone, Copy)]
+struct ObjRef<'a, T: Tagged>(pub T::Data<'a>);
+#[derive(Debug, Clone)]
+struct ObjMut<'a, T: Tagged>(pub T::DataMut<'a>);
