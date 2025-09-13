@@ -134,3 +134,24 @@ macro_rules! impl_tagged_ptr_for_gc {
         }
     };
 }
+
+pub trait Tagged: Sized {
+    const TAG: LispType;
+    type Data<'a>: TryFrom<Self>;
+
+    unsafe fn to_raw(self) -> u64 {
+        unimplemented!()
+    }
+    
+    unsafe fn from_raw(raw: u64) -> Self {
+        unimplemented!()
+    }
+
+
+    fn untag(val: Object) -> Result<Self, TaggedPtrError>;
+
+    /// Given the type, consume `Self`, return `Value`.
+    /// NOTE this must ensure reference count is aligned
+    fn tag(self) -> Object;
+
+}

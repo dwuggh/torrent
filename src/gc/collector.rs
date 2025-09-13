@@ -57,7 +57,7 @@ impl Default for MutationBuffer {
 static MUTATION_BUFFER: OnceLock<MutationBuffer> = OnceLock::new();
 
 pub(super) fn inc_rc<T: ?Sized>(gc: NonNull<GcInner<T>>) {
-    tracing::debug!("increase rc for {gc:?}");
+    tracing::info!("increase rc for {gc:?}");
     // Disregard any send errors. If the receiver was dropped then the process
     // is exiting and we don't care if we leak.
     let _ = MUTATION_BUFFER
@@ -67,7 +67,7 @@ pub(super) fn inc_rc<T: ?Sized>(gc: NonNull<GcInner<T>>) {
 }
 
 pub(super) fn dec_rc<T: ?Sized>(gc: NonNull<GcInner<T>>) {
-    tracing::debug!("decrease rc for {gc:?}");
+    tracing::info!("decrease rc for {gc:?}");
     // Disregard any send errors. If the receiver was dropped then the process
     // is exiting and we don't care if we leak.
     let _ = MUTATION_BUFFER

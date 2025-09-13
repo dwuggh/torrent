@@ -371,38 +371,38 @@ impl<'a> Codegen<'a> {
             "Translating function call with {} arguments",
             call.args.len()
         );
-        match *call.func {
-            // Expr::Symbol(ident) => {
-            //     match ident.text() {
-            //         "+" => {
-            //             let l = &call.args[0];
-            //             let r = &call.args[1];
-            //             let l = self.translate_expr(l, scope, false)?;
-            //             let r = self.translate_expr(r, scope, false)?;
-            //             let res = self.builder.ins().iadd(l, r);
-            //             return Ok(res);
-            //         }
-            //         "-" => {
-            //             let l = &call.args[0];
-            //             let r = &call.args[1];
-            //             let l = self.translate_expr(l, scope, false)?;
-            //             let r = self.translate_expr(r, scope, false)?;
-            //             let res = self.builder.ins().isub(l, r);
-            //             return Ok(res);
-            //         }
-            //         "<" => {
-            //             let l = &call.args[0];
-            //             let r = &call.args[1];
-            //             let l = self.translate_expr(l, scope, false)?;
-            //             let r = self.translate_expr(r, scope, false)?;
-            //             let res = self.builder.ins().icmp(IntCC::SignedLessThan, l, r);
-            //             return Ok(res);
-            //         }
-            //         _ => ()
-            //     }
-            // }
-            _ => ()
-        };
+        // match *call.func {
+        //     Expr::Symbol(ident) => {
+        //         match ident.text() {
+        //             "+" => {
+        //                 let l = &call.args[0];
+        //                 let r = &call.args[1];
+        //                 let l = self.translate_expr(l, scope, false)?;
+        //                 let r = self.translate_expr(r, scope, false)?;
+        //                 let res = self.builder.ins().iadd(l, r);
+        //                 return Ok(res);
+        //             }
+        //             "-" => {
+        //                 let l = &call.args[0];
+        //                 let r = &call.args[1];
+        //                 let l = self.translate_expr(l, scope, false)?;
+        //                 let r = self.translate_expr(r, scope, false)?;
+        //                 let res = self.builder.ins().isub(l, r);
+        //                 return Ok(res);
+        //             }
+        //             "<" => {
+        //                 let l = &call.args[0];
+        //                 let r = &call.args[1];
+        //                 let l = self.translate_expr(l, scope, false)?;
+        //                 let r = self.translate_expr(r, scope, false)?;
+        //                 let res = self.builder.ins().icmp(IntCC::SignedLessThan, l, r);
+        //                 return Ok(res);
+        //             }
+        //             _ => ()
+        //         }
+        //     }
+        //     _ => ()
+        // };
 
         let func = self.translate_expr(call.func.as_ref(), scope, true)?;
         let args = self.translate_arg_exprs(&call.args, scope)?;
@@ -424,8 +424,17 @@ impl<'a> Codegen<'a> {
         let args_ptr = self.builder.ins().stack_addr(types::I64, slot, 0);
         let args_cnt = self.builder.ins().iconst(types::I64, argc as i64);
 
-        tracing::debug!("Calling apply function");
-        let res = self.call_internal("apply", &[func, args_ptr, args_cnt, self.env])[0];
+        // tracing::debug!("Calling apply function");
+        // let res = self.call_internal("apply", &[func, args_ptr, args_cnt, self.env])[0];
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        let sig_ref = self.builder.import_signature(sig);
+        let func_ptr = self.call_internal("get_func_ptr", &[func, self.env])[0];
+        let inst = self.builder.ins().call_indirect(sig_ref, func_ptr, &[args_ptr, args_cnt, self.env]);
+        let res = self.builder.inst_results(inst)[0];
         tracing::debug!("Apply function returned successfully");
         Ok(res)
     }

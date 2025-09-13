@@ -59,6 +59,9 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let nil = quote! {
         crate::core::object::NIL
     };
+
+    let forget_args = forget_args(&args);
+
     let wrapper_result = match &function.ret_kind {
         RetKind::Unit => construct_return(
             function.fallible,
@@ -213,6 +216,8 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
             if cfg!(debug_assertions) {
                 tracing::trace!("[DEBUG] Internal Rust function {} returned", stringify!(#subr));
             }
+
+            #(#forget_args)*
             #wrapper_result
         }
 
@@ -313,4 +318,36 @@ fn get_arg_conversion(args: &[Arg]) -> Vec<TokenStream> {
 pub(crate) struct Spec {
     #[darling(default)]
     name: Option<String>,
+}
+
+fn forget_args(args: &[Arg]) -> Vec<TokenStream> {
+    args.iter().enumerate().map(|(i, arg)| {
+        let ident = &arg.ident;
+        let forget = quote! {
+            std::mem::forget(#ident);
+        };
+        match &arg.info.kind {
+            ArgKind::Object => {
+                if arg.info.is_ref {
+                    let tmp = format_ident!("__arg_val_{}", i);
+                    quote! {
+                        std::mem::forget(#tmp);
+                    }
+                } else {
+                    quote! {}
+                }
+            }
+            ArgKind::ObjectRef(ident) => {
+                let tmp = format_ident!("__arg_val_{}", i);
+                if arg.info.is_ref {
+                    quote! {
+                        std::mem::forget(#tmp);
+                    }
+                } else {
+                    quote! {}
+                }
+            }
+            _ => quote! {}
+        }
+    }).collect::<Vec<_>>() 
 }

@@ -6,7 +6,15 @@
                   (funcall ff (- x 2))
                   )
                )))
-(funcall ff 30)
+(funcall ff 35)
+;; (defmacro measure-time (&rest body)
+;;   "Measure the time it takes to evaluate BODY."
+;;   `(let ((time (current-time)))
+;;      ,@body
+;;      (message "%.06f" (float-time (time-since time)))))
+;; (measure-time
+;; (funcall ff 35)
+;;  )
 
 ;; (defun fib-helper (k a b)
 ;;   (if (= k 0)

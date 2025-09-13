@@ -52,3 +52,29 @@ struct Lisp_Symbol
   } u;
 };
 #+END_SRC
+
+* performance
+** fibonacci
+#+BEGIN_SRC emacs-lisp
+  (defvar ff (lambda (x)
+               (if (< x 2)
+                   x
+                 (+ (funcall ff (- x 1))
+                    (funcall ff (- x 2))
+                    )
+                 )))
+  (funcall ff 35)
+  
+  (defmacro measure-time (&rest body)
+    "Measure the time it takes to evaluate BODY."
+    `(let ((time (current-time)))
+       ,@body
+       (message "%.06f" (float-time (time-since time)))))
+  (measure-time
+  (funcall ff 35)
+   )
+#+END_SRC
+- emacs result: ~2.5s(2.3s-2.7s)
+- cranelift result: 3.37s
+- cranelift all-native result: 1.39s
+  - this means use ir instructions for +, - and <. i.e. type specialization

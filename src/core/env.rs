@@ -1,60 +1,68 @@
-use dashmap::mapref::one::RefMut;
+use rustc_hash::FxBuildHasher;
+use scc::hash_index::{Entry, OccupiedEntry};
 
 use crate::core::{
-    error::{RuntimeError, RuntimeResult},
-    symbol::{Symbol, SymbolCell, SymbolMap},
-    object::{nil, LispObject, ObjectRef, Object},
-    TaggedPtr,
+    error::{RuntimeError, RuntimeResult}, ident::Ident, object::{nil, LispObject, Object, ObjectRef}, symbol::{Symbol, SymbolCell, SymbolMap}, TaggedPtr
 };
-
-// pub(crate) static INTERNED_SYMBOLS: OnceLock<std::sync::Mutex<SymbolMap>>;
 
 #[derive(Debug, Default)]
 pub struct Environment {
     /// the obarray
     // TODO should this be GC'd? or make SymbolCell GC
     pub symbol_map: SymbolMap,
+    pub stack_map: StackMap,
 }
 
 impl Environment {
-    // returning value means increase its ref count.
-    // I think this is the desired behaviour.
-    // TODO An alternative is to only increase ref count when setting a value to another slot, seems more idiomatic, but it is not allowed in rust. so we have to inc ref here, and dec ref when it is dropped. If we still want to reduce this overhead, we have to return a i64.
-    pub fn load_symbol(&self, symbol: Symbol, load_function_cell: bool) -> RuntimeResult<Object> {
-        let Some(mut data_ref) = self.get_symbol_cell(symbol) else {
-            return Ok(nil());
-        };
-        let data = data_ref.value_mut().data();
-        if load_function_cell {
-            let ObjectRef::Cons(cons) = data.func.as_ref() else {
-                return Err(RuntimeError::wrong_type("cons", data.func.get_tag()));
-            };
-            let ObjectRef::Symbol(marker) = cons.car().as_ref() else {
-                return Err(RuntimeError::wrong_type("symbol", cons.car().get_tag()));
-            };
-            match marker.name() {
-                "function" => Ok(cons.cdr().clone()),
-                _ => return Err(RuntimeError::internal_error("function cell corrupted")),
+    pub fn load_symbol_with<F, T>(
+        &self,
+        symbol: Symbol,
+        load_function_cell: bool,
+        job: F,
+    ) -> RuntimeResult<T>
+    where
+        F: FnOnce(&Object) -> RuntimeResult<T>,
+    {
+        self.symbol_map.get_symbol_cell_with(symbol, |cell| {
+            let data = cell.data();
+            if load_function_cell {
+                let ObjectRef::Cons(cons) = data.func.as_ref() else {
+                    return Err(RuntimeError::wrong_type("cons", data.func.get_tag()));
+                };
+                let ObjectRef::Symbol(marker) = cons.car().as_ref() else {
+                    return Err(RuntimeError::wrong_type("symbol", cons.car().get_tag()));
+                };
+
+                let val = cons.cdr();
+                return job(val);
+                // match marker.name() {
+                //     "function" => {
+                //         let val = cons.cdr();
+                //         return job(val);
+                //     }
+                //     _ => return Err(RuntimeError::internal_error("function cell corrupted")),
+                // }
+            } else {
+                tracing::debug!("loaded value: {:?}", data.value);
+                // let value = Object(data.value.0);
+                return job(&data.value);
             }
-        } else {
-            tracing::debug!("loaded value: {:?}", data.value);
-            return Ok(data.value.clone());
-        }
+        })
     }
 
-    pub fn get_symbol_cell(&self, symbol: Symbol) -> Option<RefMut<'_, Symbol, SymbolCell>> {
+    pub fn get_symbol_cell(&self, symbol: Symbol) -> Option<scc::hash_index::OccupiedEntry<'_, Symbol, SymbolCell, FxBuildHasher>> {
         let map = self.symbol_map.map();
-        map.get_mut(&symbol)
+        map.get_sync(&symbol)
     }
 
-    pub fn get_or_init_symbol(&self, symbol: Symbol) -> RefMut<'_, Symbol, SymbolCell> {
+    pub fn get_or_init_symbol(&self, symbol: Symbol) -> OccupiedEntry<'_, Symbol, SymbolCell, FxBuildHasher> {
         let map = self.symbol_map.map();
-        match map.entry(symbol) {
-            dashmap::Entry::Occupied(occupied_entry) => occupied_entry.into_ref(),
-            dashmap::Entry::Vacant(vacant_entry) => {
+        match map.entry_sync(symbol) {
+            Entry::Occupied(occupied_entry) => occupied_entry,
+            Entry::Vacant(vacant_entry) => {
                 let text = symbol.name();
                 let special = text.starts_with(':');
-                vacant_entry.insert(SymbolCell::new(symbol, special))
+                vacant_entry.insert_entry(SymbolCell::new(symbol, special))
             }
         }
     }
@@ -63,6 +71,57 @@ impl Environment {
         let _nil = self.get_or_init_symbol(Symbol::from("nil"));
         let t = Symbol::from("nil");
         let mut t_cell = self.get_or_init_symbol(t);
-        t_cell.value_mut().data().value = t.tag();
+        t_cell.data().value = t.tag();
+    }
+}
+
+use scc::HashMap;
+/// a pesudo stack map that tracks objects.
+#[derive(Debug)]
+pub struct StackMap {
+    roots: HashMap<Object, u64, rustc_hash::FxBuildHasher>
+}
+
+impl StackMap {
+    pub fn new() -> Self {
+        Self {
+            roots: HashMap::with_capacity_and_hasher(128, FxBuildHasher::default()),
+        }
+    }
+
+    pub fn push(&self, obj: &Object) {
+        if obj.is_primitive() {
+            return;
+        }
+        if let Some(mut entry) = self.roots.get_sync(obj) {
+            let count = entry.get_mut();
+            *count = *count + 1;
+        } else {
+            self.roots.insert_sync(obj.clone(), 1).unwrap();
+        }
+    }
+
+    pub fn pop(&self, obj: &Object) {
+        if obj.is_primitive() {
+            return;
+        }
+        let mut need_remove = false;
+        if let Some(mut entry) = self.roots.get_sync(obj) {
+            let count = entry.get_mut();
+            if *count > 1 {
+                *count = *count - 1;
+            } else {
+                need_remove = true;
+            }
+        }
+        if need_remove {
+            self.roots.remove_sync(obj);
+        }
+    }
+}
+
+impl Default for StackMap {
+    fn default() -> Self {
+        Self::new()
     }
 }

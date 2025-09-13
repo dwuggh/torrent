@@ -298,7 +298,6 @@ pub fn construct_objectref(is_mut: bool, cnt: usize, ident: &Ident, ty: &Ident) 
         quote! {}
     };
     let object = quote! { crate::core::object::Object };
-    let method_name = format_ident!("as_{}", if is_mut { "mut" } else { "ref" });
     let tmp = format_ident!("__arg_val_{}", cnt);
     quote! {
         let #tmp = #object(#ident as u64);

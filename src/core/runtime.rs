@@ -26,11 +26,11 @@ use crate::runtime_error;
 #[defun(name = "-")]
 fn minus(left: Object, right: Object) -> Result<Object> {
     let ObjectRef::Int(l) = left.as_ref() else {
-            runtime_bail!(WrongType, expected: "integer", actual: left.get_tag());
-        };
+        runtime_bail!(WrongType, expected: "integer", actual: left.get_tag());
+    };
     let ObjectRef::Int(r) = right.as_ref() else {
-            runtime_bail!(WrongType, expected: "integer", actual: right.get_tag());
-        };
+        runtime_bail!(WrongType, expected: "integer", actual: right.get_tag());
+    };
     let result = l - r;
     Ok(LispInteger(result).tag())
 }
@@ -69,22 +69,17 @@ fn apply(func: &Function, args: &[Object], env: &Environment) -> Result<Object> 
     func.run(args, env)
 }
 
-// TODO we produce a new value, the return value, with ref count 1.
-// it will not be dropped by macro-generated FFI, nor as another funcall's args.
-// determine is this correct?
-// if so, we need to also drop args. maybe do not use reference here.
-// its fine because although the returned value is not drop in FFI,
-// but it will be another funcall's argument, or
 #[defun]
 fn funcall(func: &Object, args: &[Object], env: &Environment) -> Result<Object> {
     tracing::debug!("calling funcall: {func:?} {:?}", args);
     match func.as_ref() {
         ObjectRef::Symbol(sym) => {
-            let val = env.load_symbol(sym, true)?;
-            let ObjectRef::Function(func) = val.as_ref() else {
-                runtime_bail!(WrongType, expected: "function", actual: val.get_tag());
-            };
-            func.run(args, env)
+            env.load_symbol_with(sym, true, |obj| {
+                let ObjectRef::Function(func) = obj.as_ref() else {
+                    runtime_bail!(WrongType, expected: "function", actual: obj.get_tag());
+                };
+                func.run(args, env)
+            })
             // val is dropped here. its refcount increased in load_symbol, so its fine.
         }
         ObjectRef::Function(func) => func.run(args, env),
@@ -107,8 +102,8 @@ fn defvar(name: i64, len: usize, value: Object, env: &Environment) -> Result<Sym
 
     let symbol = name.into();
     tracing::debug!("calling defvar: symbol {symbol:?}, value: {value:?}");
-    let mut cell = env.get_or_init_symbol(symbol);
-    cell.value_mut().data().value = value;
+    let cell = env.get_or_init_symbol(symbol);
+    cell.get().data().value = value;
     Ok(symbol)
 }
 
@@ -135,40 +130,38 @@ fn load_captured(ident: Ident, func: &mut Function) -> Result<Object> {
 
 #[internal_fn]
 pub fn store_symbol_function(symbol: Symbol, func: Object, env: &Environment) {
-    let mut data_ref = env.get_or_init_symbol(symbol);
+    let data_ref = env.get_or_init_symbol(symbol);
     let symbol = Symbol::new("function".into()).tag();
     let cell = LispCons::new(symbol, func);
-    data_ref.value_mut().data().func = cell.tag();
+    data_ref.get().data().func = cell.tag();
 }
 
 #[internal_fn]
-fn load_symbol_value(
-    symbol: Symbol,
-    load_function_cell: u64,
-    env: &Environment,
-) -> Result<Object> {
+fn load_symbol_value(symbol: Symbol, load_function_cell: u64, env: &Environment) -> Result<i64> {
     tracing::debug!(
         "loading symbol value: {} {load_function_cell}",
         symbol.name()
     );
-    env.load_symbol(symbol, load_function_cell == 1)
+    env.load_symbol_with(symbol, load_function_cell == 1, |obj| Ok(obj.0 as i64))
 }
 
 #[internal_fn]
-fn get_func_ptr(func: &Object, env: &Environment) -> Result<FuncPtr> {
-    match func.as_ref() {
+fn get_func_ptr(func: &Object, env: &Environment) -> Result<i64> {
+    let func = match func.as_ref() {
         ObjectRef::Symbol(symbol) => {
-            let func = env.load_symbol(symbol, true)?;
-            let ObjectRef::Function(func) = func.as_ref() else {
-                runtime_bail!(WrongType, expected: "function", actual: func.get_tag());
-            };
-            // TODO func will be dropped here
-            // to prevent that, we should add the caller as argument, and add the function to the caller
-            get_func_ptr_from_function(func, env)
+            env.load_symbol_with(symbol, true, |func| {
+                let ObjectRef::Function(func) = func.as_ref() else {
+                    runtime_bail!(WrongType, expected: "function", actual: func.get_tag());
+                };
+                // TODO func will be dropped here
+                // to prevent that, we should add the caller as argument, and add the function to the caller
+                get_func_ptr_from_function(func, env)
+            })
         }
         ObjectRef::Function(func) => get_func_ptr_from_function(func, env),
         _ => runtime_bail!(WrongType, expected: "function", actual: func.get_tag()),
-    }
+    }?;
+    Ok(func as i64)
 }
 
 fn get_func_ptr_from_function(func: &Function, env: &Environment) -> Result<FuncPtr> {

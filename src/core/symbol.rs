@@ -1,12 +1,12 @@
 use std::marker::PhantomData;
-use std::sync::LazyLock;
 
 // include!(concat!(env!("OUT_DIR"), "/sym.rs"));
 // use sym::BUILTIN_SYMBOLS;
 
-use dashmap::DashMap;
 use proc_macros::Trace;
+use scc::HashIndex;
 
+use crate::core::error::{RuntimeError, RuntimeResult};
 use crate::core::ident::Ident;
 use crate::core::object::nil;
 use crate::gc::Trace;
@@ -14,39 +14,52 @@ use crate::{core::object::Object, core::TaggedPtr, gc::Gc};
 
 use super::object::LispType;
 
+type Map = HashIndex<Symbol, SymbolCell, rustc_hash::FxBuildHasher>;
+
 #[derive(Debug, Default)]
 pub struct SymbolMap {
-    map: DashMap<Symbol, SymbolCell>,
+    map: Map,
 }
 
 unsafe impl Trace for SymbolMap {
     unsafe fn trace(&self, visitor: crate::gc::Visitor) {
-        for val in self.map.iter() {
-            val.trace(visitor);
-        }
+        self.map.iter_sync(|_, cell| {
+            cell.trace(visitor);
+            true
+        });
     }
 
     unsafe fn finalize(&mut self) {
-        for mut val in self.map.iter_mut() {
-            val.finalize();
-        }
+        self.map.clear_sync();
     }
 }
 
 impl SymbolMap {
     pub fn with_capacity(size: usize) -> Self {
-        let map = DashMap::with_capacity(size);
+        let map = Map::with_capacity_and_hasher(size, rustc_hash::FxBuildHasher::default());
         Self { map }
     }
 
-    pub fn map(&self) -> &DashMap<Symbol, SymbolCell> {
+    pub fn map(&self) -> &Map {
         &self.map
+    }
+
+    pub fn get_symbol_cell_with<F, T>(&self, symbol: Symbol, job: F) -> RuntimeResult<T>
+    where
+        F: FnOnce(&SymbolCell) -> RuntimeResult<T>,
+    {
+        self.map
+            .peek_with(&symbol, |_k, v| job(v))
+            .ok_or(RuntimeError::unbound_symbol(symbol))
+            .flatten()
     }
 
     pub fn intern(&self, symbol: Symbol, special: bool) -> Symbol {
         // Ensure the symbol cell exists in the map
-        if !self.map.contains_key(&symbol) {
-            self.map.insert(symbol, SymbolCell::new(symbol, special));
+        if !self.map.contains(&symbol) {
+            self.map
+                .insert_sync(symbol, SymbolCell::new(symbol, special))
+                .unwrap();
         }
         symbol
     }
@@ -166,7 +179,6 @@ impl TaggedPtr for Symbol {
     }
 
     fn untag(val: Object) -> Result<Self, super::tagged_ptr::TaggedPtrError> {
-
         if super::tagged_ptr::get_tag(val.0 as i64) == Self::TAG {
             let sym = (&val).try_into().unwrap();
             std::mem::forget(val);
@@ -174,7 +186,6 @@ impl TaggedPtr for Symbol {
         } else {
             Err(super::tagged_ptr::TaggedPtrError::TypeMisMatch)
         }
-        
     }
 }
 

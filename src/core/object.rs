@@ -1,5 +1,3 @@
-use std::{marker::PhantomData, mem::ManuallyDrop, ops::Deref};
-
 use proc_macros::Trace;
 
 use crate::{
@@ -41,6 +39,25 @@ pub fn tru() -> Object {
     Object(TRUE as u64)
 }
 
+impl Object {
+    pub fn inc_rc(&self) {
+        let val = self.clone();
+        std::mem::forget(val);
+    }
+
+    pub fn is_primitive(&self) -> bool {
+        match self.get_tag() {
+            LispType::Int
+            | LispType::Nil
+            | LispType::True
+            | LispType::Float
+            | LispType::Character
+            | LispType::Symbol => true,
+            _ => false,
+        }
+    }
+}
+
 unsafe impl Trace for Object {
     unsafe fn trace(&self, visitor: crate::gc::Visitor) {
         match self.as_ref() {
@@ -64,7 +81,9 @@ impl Clone for Object {
     fn clone(&self) -> Self {
         let val = Self(self.0);
         let val = val.untag();
-        val.clone().tag()
+        let result = val.clone().tag();
+        std::mem::forget(val);
+        result
     }
 }
 
@@ -76,6 +95,7 @@ impl From<LispCons> for Object {
 
 impl Drop for Object {
     fn drop(&mut self) {
+        tracing::info!("calling drop: {self:?}");
         let new_this = Object(self.0);
         new_this.untag();
     }
