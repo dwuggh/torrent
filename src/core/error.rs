@@ -2,8 +2,8 @@ use thiserror::Error;
 
 use crate::core::{
     ident::Ident,
-    symbol::Symbol,
     object::{LispType, Object},
+    symbol::Symbol,
 };
 
 /// Runtime errors that can occur during Lisp execution

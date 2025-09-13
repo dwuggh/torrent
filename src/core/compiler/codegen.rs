@@ -13,10 +13,9 @@ use crate::core::compiler::scope::CompileScope;
 use crate::core::compiler::scope::FrameScope;
 use crate::core::compiler::scope::Val;
 use crate::core::function::LispFunction;
-use crate::core::string::LispStr;
-use crate::core::symbol::Symbol;
 use crate::core::object::NIL;
 use crate::core::object::TRUE;
+use crate::core::symbol::Symbol;
 use crate::core::Tagged;
 
 pub struct Codegen<'a> {
@@ -302,7 +301,9 @@ impl<'a> Codegen<'a> {
     }
 
     fn translate_lispobj<T: Tagged>(&mut self, obj: &T) -> Value {
-        self.builder.ins().iconst(types::I64, unsafe { obj.to_raw() } as i64)
+        self.builder
+            .ins()
+            .iconst(types::I64, unsafe { obj.to_raw() } as i64)
     }
 
     fn translate_arg_exprs<'s>(
@@ -338,18 +339,10 @@ impl<'a> Codegen<'a> {
 
     fn translate_literal(&mut self, literal: &Literal) -> CodegenResult<Value> {
         match literal {
-            Literal::Number(Number::Integer(n)) => {
-                Ok(self.translate_lispobj(n))
-            }
-            Literal::Number(Number::Real(f)) => {
-                Ok(self.translate_lispobj(f))
-            }
-            Literal::Character(c) => {
-                Ok(self.translate_lispobj(c))
-            }
-            Literal::String(s) => {
-                Ok(self.translate_lispobj(s))
-            }
+            Literal::Number(Number::Integer(n)) => Ok(self.translate_lispobj(n)),
+            Literal::Number(Number::Real(f)) => Ok(self.translate_lispobj(f)),
+            Literal::Character(c) => Ok(self.translate_lispobj(c)),
+            Literal::String(s) => Ok(self.translate_lispobj(s)),
         }
     }
 
@@ -433,7 +426,10 @@ impl<'a> Codegen<'a> {
         sig.returns.push(AbiParam::new(types::I64));
         let sig_ref = self.builder.import_signature(sig);
         let func_ptr = self.call_internal("get_func_ptr", &[func, self.env])[0];
-        let inst = self.builder.ins().call_indirect(sig_ref, func_ptr, &[args_ptr, args_cnt, self.env]);
+        let inst =
+            self.builder
+                .ins()
+                .call_indirect(sig_ref, func_ptr, &[args_ptr, args_cnt, self.env]);
         let res = self.builder.inst_results(inst)[0];
         tracing::debug!("Apply function returned successfully");
         Ok(res)

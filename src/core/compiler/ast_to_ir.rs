@@ -1,6 +1,11 @@
 use crate::{
     ast::Node,
-    core::{compiler::ir::*, ident::Ident, number::{LispCharacter, LispFloat, LispInteger}, string::LispStr},
+    core::{
+        compiler::ir::*,
+        ident::Ident,
+        number::{LispCharacter, LispFloat, LispInteger},
+        string::LispStr,
+    },
 };
 use std::sync::Arc;
 use thiserror::Error;
@@ -49,7 +54,9 @@ impl AstToIrConverter {
         match node {
             Node::Ident(ident) => Ok(Expr::Symbol(ident)),
 
-            Node::Integer(n) => Ok(Expr::Literal(Literal::Number(Number::Integer(LispInteger(n))))),
+            Node::Integer(n) => Ok(Expr::Literal(Literal::Number(Number::Integer(
+                LispInteger(n),
+            )))),
 
             Node::Float(f) => Ok(Expr::Literal(Literal::Number(Number::Real(LispFloat(f))))),
 
@@ -826,12 +833,16 @@ impl AstToIrConverter {
     ) -> Result<QuotedData, ConversionError> {
         match node {
             Node::Ident(ident) => Ok(QuotedData::Symbol(*ident)),
-            Node::Integer(n) => Ok(QuotedData::Literal(Literal::Number(Number::Integer(LispInteger(*n))))),
-            Node::Float(f) => Ok(QuotedData::Literal(Literal::Number(Number::Real(LispFloat(*f))))),
-            Node::Char(c) => Ok(QuotedData::Literal(Literal::Character(LispCharacter::new(*c)))),
-            Node::Str(s) => Ok(QuotedData::Literal(Literal::String(LispStr::from_str(
-                s,
+            Node::Integer(n) => Ok(QuotedData::Literal(Literal::Number(Number::Integer(
+                LispInteger(*n),
             )))),
+            Node::Float(f) => Ok(QuotedData::Literal(Literal::Number(Number::Real(
+                LispFloat(*f),
+            )))),
+            Node::Char(c) => Ok(QuotedData::Literal(Literal::Character(LispCharacter::new(
+                *c,
+            )))),
+            Node::Str(s) => Ok(QuotedData::Literal(Literal::String(LispStr::from_str(s)))),
             Node::Nil => Ok(QuotedData::Symbol(Ident::from("nil"))),
 
             Node::Vector(nodes) => {

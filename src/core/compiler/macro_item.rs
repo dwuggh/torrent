@@ -1,10 +1,4 @@
-use crate::{
-    core::{
-        compiler::ir::{Expr, SpecialForm},
-        object::LispObject,
-    },
-    gc::Gc,
-};
+use crate::gc::Gc;
 
 #[derive(Clone, Debug)]
 pub struct MacroItem(Gc<MacroItemType>);

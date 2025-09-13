@@ -2,7 +2,10 @@ use rustc_hash::FxBuildHasher;
 use scc::hash_index::{Entry, OccupiedEntry};
 
 use crate::core::{
-    error::{RuntimeError, RuntimeResult}, object::{Object, ObjectRef}, symbol::{Symbol, SymbolCell, SymbolMap}, tagged_ptr::TaggedObj 
+    error::{RuntimeError, RuntimeResult},
+    object::{Object, ObjectRef},
+    symbol::{Symbol, SymbolCell, SymbolMap},
+    tagged_ptr::TaggedObj,
 };
 
 #[derive(Debug, Default)]
@@ -50,12 +53,18 @@ impl Environment {
         })
     }
 
-    pub fn get_symbol_cell(&self, symbol: Symbol) -> Option<scc::hash_index::OccupiedEntry<'_, Symbol, SymbolCell, FxBuildHasher>> {
+    pub fn get_symbol_cell(
+        &self,
+        symbol: Symbol,
+    ) -> Option<scc::hash_index::OccupiedEntry<'_, Symbol, SymbolCell, FxBuildHasher>> {
         let map = self.symbol_map.map();
         map.get_sync(&symbol)
     }
 
-    pub fn get_or_init_symbol(&self, symbol: Symbol) -> OccupiedEntry<'_, Symbol, SymbolCell, FxBuildHasher> {
+    pub fn get_or_init_symbol(
+        &self,
+        symbol: Symbol,
+    ) -> OccupiedEntry<'_, Symbol, SymbolCell, FxBuildHasher> {
         let map = self.symbol_map.map();
         match map.entry_sync(symbol) {
             Entry::Occupied(occupied_entry) => occupied_entry,
@@ -70,7 +79,7 @@ impl Environment {
     pub fn init_nil_t(&self) {
         let _nil = self.get_or_init_symbol(Symbol::from("nil"));
         let t = Symbol::from("nil");
-        let mut t_cell = self.get_or_init_symbol(t);
+        let t_cell = self.get_or_init_symbol(t);
         t_cell.data().value = t.tag();
     }
 }
@@ -79,7 +88,7 @@ use scc::HashMap;
 /// a pesudo stack map that tracks objects.
 #[derive(Debug)]
 pub struct StackMap {
-    roots: HashMap<Object, u64, rustc_hash::FxBuildHasher>
+    roots: HashMap<Object, u64, rustc_hash::FxBuildHasher>,
 }
 
 impl StackMap {

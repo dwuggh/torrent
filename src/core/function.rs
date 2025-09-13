@@ -131,7 +131,6 @@ impl LispFunction {
 }
 
 impl Function {
-    
     pub fn run(&self, args: &[Object], env: &Environment) -> RuntimeResult<Object> {
         let func = self
             .func_ptr
@@ -144,5 +143,4 @@ impl Function {
     pub fn get_func_type_mut(&mut self) -> &mut FunctionType {
         &mut self.func_type
     }
-
 }

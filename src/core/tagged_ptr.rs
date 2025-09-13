@@ -1,10 +1,7 @@
 use std::mem::ManuallyDrop;
 use thiserror::Error;
 
-use crate::{
-    core::object::{LispType, Object},
-    gc::{Gc, GcInner},
-};
+use crate::core::object::{LispType, Object};
 
 pub fn get_tag(val: i64) -> LispType {
     unsafe { std::mem::transmute(val as u8) }
@@ -58,7 +55,6 @@ pub trait Tagged: Sized {
     unsafe fn from_raw(raw: u64) -> Self {
         unimplemented!()
     }
-
 
     unsafe fn cast<'a>(val: u64) -> Self::Data<'a>;
     unsafe fn cast_mut<'a>(val: u64) -> Self::DataMut<'a>;
@@ -138,7 +134,6 @@ macro_rules! impl_tagged_for_prim {
         }
     };
 }
-
 
 impl Object {
     pub fn untagged_as_ref<T: Tagged>(&self) -> Option<T::Data<'_>> {

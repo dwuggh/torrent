@@ -1,4 +1,4 @@
-use lasso::{Key, Spur, ThreadedRodeo};
+use lasso::{Key, ThreadedRodeo};
 use std::sync::LazyLock;
 
 use crate::core::symbol::Symbol;

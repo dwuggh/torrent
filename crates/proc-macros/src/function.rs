@@ -220,8 +220,8 @@ fn is_object_name(ident: &str) -> bool {
 // TODO move types to another crate so we can reuse function there
 fn is_object_ref_name(ident: &str) -> bool {
     match ident {
-        "String" | "Cons" | "Function" | "HashTable" | "Integer" | "Float"
-        | "Character" | "Vector" => true,
+        "String" | "Cons" | "Function" | "HashTable" | "Integer" | "Float" | "Character"
+        | "Vector" => true,
         _ => false,
     }
 }

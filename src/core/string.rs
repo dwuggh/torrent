@@ -1,8 +1,7 @@
-use std::sync::Arc;
 
 use proc_macros::Trace;
 
-use crate::core::object::{LispType, Object};
+use crate::core::object::LispType;
 use crate::core::Tagged;
 use crate::gc::Gc;
 

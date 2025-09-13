@@ -149,24 +149,23 @@ impl TryFrom<*mut Symbol> for Symbol {
 }
 
 impl Tagged for Symbol {
-    const TAG:LispType = LispType::Symbol;
+    const TAG: LispType = LispType::Symbol;
     type Data<'a> = LispSymbol;
     type DataMut<'a> = LispSymbol;
     unsafe fn to_raw(&self) -> u64 {
         shifting_tag(self.name.0, Self::TAG)
     }
-    unsafe fn from_raw(raw:u64) -> Self {
+    unsafe fn from_raw(raw: u64) -> Self {
         let val = shifting_untag(raw);
         std::mem::transmute(val)
     }
-    unsafe fn cast<'a>(val:u64) -> Self::Data<'a>{
+    unsafe fn cast<'a>(val: u64) -> Self::Data<'a> {
         Self::from_raw(val)
     }
-    unsafe fn cast_mut<'a>(val:u64) -> Self::DataMut<'a>{
+    unsafe fn cast_mut<'a>(val: u64) -> Self::DataMut<'a> {
         Self::from_raw(val)
     }
-
-    }
+}
 
 impl AsRef<Symbol> for Symbol {
     fn as_ref(&self) -> &Symbol {

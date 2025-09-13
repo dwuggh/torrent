@@ -1,4 +1,3 @@
-use std::convert::Infallible;
 
 use crate::core::{
     object::LispType,
@@ -54,7 +53,7 @@ impl Tagged for LispCharacter {
     type Data<'a> = Character;
     type DataMut<'a> = Character;
     unsafe fn to_raw(&self) -> u64 {
-        shifting_tag(self.0.0, Self::TAG)
+        shifting_tag(self.0 .0, Self::TAG)
     }
     unsafe fn from_raw(raw: u64) -> Self {
         std::mem::transmute(shifting_untag(raw))

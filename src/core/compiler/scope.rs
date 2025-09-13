@@ -1,12 +1,10 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::core::function::LispFunction;
 use crate::core::ident::Ident;
-use crate::core::object::Object;
 use cranelift::prelude::*;
 
-use crate::core::{env::Environment, symbol::Symbol};
 
 #[derive(Clone)]
 pub struct FrameScope<'a> {

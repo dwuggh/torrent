@@ -5,13 +5,13 @@ pub mod compiler;
 pub mod cons;
 pub mod env;
 pub mod function;
-pub mod ident;
 pub mod hashtable;
+pub mod ident;
 pub mod number;
+pub mod object;
 pub mod runtime;
 pub mod string;
 pub mod symbol;
-pub mod object;
 pub mod vector;
 
 pub use tagged_ptr::Tagged;

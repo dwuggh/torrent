@@ -1,7 +1,15 @@
-use super::{env::Environment, function::LispFunction};
+use super::env::Environment;
 use crate::{
     core::{
-        cons::LispCons, error::{RuntimeError, RuntimeResult}, function::{FuncPtr, Function, FunctionType}, ident::Ident, number::LispInteger, object::{nil, tru, LispObject, Object, ObjectRef}, symbol::Symbol, tagged_ptr::TaggedObj, Tagged
+        cons::LispCons,
+        error::{RuntimeError, RuntimeResult},
+        function::{FuncPtr, Function, FunctionType},
+        ident::Ident,
+        number::LispInteger,
+        object::{nil, tru, Object, ObjectRef},
+        symbol::Symbol,
+        tagged_ptr::TaggedObj,
+        Tagged,
     },
     runtime_bail,
 };

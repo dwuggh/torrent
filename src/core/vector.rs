@@ -2,8 +2,8 @@ use proc_macros::Trace;
 
 use crate::{
     core::{
-        tagged_ptr::Tagged,
         object::{LispType, Object},
+        tagged_ptr::Tagged,
     },
     gc::Gc,
 };

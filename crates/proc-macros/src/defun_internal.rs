@@ -2,11 +2,13 @@
 use darling::FromMeta;
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
-use syn::{Error, Type};
 
 use crate::{
     defun::inventory_submit,
-    function::{construct_objectref, construct_return, construct_return_nodrop, Arg, ArgKind, Function, RetKind},
+    function::{
+        Arg, ArgKind, Function, RetKind, construct_objectref, construct_return,
+        construct_return_nodrop,
+    },
 };
 
 pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
@@ -285,9 +287,7 @@ fn get_arg_conversion(args: &[Arg]) -> Vec<TokenStream> {
                     }
                 }
             }
-            ArgKind::ObjectRef(ty) => {
-                construct_objectref(arg.info.is_mut, i, ident, ty)
-            }
+            ArgKind::ObjectRef(ty) => construct_objectref(arg.info.is_mut, i, ident, ty),
             ArgKind::Primitive(ty) => {
                 if ty.to_string() == "Symbol" {
                     let tmp = format_ident!("__arg_val_{}", i);
@@ -321,33 +321,36 @@ pub(crate) struct Spec {
 }
 
 fn forget_args(args: &[Arg]) -> Vec<TokenStream> {
-    args.iter().enumerate().map(|(i, arg)| {
-        let ident = &arg.ident;
-        let forget = quote! {
-            std::mem::forget(#ident);
-        };
-        match &arg.info.kind {
-            ArgKind::Object => {
-                if arg.info.is_ref {
+    args.iter()
+        .enumerate()
+        .map(|(i, arg)| {
+            let ident = &arg.ident;
+            let forget = quote! {
+                std::mem::forget(#ident);
+            };
+            match &arg.info.kind {
+                ArgKind::Object => {
+                    if arg.info.is_ref {
+                        let tmp = format_ident!("__arg_val_{}", i);
+                        quote! {
+                            std::mem::forget(#tmp);
+                        }
+                    } else {
+                        quote! {}
+                    }
+                }
+                ArgKind::ObjectRef(ident) => {
                     let tmp = format_ident!("__arg_val_{}", i);
-                    quote! {
-                        std::mem::forget(#tmp);
+                    if arg.info.is_ref {
+                        quote! {
+                            std::mem::forget(#tmp);
+                        }
+                    } else {
+                        quote! {}
                     }
-                } else {
-                    quote! {}
                 }
+                _ => quote! {},
             }
-            ArgKind::ObjectRef(ident) => {
-                let tmp = format_ident!("__arg_val_{}", i);
-                if arg.info.is_ref {
-                    quote! {
-                        std::mem::forget(#tmp);
-                    }
-                } else {
-                    quote! {}
-                }
-            }
-            _ => quote! {}
-        }
-    }).collect::<Vec<_>>() 
+        })
+        .collect::<Vec<_>>()
 }

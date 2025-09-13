@@ -1,12 +1,11 @@
 #![allow(clippy::manual_unwrap_or_default)]
 use darling::FromMeta;
-use proc_macro2::{Ident, TokenStream};
+use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Error, Type};
 
 use crate::function::{
-    construct_objectref, construct_return, construct_return_nodrop, Arg, ArgInfo, ArgKind,
-    Function, RetKind,
+    Arg, ArgKind, Function, RetKind, construct_objectref, construct_return,
+    construct_return_nodrop,
 };
 
 pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
@@ -278,8 +277,7 @@ fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
                         std::mem::forget(#tmp);
                     }
                 } else {
-                    quote! {
-                    }
+                    quote! {}
                 };
                 finish_args.push(post);
                 init_args.push(init);

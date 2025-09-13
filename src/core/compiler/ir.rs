@@ -1,4 +1,8 @@
-use crate::core::{ident::Ident, number::{LispCharacter, LispFloat, LispInteger}, string::LispStr};
+use crate::core::{
+    ident::Ident,
+    number::{LispCharacter, LispFloat, LispInteger},
+    string::LispStr,
+};
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
