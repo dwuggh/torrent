@@ -80,10 +80,10 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         RetKind::Primitive(ident) if ident == "Symbol" => construct_return(
             function.fallible,
             quote! {
-                Ok(unsafe {val.raw() as i64})
+                Ok(unsafe {val.to_raw() as i64})
             },
             quote! {
-                Ok(unsafe {val.raw() as i64})
+                Ok(unsafe {val.to_raw() as i64})
             },
         ),
         RetKind::Primitive(_ident) => construct_return(

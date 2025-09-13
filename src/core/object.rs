@@ -8,9 +8,8 @@ use crate::{
         number::{Character, Float, Integer, LispCharacter, LispFloat, LispInteger},
         string::{LispStr, Str},
         symbol::{LispSymbol, Symbol},
-        tagged_ptr::{get_tag, TaggedPtrError},
+        tagged_ptr::{get_tag, Tagged, TaggedObj},
         vector::{LispVector, Vector},
-        TaggedPtr,
     },
     gc::Trace,
 };
@@ -222,15 +221,25 @@ impl Object {
             match tag {
                 LispType::Nil => ObjectRef::Nil,
                 LispType::True => ObjectRef::True,
-                LispType::Int => ObjectRef::Int(self.try_into().unwrap()),
-                LispType::Float => ObjectRef::Float(self.try_into().unwrap()),
-                LispType::Character => ObjectRef::Character(self.try_into().unwrap()),
-                LispType::Str => ObjectRef::Str(LispStr::as_ref_unchecked(self)),
-                LispType::Symbol => ObjectRef::Symbol(self.try_into().unwrap()),
-                LispType::Vector => ObjectRef::Vector(LispVector::as_ref_unchecked(self)),
-                LispType::Cons => ObjectRef::Cons(LispCons::as_ref_unchecked(self)),
-                LispType::Function => ObjectRef::Function(LispFunction::as_ref_unchecked(self)),
-                LispType::HashTable => ObjectRef::HashTable(LispHashTable::as_ref_unchecked(self)),
+                LispType::Int => ObjectRef::Int(self.untagged_as_ref_unchecked::<LispInteger>()),
+                LispType::Float => ObjectRef::Float(self.untagged_as_ref_unchecked::<LispFloat>()),
+                LispType::Character => {
+                    ObjectRef::Character(self.untagged_as_ref_unchecked::<LispCharacter>())
+                }
+                LispType::Symbol => {
+                    ObjectRef::Symbol(self.untagged_as_ref_unchecked::<LispSymbol>())
+                }
+                LispType::Str => ObjectRef::Str(self.untagged_as_ref_unchecked::<LispStr>()),
+                LispType::Vector => {
+                    ObjectRef::Vector(self.untagged_as_ref_unchecked::<LispVector>())
+                }
+                LispType::Cons => ObjectRef::Cons(self.untagged_as_ref_unchecked::<LispCons>()),
+                LispType::Function => {
+                    ObjectRef::Function(self.untagged_as_ref_unchecked::<LispFunction>())
+                }
+                LispType::HashTable => {
+                    ObjectRef::HashTable(self.untagged_as_ref_unchecked::<LispHashTable>())
+                }
             }
         }
     }
@@ -241,15 +250,25 @@ impl Object {
             match tag {
                 LispType::Nil => ObjectMut::Nil,
                 LispType::True => ObjectMut::True,
-                LispType::Int => ObjectMut::Int(self.try_into().unwrap()),
-                LispType::Float => ObjectMut::Float(self.try_into().unwrap()),
-                LispType::Character => ObjectMut::Character(self.try_into().unwrap()),
-                LispType::Str => ObjectMut::Str(LispStr::as_mut_unchecked(self)),
-                LispType::Symbol => ObjectMut::Symbol(self.try_into().unwrap()),
-                LispType::Vector => ObjectMut::Vector(LispVector::as_mut_unchecked(self)),
-                LispType::Cons => ObjectMut::Cons(LispCons::as_mut_unchecked(self)),
-                LispType::Function => ObjectMut::Function(LispFunction::as_mut_unchecked(self)),
-                LispType::HashTable => ObjectMut::HashTable(LispHashTable::as_mut_unchecked(self)),
+                LispType::Int => ObjectMut::Int(self.untagged_as_mut_unchecked::<LispInteger>()),
+                LispType::Float => ObjectMut::Float(self.untagged_as_mut_unchecked::<LispFloat>()),
+                LispType::Character => {
+                    ObjectMut::Character(self.untagged_as_mut_unchecked::<LispCharacter>())
+                }
+                LispType::Symbol => {
+                    ObjectMut::Symbol(self.untagged_as_mut_unchecked::<LispSymbol>())
+                }
+                LispType::Str => ObjectMut::Str(self.untagged_as_mut_unchecked::<LispStr>()),
+                LispType::Vector => {
+                    ObjectMut::Vector(self.untagged_as_mut_unchecked::<LispVector>())
+                }
+                LispType::Cons => ObjectMut::Cons(self.untagged_as_mut_unchecked::<LispCons>()),
+                LispType::Function => {
+                    ObjectMut::Function(self.untagged_as_mut_unchecked::<LispFunction>())
+                }
+                LispType::HashTable => {
+                    ObjectMut::HashTable(self.untagged_as_mut_unchecked::<LispHashTable>())
+                }
             }
         }
     }
@@ -302,7 +321,7 @@ macro_rules! impl_try_from_for_object {
 
             fn try_from(value: &'a Object) -> Result<Self, Self::Error> {
                 tracing::debug!("in try_into: {value:?}, {}", value.0);
-                match <$lispname as TaggedPtr>::as_ref(&value) {
+                match value.untagged_as_ref::<$lispname>() {
                     Some(val) => Ok(val),
                     None => Err("wrong type"),
                 }
@@ -313,7 +332,7 @@ macro_rules! impl_try_from_for_object {
             type Error = &'static str;
 
             fn try_from(value: &'a Object) -> Result<Self, Self::Error> {
-                match <$lispname as TaggedPtr>::as_mut(&value) {
+                match value.untagged_as_mut::<$lispname>() {
                     Some(val) => Ok(val),
                     None => Err("wrong type"),
                 }
@@ -329,9 +348,10 @@ macro_rules! impl_try_from_for_primitive {
 
             fn try_from(value: &Object) -> Result<Self, Self::Error> {
                 if get_tag(value.0 as i64) == $lispname::TAG {
-                    let val = $lispname::untag_ptr(value.0) as u64;
-                    // let val = Self::untag_ptr(value.0) as u64;
-                    Ok(unsafe { std::mem::transmute(val) })
+                    match value.untagged_as_ref::<$lispname>() {
+                        Some(val) => Ok(val),
+                        None => Err("wrong type"),
+                    }
                 } else {
                     Err("wrong")
                 }
@@ -342,9 +362,10 @@ macro_rules! impl_try_from_for_primitive {
 
             fn try_from(value: &mut Object) -> Result<Self, Self::Error> {
                 if get_tag(value.0 as i64) == $lispname::TAG {
-                    let val = $lispname::untag_ptr(value.0) as u64;
-                    // let val = Self::untag_ptr(value.0) as u64;
-                    Ok(unsafe { std::mem::transmute(val) })
+                    match value.untagged_as_ref::<$lispname>() {
+                        Some(val) => Ok(val),
+                        None => Err("wrong type"),
+                    }
                 } else {
                     Err("wrong")
                 }

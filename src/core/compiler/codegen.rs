@@ -17,7 +17,7 @@ use crate::core::string::LispStr;
 use crate::core::symbol::Symbol;
 use crate::core::object::NIL;
 use crate::core::object::TRUE;
-use crate::core::TaggedPtr;
+use crate::core::Tagged;
 
 pub struct Codegen<'a> {
     module: &'a mut JITModule,
@@ -248,7 +248,7 @@ impl<'a> Codegen<'a> {
                     let closure = self
                         .builder
                         .ins()
-                        .iconst(types::I64, self.func.raw() as i64);
+                        .iconst(types::I64, unsafe { self.func.to_raw() } as i64);
 
                     self.call_internal("load_captured", &[ident_val, closure, self.env])[0]
                 }
@@ -265,7 +265,7 @@ impl<'a> Codegen<'a> {
         match scope {
             CompileScope::Global => {
                 // let val = Environment::default().load_symbol(symbol, load_function_cell)?;
-                let sym_val = self.builder.ins().iconst(types::I64, symbol.raw() as i64);
+                let sym_val = self.translate_lispobj(&symbol);
                 let load_function_cell = self
                     .builder
                     .ins()
@@ -299,6 +299,10 @@ impl<'a> Codegen<'a> {
                 ),
             },
         }
+    }
+
+    fn translate_lispobj<T: Tagged>(&mut self, obj: &T) -> Value {
+        self.builder.ins().iconst(types::I64, unsafe { obj.to_raw() } as i64)
     }
 
     fn translate_arg_exprs<'s>(
@@ -335,20 +339,16 @@ impl<'a> Codegen<'a> {
     fn translate_literal(&mut self, literal: &Literal) -> CodegenResult<Value> {
         match literal {
             Literal::Number(Number::Integer(n)) => {
-                let val = n.raw() as i64;
-                Ok(self.builder.ins().iconst(types::I64, val))
+                Ok(self.translate_lispobj(n))
             }
             Literal::Number(Number::Real(f)) => {
-                let val = f.raw() as i64;
-                Ok(self.builder.ins().iconst(types::I64, val))
+                Ok(self.translate_lispobj(f))
             }
             Literal::Character(c) => {
-                let val = c.raw() as i64;
-                Ok(self.builder.ins().iconst(types::I64, val))
+                Ok(self.translate_lispobj(c))
             }
             Literal::String(s) => {
-                let val = s.raw() as i64;
-                Ok(self.builder.ins().iconst(types::I64, val))
+                Ok(self.translate_lispobj(s))
             }
         }
     }
@@ -643,8 +643,7 @@ impl<'a> Codegen<'a> {
             QuotedData::Literal(literal) => self.translate_literal(literal),
             QuotedData::Symbol(ident) => {
                 let symbol: Symbol = (*ident).into();
-                let val = symbol.raw() as i64;
-                Ok(self.builder.ins().iconst(types::I64, val))
+                Ok(self.translate_lispobj(&symbol))
             }
             QuotedData::List(_items) => {
                 // TODO: implement list creation
@@ -701,7 +700,7 @@ impl<'a> Codegen<'a> {
         let func_ptr = self.module.get_finalized_function(func_id);
         func.set_func_ptr(func_ptr);
 
-        let func_val = self.builder.ins().iconst(types::I64, func.raw() as i64);
+        let func_val = self.translate_lispobj(&func);
         Ok(func_val)
     }
 
@@ -748,9 +747,9 @@ impl<'a> Codegen<'a> {
                     let var = frame.slots.get(*ident).unwrap();
                     let value = self.builder.use_var(var);
                     let symbol: Symbol = ident.into();
-                    let sym = self.builder.ins().iconst(types::I64, symbol.raw() as i64);
+                    let sym = self.translate_lispobj(&symbol);
                     for func in funcs.iter() {
-                        let func_val = self.builder.ins().iconst(types::I64, func.raw() as i64);
+                        let func_val = self.translate_lispobj(func);
                         self.call_internal("store_captured", &[sym, value, func_val]);
                     }
                 }

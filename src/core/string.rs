@@ -3,7 +3,7 @@ use std::sync::Arc;
 use proc_macros::Trace;
 
 use crate::core::object::{LispType, Object};
-use crate::core::TaggedPtr;
+use crate::core::Tagged;
 use crate::gc::Gc;
 
 #[repr(align(16))]
@@ -25,7 +25,7 @@ impl Str {
     }
 }
 
-impl_tagged_ptr_for_gc!(LispStr, LispType::Str, Str);
+impl_tagged_for_gc!(LispStr, LispType::Str, Str);
 
 impl std::fmt::Display for LispStr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -4,8 +4,8 @@ use proc_macros::Trace;
 
 use crate::{
     core::object::{LispType, Object},
-    core::TaggedPtr,
-    gc::{Gc, GcInner},
+    core::Tagged,
+    gc::Gc,
 };
 
 #[derive(Clone, Trace, Debug)]
@@ -14,7 +14,7 @@ pub struct LispHashTable(pub Gc<HashTable>);
 #[derive(Clone, Trace, Debug)]
 pub struct HashTable(HashMap<Object, Object>);
 
-impl_tagged_ptr_for_gc!(LispHashTable, LispType::HashTable, HashTable);
+impl_tagged_for_gc!(LispHashTable, LispType::HashTable, HashTable);
 
 impl Default for LispHashTable {
     fn default() -> Self {

@@ -3,7 +3,7 @@ use chumsky::Parser;
 use crate::{
     ast::elisp_parser,
     core::{
-        compiler::{ast_to_ir::node_to_ir, jit::JIT, scope::CompileScope}, env::Environment, object::Object, string::LispStr, TaggedPtr
+        compiler::{ast_to_ir::node_to_ir, jit::JIT, scope::CompileScope}, env::Environment, object::Object, string::LispStr, Tagged
     }, gc::collector::init_gc,
 };
 
@@ -13,7 +13,7 @@ pub mod gc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt::init();
     // init_gc();
     let text = include_str!("test.el");
     let runtime_env = Environment::default();

@@ -9,8 +9,9 @@ use scc::HashIndex;
 use crate::core::error::{RuntimeError, RuntimeResult};
 use crate::core::ident::Ident;
 use crate::core::object::nil;
+use crate::core::tagged_ptr::{shifting_tag, shifting_untag};
 use crate::gc::Trace;
-use crate::{core::object::Object, core::TaggedPtr, gc::Gc};
+use crate::{core::object::Object, core::Tagged, gc::Gc};
 
 use super::object::LispType;
 
@@ -147,47 +148,25 @@ impl TryFrom<*mut Symbol> for Symbol {
     }
 }
 
-impl TaggedPtr for Symbol {
-    const TAG: LispType = LispType::Symbol;
-
-    type Data = Symbol;
-
-    type Inner = Symbol;
-
+impl Tagged for Symbol {
+    const TAG:LispType = LispType::Symbol;
+    type Data<'a> = LispSymbol;
+    type DataMut<'a> = LispSymbol;
     unsafe fn to_raw(&self) -> u64 {
-        self.name.into()
+        shifting_tag(self.name.0, Self::TAG)
+    }
+    unsafe fn from_raw(raw:u64) -> Self {
+        let val = shifting_untag(raw);
+        std::mem::transmute(val)
+    }
+    unsafe fn cast<'a>(val:u64) -> Self::Data<'a>{
+        Self::from_raw(val)
+    }
+    unsafe fn cast_mut<'a>(val:u64) -> Self::DataMut<'a>{
+        Self::from_raw(val)
     }
 
-    // fn raw(&self) -> u64 {
-    //     unsafe { self.to_raw() | Self::TAG as u64 }
-    // }
-
-    // fn untag_ptr(val: u64) -> *mut Self::Inner {
-    //     let untagged = val ^ Self::TAG as u64;
-    //     tracing::info!("calling untag_ptr: untagged: {untagged}");
-    //     // untagged as *mut Self::Inner
-    //     unsafe { std::mem::transmute(untagged) }
-    // }
-
-    unsafe fn as_ref_unchecked(val: &Object) -> &Self::Data {
-        unimplemented!()
     }
-
-    // NOTE this function does not check for tag match
-    unsafe fn as_mut_unchecked(val: &Object) -> &mut Self::Data {
-        unimplemented!()
-    }
-
-    fn untag(val: Object) -> Result<Self, super::tagged_ptr::TaggedPtrError> {
-        if super::tagged_ptr::get_tag(val.0 as i64) == Self::TAG {
-            let sym = (&val).try_into().unwrap();
-            std::mem::forget(val);
-            Ok(sym)
-        } else {
-            Err(super::tagged_ptr::TaggedPtrError::TypeMisMatch)
-        }
-    }
-}
 
 impl AsRef<Symbol> for Symbol {
     fn as_ref(&self) -> &Symbol {

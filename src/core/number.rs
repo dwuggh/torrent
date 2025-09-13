@@ -1,6 +1,10 @@
 use std::convert::Infallible;
 
-use crate::core::{object::LispType, TaggedPtr};
+use crate::core::{
+    object::LispType,
+    tagged_ptr::{shifting_tag, shifting_untag},
+    Tagged,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LispInteger(pub i64);
@@ -43,15 +47,23 @@ impl std::fmt::Display for Character {
     }
 }
 
-impl TaggedPtr for LispInteger {
-    const TAG: LispType = LispType::Int;
-
-    type Data = i64;
-
-    type Inner = LispInteger;
-
+impl_tagged_for_prim!(LispInteger, LispType::Int, Integer);
+impl_tagged_for_prim!(LispFloat, LispType::Float, Float);
+impl Tagged for LispCharacter {
+    const TAG: LispType = (LispType::Character);
+    type Data<'a> = Character;
+    type DataMut<'a> = Character;
     unsafe fn to_raw(&self) -> u64 {
-        self.0 as u64
+        shifting_tag(self.0.0, Self::TAG)
+    }
+    unsafe fn from_raw(raw: u64) -> Self {
+        std::mem::transmute(shifting_untag(raw))
+    }
+    unsafe fn cast<'a>(val: u64) -> Self::Data<'a> {
+        Self::from_raw(val).0
+    }
+    unsafe fn cast_mut<'a>(val: u64) -> Self::DataMut<'a> {
+        Self::from_raw(val).0
     }
 }
 
@@ -64,14 +76,6 @@ impl AsRef<i64> for LispInteger {
 impl AsMut<i64> for LispInteger {
     fn as_mut(&mut self) -> &mut i64 {
         &mut self.0
-    }
-}
-
-impl TryFrom<*mut LispInteger> for LispInteger {
-    type Error = Infallible;
-
-    fn try_from(value: *mut LispInteger) -> Result<Self, Self::Error> {
-        Ok(Self(value as i64))
     }
 }
 
@@ -97,16 +101,6 @@ impl From<LispInteger> for i64 {
     }
 }
 
-impl TaggedPtr for LispFloat {
-    const TAG: LispType = LispType::Float;
-    type Data = f64;
-    type Inner = LispFloat;
-
-    unsafe fn to_raw(&self) -> u64 {
-        self.0.to_bits()
-    }
-}
-
 impl AsRef<f64> for LispFloat {
     fn as_ref(&self) -> &f64 {
         &self.0
@@ -116,14 +110,6 @@ impl AsRef<f64> for LispFloat {
 impl AsMut<f64> for LispFloat {
     fn as_mut(&mut self) -> &mut f64 {
         &mut self.0
-    }
-}
-
-impl TryFrom<*mut LispFloat> for LispFloat {
-    type Error = Infallible;
-
-    fn try_from(value: *mut LispFloat) -> Result<Self, Self::Error> {
-        Ok(Self(f64::from_bits(value as u64)))
     }
 }
 
@@ -149,16 +135,6 @@ impl From<LispFloat> for f64 {
     }
 }
 
-impl TaggedPtr for LispCharacter {
-    const TAG: LispType = LispType::Character;
-    type Data = Character;
-    type Inner = LispCharacter;
-
-    unsafe fn to_raw(&self) -> u64 {
-        self.0.0 as u64
-    }
-}
-
 impl AsRef<Character> for LispCharacter {
     fn as_ref(&self) -> &Character {
         &self.0
@@ -168,15 +144,6 @@ impl AsRef<Character> for LispCharacter {
 impl AsMut<Character> for LispCharacter {
     fn as_mut(&mut self) -> &mut Character {
         &mut self.0
-    }
-}
-
-impl TryFrom<*mut LispCharacter> for LispCharacter {
-    type Error = Infallible;
-
-    fn try_from(value: *mut LispCharacter) -> Result<Self, Self::Error> {
-        let char_val = char::from_u32(value as u32).unwrap_or('\0');
-        Ok(Self::new(char_val))
     }
 }
 

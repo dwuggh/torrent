@@ -14,7 +14,7 @@ use crate::core::compiler::BuiltinFnPlugin;
 use crate::core::env::Environment;
 use crate::core::function::LispFunction;
 use crate::core::runtime::store_symbol_function;
-use crate::core::TaggedPtr;
+use crate::core::tagged_ptr::TaggedObj;
 use anyhow::Result;
 
 pub struct JIT {
@@ -27,6 +27,7 @@ impl JIT {
     pub fn new(env: &Environment) -> Self {
         let mut flag_builder = settings::builder();
         flag_builder.set("use_colocated_libcalls", "true").unwrap();
+        // flag_builder.set("enable_safepoints", "true").unwrap();
         flag_builder.set("is_pic", "false").unwrap();
         flag_builder.set("opt_level", "speed").unwrap();
         flag_builder.set("enable_verifier", "false").unwrap();

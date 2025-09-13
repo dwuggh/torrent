@@ -106,6 +106,13 @@ impl<T: Trace> Gc<T> {
         }
     }
 
+    pub fn new_raw(ptr: NonNull<GcInner<T>>) -> Gc<T> {
+        Self {
+            ptr,
+            phantom: PhantomData,
+        }
+    }
+
     pub fn inc_ref_count(&self) {
         inc_rc(self.ptr);
     }

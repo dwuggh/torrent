@@ -14,7 +14,7 @@ pub mod symbol;
 pub mod object;
 pub mod vector;
 
-pub use tagged_ptr::TaggedPtr;
+pub use tagged_ptr::Tagged;
 
 #[macro_use]
 pub mod error;

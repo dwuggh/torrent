@@ -2,7 +2,7 @@ use rustc_hash::FxBuildHasher;
 use scc::hash_index::{Entry, OccupiedEntry};
 
 use crate::core::{
-    error::{RuntimeError, RuntimeResult}, ident::Ident, object::{nil, LispObject, Object, ObjectRef}, symbol::{Symbol, SymbolCell, SymbolMap}, TaggedPtr
+    error::{RuntimeError, RuntimeResult}, object::{Object, ObjectRef}, symbol::{Symbol, SymbolCell, SymbolMap}, tagged_ptr::TaggedObj 
 };
 
 #[derive(Debug, Default)]

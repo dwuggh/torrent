@@ -1,8 +1,7 @@
 use proc_macros::Trace;
 
 use crate::{
-    core::{object::{nil, LispType, Object, ObjectRef}, TaggedPtr},
-    gc::{Gc, GcInner},
+    core::{object::{nil, LispType, Object, ObjectRef}, tagged_ptr::TaggedObj}, gc::Gc, Tagged
 };
 
 #[derive(Clone, Trace, Debug)]
@@ -14,7 +13,7 @@ pub struct Cons {
     cdr: Object,
 }
 
-impl_tagged_ptr_for_gc!(LispCons, LispType::Cons, Cons);
+impl_tagged_for_gc!(LispCons, LispType::Cons, Cons);
 
 impl LispCons {
     pub fn new(car: Object, cdr: Object) -> Self {

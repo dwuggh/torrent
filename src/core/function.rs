@@ -8,8 +8,8 @@ use proc_macros::Trace;
 use crate::core::env::Environment;
 use crate::{
     core::object::{LispType, Object},
-    core::TaggedPtr,
-    gc::{Gc, GcInner},
+    core::Tagged,
+    gc::Gc,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -66,7 +66,7 @@ pub struct FunctionSignature {
 
 #[derive(Debug, Clone, Trace)]
 pub struct LispFunction(pub(crate) Gc<Function>);
-impl_tagged_ptr_for_gc!(LispFunction, LispType::Function, Function);
+impl_tagged_for_gc!(LispFunction, LispType::Function, Function);
 
 impl FunctionType {
     pub fn as_closure_mut(&mut self) -> Option<&mut LambdaFn> {
