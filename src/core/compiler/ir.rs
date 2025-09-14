@@ -15,14 +15,16 @@ pub enum Expr {
     SpecialForm(SpecialForm),
 }
 
+#[derive(Clone, Debug)]
 pub enum Var {
     Symbol(Symbol),
     Local(Local),
 }
 
+#[derive(Clone, Debug)]
 pub struct Local {
-    ident: Ident,
-    id: u32,
+    pub ident: Ident,
+    pub id: u32,
 }
 
 #[derive(Clone, Debug)]
