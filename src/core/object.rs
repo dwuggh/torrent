@@ -146,6 +146,7 @@ pub enum LispObject {
     #[no_trace]
     Character(LispCharacter),
     Str(LispStr),
+    #[no_trace]
     Symbol(LispSymbol),
     Vector(LispVector),
     Cons(LispCons),

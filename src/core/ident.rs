@@ -1,7 +1,7 @@
 use lasso::{Key, ThreadedRodeo};
 use std::sync::LazyLock;
 
-use crate::core::symbol::Symbol;
+use crate::core::symbol::{LispSymbol, Symbol};
 
 pub static INTERNER: LazyLock<ThreadedRodeo<Ident>> = LazyLock::new(ThreadedRodeo::new);
 
@@ -46,6 +46,10 @@ impl Ident {
         let key = INTERNER.get_or_intern(name);
         key
     }
+
+    pub fn from_raw(value: u32) -> Self {
+        Self(value)
+    }
 }
 
 impl From<u64> for Ident {
@@ -86,13 +90,13 @@ impl AsRef<str> for Ident {
 
 impl From<Symbol> for Ident {
     fn from(value: Symbol) -> Self {
-        value.name
+        value.ident()
     }
 }
 
 impl From<&Symbol> for Ident {
     fn from(value: &Symbol) -> Self {
-        value.name
+        value.ident()
     }
 }
 

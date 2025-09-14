@@ -1,4 +1,3 @@
-
 use proc_macros::Trace;
 
 use crate::core::object::LispType;

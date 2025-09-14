@@ -14,6 +14,7 @@ use crate::core::compiler::BuiltinFnPlugin;
 use crate::core::env::Environment;
 use crate::core::function::LispFunction;
 use crate::core::runtime::store_symbol_function;
+use crate::core::symbol::Symbol;
 use crate::core::tagged_ptr::TaggedObj;
 use anyhow::Result;
 
@@ -51,7 +52,8 @@ impl JIT {
             tracing::debug!("loading function {name:?}...");
             if func.lisp_subr {
                 let func = LispFunction::new_subr(id, &name, func.ptr());
-                store_symbol_function(name.into(), func.tag(), env);
+                let symbol = Symbol::from(name);
+                store_symbol_function(symbol, func.tag(), env);
             } else {
                 builtin_funcs.insert(name, id);
             }

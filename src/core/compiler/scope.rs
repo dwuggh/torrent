@@ -5,7 +5,6 @@ use crate::core::function::LispFunction;
 use crate::core::ident::Ident;
 use cranelift::prelude::*;
 
-
 #[derive(Clone)]
 pub struct FrameScope<'a> {
     pub slots: ParamSlots,

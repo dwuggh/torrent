@@ -1,4 +1,18 @@
-
+;; (defvar fib-iter (lambda (a b count)
+;;                             (if (< count 1)
+;;                                 a
+;;                               (funcall fib-iter b (+ a b) (- count 1)))))
+;; (funcall fib-iter 0 1 29)
+;; (measure-time
+;;  (funcall fib-iter 0 1 1000)
+;;  )
+;; (defvar fib (lambda (n)
+;;               (let ((iter (lambda (a b count)
+;;                             (if (< count 1)
+;;                                 a
+;;                               (iter b (+ a b) (- count 1))))))
+;;                 (iter 0 1 n)
+;;                 )))
 (defvar ff (lambda (x)
              (if (< x 2)
                  x

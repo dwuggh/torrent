@@ -7,7 +7,7 @@ use crate::{
         ident::Ident,
         number::LispInteger,
         object::{nil, tru, Object, ObjectRef},
-        symbol::Symbol,
+        symbol::{LispSymbol, Symbol},
         tagged_ptr::TaggedObj,
         Tagged,
     },
@@ -89,7 +89,7 @@ fn funcall(func: &Object, args: &[Object], env: &Environment) -> Result<Object> 
 }
 
 #[internal_fn]
-fn defvar(name: i64, len: usize, value: Object, env: &Environment) -> Result<Symbol> {
+fn defvar(name: i64, len: usize, value: Object, env: &Environment) -> Result<Object> {
     if name == 0 {
         runtime_bail!(InternalError, message: "null pointer passed to defvar".to_string());
     }
@@ -104,8 +104,8 @@ fn defvar(name: i64, len: usize, value: Object, env: &Environment) -> Result<Sym
     let symbol = name.into();
     tracing::debug!("calling defvar: symbol {symbol:?}, value: {value:?}");
     let cell = env.get_or_init_symbol(symbol);
-    cell.get().data().value = value;
-    Ok(symbol)
+    cell.data().value = value;
+    Ok(symbol.tag())
 }
 
 #[internal_fn]
@@ -131,10 +131,14 @@ fn load_captured(ident: Ident, func: &mut Function) -> Result<Object> {
 
 #[internal_fn]
 pub fn store_symbol_function(symbol: Symbol, func: Object, env: &Environment) {
+    tracing::debug!(
+        "storing function {func:?} to symbol {}",
+        symbol.name()
+    );
     let data_ref = env.get_or_init_symbol(symbol);
-    let symbol = Symbol::new("function".into()).tag();
+    let symbol = LispSymbol::from("function").tag();
     let cell = LispCons::new(symbol, func);
-    data_ref.get().data().func = cell.tag();
+    data_ref.data().func = cell.tag();
 }
 
 #[internal_fn]

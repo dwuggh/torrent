@@ -3,7 +3,11 @@ use rustc_hash::FxBuildHasher;
 use scc::hash_index::{Entry, OccupiedEntry};
 
 use crate::core::{
-    error::{RuntimeError, RuntimeResult}, ident::Ident, object::{Object, ObjectRef}, symbol::{Symbol, SymbolCell, SymbolMap}, tagged_ptr::TaggedObj
+    error::{RuntimeError, RuntimeResult},
+    ident::Ident,
+    object::{Object, ObjectRef},
+    symbol::{LispSymbol, Symbol, SymbolCell, SymbolMap},
+    tagged_ptr::TaggedObj,
 };
 
 #[derive(Debug, Default)]
@@ -54,24 +58,15 @@ impl Environment {
     pub fn get_symbol_cell(
         &self,
         symbol: Symbol,
-    ) -> Option<scc::hash_index::OccupiedEntry<'_, Symbol, SymbolCell, FxBuildHasher>> {
-        let map = self.symbol_map.map();
-        map.get_sync(&symbol)
+    ) -> Option<&SymbolCell> {
+        self.symbol_map.get_symbol_cell(symbol)
     }
 
     pub fn get_or_init_symbol(
         &self,
         symbol: Symbol,
-    ) -> OccupiedEntry<'_, Symbol, SymbolCell, FxBuildHasher> {
-        let map = self.symbol_map.map();
-        match map.entry_sync(symbol) {
-            Entry::Occupied(occupied_entry) => occupied_entry,
-            Entry::Vacant(vacant_entry) => {
-                let text = symbol.name();
-                let special = text.starts_with(':');
-                vacant_entry.insert_entry(SymbolCell::new(symbol, special))
-            }
-        }
+    ) -> &SymbolCell {
+        self.symbol_map.get_or_init_symbol(symbol)
     }
 
     pub fn push_stackmap(&self, obj: &Object) {
@@ -80,13 +75,6 @@ impl Environment {
 
     pub fn pop_stackmap(&self, obj: &Object) {
         self.stack_map.pop(obj);
-    }
-
-    pub fn init_nil_t(&self) {
-        let _nil = self.get_or_init_symbol(Symbol::from("nil"));
-        let t = Symbol::from("nil");
-        let t_cell = self.get_or_init_symbol(t);
-        t_cell.data().value = t.tag();
     }
 }
 

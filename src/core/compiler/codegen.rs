@@ -15,6 +15,7 @@ use crate::core::compiler::scope::Val;
 use crate::core::function::LispFunction;
 use crate::core::object::NIL;
 use crate::core::object::TRUE;
+use crate::core::symbol::LispSymbol;
 use crate::core::symbol::Symbol;
 use crate::core::Tagged;
 
@@ -224,7 +225,7 @@ impl<'a> Codegen<'a> {
     ) -> CodegenResult<Value> {
         tracing::debug!(
             "Loading symbol: {} (function_cell: {})",
-            symbol.name.text(),
+            symbol.name(),
             load_function_cell
         );
 
@@ -249,7 +250,7 @@ impl<'a> Codegen<'a> {
                         .ins()
                         .iconst(types::I64, unsafe { self.func.to_raw() } as i64);
 
-                    self.call_internal("load_captured", &[ident_val, closure, self.env])[0]
+                    self.call_internal("load_captured", &[ident_val, closure])[0]
                 }
             })
     }
@@ -264,7 +265,7 @@ impl<'a> Codegen<'a> {
         match scope {
             CompileScope::Global => {
                 // let val = Environment::default().load_symbol(symbol, load_function_cell)?;
-                let sym_val = self.translate_lispobj(&symbol);
+                let sym_val = self.translate_lispobj(&LispSymbol::from(symbol));
                 let load_function_cell = self
                     .builder
                     .ins()
@@ -275,7 +276,7 @@ impl<'a> Codegen<'a> {
                 )[0];
                 Some(Val::Value(val))
             }
-            CompileScope::Frame(frame) => match frame.slots.get(symbol.name) {
+            CompileScope::Frame(frame) => match frame.slots.get(symbol.ident()) {
                 Some(var) => {
                     if same_func_scope {
                         Some(Val::Value(self.builder.use_var(var)))
@@ -639,7 +640,7 @@ impl<'a> Codegen<'a> {
             QuotedData::Literal(literal) => self.translate_literal(literal),
             QuotedData::Symbol(ident) => {
                 let symbol: Symbol = (*ident).into();
-                Ok(self.translate_lispobj(&symbol))
+                Ok(self.translate_lispobj(&LispSymbol::from(symbol)))
             }
             QuotedData::List(_items) => {
                 // TODO: implement list creation
@@ -743,7 +744,7 @@ impl<'a> Codegen<'a> {
                     let var = frame.slots.get(*ident).unwrap();
                     let value = self.builder.use_var(var);
                     let symbol: Symbol = ident.into();
-                    let sym = self.translate_lispobj(&symbol);
+                    let sym = self.translate_lispobj(&LispSymbol::from(symbol));
                     for func in funcs.iter() {
                         let func_val = self.translate_lispobj(func);
                         self.call_internal("store_captured", &[sym, value, func_val]);
