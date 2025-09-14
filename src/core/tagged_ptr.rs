@@ -7,10 +7,12 @@ pub fn get_tag(val: i64) -> LispType {
     unsafe { std::mem::transmute(val as u8) }
 }
 pub fn shifting_tag(val: u64, tag: LispType) -> u64 {
-    val << 8 | tag as u64
+    let val = (val as i64) << 8;
+    val as u64 | tag as u64
 }
 pub fn shifting_untag(val: u64) -> u64 {
-    val >> 8
+    let val = (val as i64) >> 8;
+    val as u64
 }
 
 #[derive(Error, Debug, Clone)]
@@ -59,7 +61,6 @@ pub trait Tagged: Sized {
     unsafe fn cast<'a>(val: u64) -> Self::Data<'a>;
     unsafe fn cast_mut<'a>(val: u64) -> Self::DataMut<'a>;
 }
-
 
 macro_rules! impl_tagged_for_gc {
     ($name:ident, $lispty:expr, $inner:ty) => {
