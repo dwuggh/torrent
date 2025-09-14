@@ -5,6 +5,9 @@ use crate::core::{
     Tagged,
 };
 
+// pub(crate) const MAX_FIXNUM: i64 = i64::MAX >> 8;
+// pub(crate) const MIN_FIXNUM: i64 = i64::MIN >> 8;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LispInteger(pub i64);
 pub type Integer = i64;

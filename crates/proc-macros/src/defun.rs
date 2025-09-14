@@ -59,6 +59,15 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
                 Ok(#nil as i64)
             },
         ),
+        RetKind::Primitive(_ident) => construct_return(
+            function.fallible,
+            quote! {
+                Ok(unsafe {val.to_raw() as i64})
+            },
+            quote! {
+                Ok(unsafe {result.to_raw() as i64})
+            },
+        ),
         RetKind::Object => construct_return(
             function.fallible,
             construct_return_nodrop("val"),
@@ -68,10 +77,9 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
             let some_to_value = match inner.as_ref() {
                 RetKind::Object => quote! { v },
                 // TODO
-                // RetKind::Primitive(ty) => quote! {{
-                //     let vv: crate::core::value::Value = v.tag();
-                //     vv
-                // }},
+                RetKind::Primitive(_ty) => quote! {{
+                    unsafe {v.to_raw() as i64}
+                }},
                 _ => panic!("invalid return type!"),
             };
             construct_return(
@@ -98,16 +106,6 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
                 },
             )
         }
-        // TODO
-        // RetKind::Primitive(_ident) => construct_return(
-        //     function.fallible,
-        //     quote! {
-        //         Ok(val as i64)
-        //     },
-        //     quote! {
-        //         Ok(result as i64)
-        //     },
-        // ),
         _ => panic!("invalid return type"),
     };
 
@@ -170,34 +168,9 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     }
 }
 
-// Find the minimum required arguments (non-optional, non-slice)
-fn get_positioned_arg_count(args: &[Arg]) -> (usize, usize, bool) {
-    let mut required_args: usize = 0;
-    let mut option_args: usize = 0;
-    let mut has_slice = false;
-
-    for (_i, arg) in args.iter().enumerate() {
-        match &arg.info.kind {
-            ArgKind::Slice(_) => {
-                has_slice = true;
-                break; // Slice must be last
-            }
-            ArgKind::Option(_) => {
-                option_args += 1;
-                // Optional arguments don't count toward required
-            }
-            _ => {
-                required_args += 1;
-            }
-        }
-    }
-
-    (required_args, option_args, has_slice)
-}
-
 fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
     let mut required_args: usize = 0;
-    let mut option_args: usize = 0;
+    let mut _option_args: usize = 0;
     let mut has_slice = false;
 
     for (_i, arg) in args.iter().enumerate() {
@@ -207,7 +180,7 @@ fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
                 break; // Slice must be last
             }
             ArgKind::Option(_) => {
-                option_args += 1;
+                _option_args += 1;
                 // Optional arguments don't count toward required
             }
             _ => {
@@ -431,226 +404,6 @@ fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
     (init_args, finish_args)
 }
 
-fn get_arg_conversion(args: &[Arg]) -> Vec<TokenStream> {
-    let mut conversions = Vec::new();
-
-    let object = quote! { crate::core::object::Object };
-    let nil = quote! {
-        crate::core::object::NIL
-    };
-
-    let (required_args, _, has_slice) = get_positioned_arg_count(args);
-
-    // Add argument count validation
-    if has_slice {
-        conversions.push(quote! {
-            if args_cnt_u < #required_args {
-                return Err("insufficient number of arguments");
-            }
-        });
-    } else {
-        let max_args = args.len();
-        conversions.push(quote! {
-            if args_cnt_u < #required_args || args_cnt_u > #max_args {
-                return Err("incorrect number of arguments");
-            }
-        });
-    }
-
-    // Convert each argument by loading from the args array
-    for (i, arg) in args.iter().enumerate() {
-        let ident = &arg.ident;
-        let arg_info = &arg.info;
-        let conversion = match &arg_info.kind {
-            ArgKind::Env => {
-                quote! {
-                    // let #ident = env as *const crate::core::env::Environment;
-                    // let #ident = #ident.as_ref().ok_or("failed to convert env")?;
-                }
-            }
-            ArgKind::Slice(inner_kind) => {
-                // Slice arguments consume all remaining arguments
-                let slice_conversion = match inner_kind.as_ref() {
-                    ArgKind::Object => {
-                        quote! {
-                            let slice_len = args_cnt_u - #i;
-                            let #ident = unsafe {
-                                let ptr = args_ptr as *const i64;
-                                let slice_ptr = ptr.add(#i);
-                                std::slice::from_raw_parts(slice_ptr as *const #object, slice_len)
-                            };
-                            for arg in args.iter() {
-                                env.stack_map.push(arg);
-                            }
-                        }
-                    }
-                    _ => {
-                        panic!("cannot convert: wrong arg type")
-                    }
-                };
-                slice_conversion
-            }
-            ArgKind::Object => {
-                let load_arg = quote! {
-                    let arg_val = unsafe {
-                        let ptr = args_ptr as *const i64;
-                        ptr.add(#i).read()
-                    };
-                };
-
-                if arg_info.is_ref {
-                    let tmp = format_ident!("__arg_val_{}", i);
-                    quote! {
-                        #load_arg
-                        let #tmp = #object(arg_val as u64);
-                        let #ident = &#tmp;
-                        env.stack_map.push(#ident);
-                    }
-                } else {
-                    quote! {
-                        #load_arg
-                        let #ident = #object(arg_val as u64);
-                        env.stack_map.push(&#ident);
-                    }
-                }
-            }
-            ArgKind::Option(inner_kind) => {
-                // Optional arguments - check if we have enough arguments
-                let option_conversion = match inner_kind.as_ref() {
-                    ArgKind::Object => {
-                        if arg_info.is_ref {
-                            let tmp = format_ident!("__arg_val_{}", i);
-                            quote! {
-                                let (#tmp, #ident) = if args_cnt_u > #i {
-                                    let arg_val = unsafe {
-                                        let ptr = args_ptr as *const i64;
-                                        ptr.add(#i).read()
-                                    };
-                                    let val = #object(arg_val as u64);
-                                    (val, Some(&#tmp))
-                                } else {
-                                    (#object(#nil as u64), None)
-                                };
-                            }
-                        } else {
-                            quote! {
-                                let #ident = if args_cnt_u > #i {
-                                    let arg_val = unsafe {
-                                        let ptr = args_ptr as *const i64;
-                                        ptr.add(#i).read()
-                                    };
-                                    Some(#object(arg_val as u64))
-                                } else {
-                                    None
-                                };
-                            }
-                        }
-                    }
-                    ArgKind::ObjectRef(ty) => {
-                        let load_arg = quote! {
-                            let arg_val = unsafe {
-                                let ptr = args_ptr as *const i64;
-                                ptr.add(#i).read()
-                            };
-                        };
-                        let tmp_cast = format_ident!("__arg_cast_{}", i);
-                        let ref_tok = if arg_info.is_mut {
-                            quote! { &mut #tmp_cast }
-                        } else {
-                            quote! { &#tmp_cast }
-                        };
-                        let prog = construct_objectref(
-                            arg.info.is_mut,
-                            i,
-                            &format_ident!("converted"),
-                            ty,
-                        );
-                        quote! {
-                            let (#tmp_cast, #ident) = if args_cnt_u > #i {
-                                #load_arg
-                                #prog
-                                (converted, Some(#ref_tok))
-                            } else {
-                                (Default::default(), None)
-                            };
-                        }
-                    }
-                    _ => {
-                        panic!("wrong type in option!")
-                    }
-                };
-                option_conversion
-            }
-            ArgKind::ObjectRef(ty) => {
-                let load_arg = quote! {
-                    let arg_val = unsafe {
-                        let ptr = args_ptr as *const i64;
-                        ptr.add(#i).read()
-                    };
-                };
-
-                let prog = construct_objectref(arg.info.is_mut, i, ident, ty);
-                quote! {
-                    #load_arg
-                    #prog
-                }
-            }
-            ArgKind::Primitive(ty) => {
-                let load_arg = quote! {
-                    let arg_val = unsafe {
-                        let ptr = args_ptr as *const i64;
-                        ptr.add(#i).read()
-                    };
-                };
-                let tmp = format_ident!("__arg_val_{}", i);
-                match &ty.to_string() as &str {
-                    "Symbol" => {
-                        quote! {
-                            #load_arg
-                            let #tmp = #object(arg_val as u64);
-                            let #ident: #ty = (&#tmp).try_into()?;
-                        }
-                    }
-                    "i64" | "u64" => {
-                        quote! {
-                            #load_arg
-                            let #tmp = #object(arg_val as u64);
-                            let #ident: crate::core::number::Integer = (&#tmp).try_into()?;
-                            let #ident: #ty = #ident as #ty;
-                        }
-                    }
-                    "f64" => {
-                        quote! {
-                            #load_arg
-                            let #tmp = #object(arg_val as u64);
-                            let #ident: crate::core::number::Float = (&#tmp).try_into()?;
-                            let #ident: #ty = #ident as #ty;
-                        }
-                    }
-                    "char" => {
-                        quote! {
-                            #load_arg
-                            let #tmp = #object(arg_val as u64);
-                            let #ident: crate::core::number::Character = (&#tmp).try_into()?;
-                            let #ident: #ty = #ident as #ty;
-                        }
-                    }
-                    _ => {
-                        panic!("wrong primitive type!")
-                    }
-                }
-            }
-            _ => {
-                panic!("invalid type!")
-            }
-        };
-
-        conversions.push(conversion);
-    }
-
-    conversions
-}
-
 #[derive(Default, PartialEq, Debug, FromMeta)]
 pub(crate) struct Spec {
     #[darling(default)]
@@ -710,74 +463,4 @@ pub fn inventory_submit(
         inventory::submit!(crate::core::compiler::BuiltinFnPlugin::new(#def_func_name, #register_func_name, #is_lisp_subr, #func_name as *const u8));
 
     }
-}
-
-fn forget_args(args: &[Arg]) -> Vec<TokenStream> {
-    let (required_args, option_args, has_slice) = get_positioned_arg_count(args);
-    let mut result = Vec::new();
-    for i in 0..(required_args) {
-        let arg = &args[i];
-        let ident = &arg.ident;
-        let tok = match &arg.info.kind {
-            ArgKind::Object => {
-                if arg.info.is_ref {
-                    let tmp = format_ident!("__arg_val_{}", i);
-                    quote! {
-                        env.stack_map.pop(&#tmp);
-                        std::mem::forget(#tmp);
-                    }
-                } else {
-                    quote! {}
-                }
-            }
-            ArgKind::ObjectRef(ident) => {
-                let tmp = format_ident!("__arg_val_{}", i);
-                if arg.info.is_ref {
-                    quote! {
-                        env.stack_map.pop(&#tmp);
-                        std::mem::forget(#tmp);
-                    }
-                } else {
-                    quote! {}
-                }
-            }
-            _ => quote! {},
-        };
-        result.push(tok);
-    }
-    for i in required_args..option_args {
-        let arg = &args[i];
-        let ident = &arg.ident;
-        let tok = match &arg.info.kind {
-            ArgKind::Object => {
-                if arg.info.is_ref {
-                    let tmp = format_ident!("__arg_val_{}", i);
-                    quote! {
-                        if arg_cnt_u > #i {
-                            env.stack_map.pop(&#tmp);
-                            std::mem::forget(#tmp);
-                        }
-                    }
-                } else {
-                    quote! {}
-                }
-            }
-            ArgKind::ObjectRef(ident) => {
-                let tmp = format_ident!("__arg_val_{}", i);
-                if arg.info.is_ref {
-                    quote! {
-                        if arg_cnt_u > #i {
-                            env.stack_map.pop(&#tmp);
-                            std::mem::forget(#tmp);
-                        }
-                    }
-                } else {
-                    quote! {}
-                }
-            }
-            _ => quote! {},
-        };
-        result.push(tok);
-    }
-    result
 }

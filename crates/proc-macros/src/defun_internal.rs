@@ -85,7 +85,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
                 Ok(unsafe {val.to_raw() as i64})
             },
             quote! {
-                Ok(unsafe {val.to_raw() as i64})
+                Ok(unsafe {result.to_raw() as i64})
             },
         ),
         RetKind::Primitive(_ident) => construct_return(
@@ -325,9 +325,6 @@ fn forget_args(args: &[Arg]) -> Vec<TokenStream> {
         .enumerate()
         .map(|(i, arg)| {
             let ident = &arg.ident;
-            let forget = quote! {
-                std::mem::forget(#ident);
-            };
             match &arg.info.kind {
                 ArgKind::Object => {
                     if arg.info.is_ref {

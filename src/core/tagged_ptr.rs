@@ -52,7 +52,7 @@ pub trait Tagged: Sized {
     }
 
     /// restore `Self` from the tagged value
-    unsafe fn from_raw(raw: u64) -> Self {
+    unsafe fn from_raw(_raw: u64) -> Self {
         unimplemented!()
     }
 
@@ -60,8 +60,6 @@ pub trait Tagged: Sized {
     unsafe fn cast_mut<'a>(val: u64) -> Self::DataMut<'a>;
 }
 
-pub(crate) const MAX_FIXNUM: i64 = i64::MAX >> 8;
-pub(crate) const MIN_FIXNUM: i64 = i64::MIN >> 8;
 
 macro_rules! impl_tagged_for_gc {
     ($name:ident, $lispty:expr, $inner:ty) => {

@@ -3,6 +3,7 @@ use std::marker::PhantomData;
 // include!(concat!(env!("OUT_DIR"), "/sym.rs"));
 // use sym::BUILTIN_SYMBOLS;
 
+use indexmap::IndexMap;
 use proc_macros::Trace;
 use scc::HashIndex;
 
@@ -15,7 +16,7 @@ use crate::{core::object::Object, core::Tagged, gc::Gc};
 
 use super::object::LispType;
 
-type Map = HashIndex<Symbol, SymbolCell, rustc_hash::FxBuildHasher>;
+type Map = IndexMap<Symbol, SymbolCell, rustc_hash::FxBuildHasher>;
 
 #[derive(Debug, Default)]
 pub struct SymbolMap {
@@ -24,14 +25,16 @@ pub struct SymbolMap {
 
 unsafe impl Trace for SymbolMap {
     unsafe fn trace(&self, visitor: crate::gc::Visitor) {
-        self.map.iter_sync(|_, cell| {
+        self.map.iter().map(|(_,cell)| {
             cell.trace(visitor);
             true
         });
     }
 
     unsafe fn finalize(&mut self) {
-        self.map.clear_sync();
+        for (_, cell) in self.map.iter_mut() {
+            cell.finalize();
+        }
     }
 }
 
@@ -70,10 +73,50 @@ impl SymbolMap {
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Trace)]
 pub struct Symbol {
     #[no_trace]
-    pub name: Ident,
+    pub data: LispSymbol,
     phantom: PhantomData<SymbolCell>,
 }
-pub type LispSymbol = Symbol;
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+pub struct LispSymbol(pub u64);
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+pub struct UnpackedLispSymbol {
+    pub index: u32,
+    pub ident: Ident,
+}
+
+impl UnpackedLispSymbol {
+    /// Creates an unpacked symbol from raw u64 where first 32 bits are index, last 32 bits are ident
+    pub fn from_raw_unpacked(value: u64) -> UnpackedLispSymbol {
+        let index = (value >> 32) as u32;
+        let ident = Ident((value & 0xFFFFFFFF) as u32);
+        UnpackedLispSymbol { index, ident }
+    }
+
+    /// Converts to raw u64 representation where first 32 bits are index, last 32 bits are ident
+    pub fn to_raw_packed(&self) -> u64 {
+        (self.index as u64) << 32 | (self.ident.0 as u64)
+    }
+
+    /// Returns true if this symbol is only determined by its ident (index is u32::MAX)
+    pub fn is_ident_only(&self) -> bool {
+        self.index == u32::MAX
+    }
+}
+
+impl From<LispSymbol> for UnpackedLispSymbol {
+    fn from(value: LispSymbol) -> Self {
+        Self::from_raw_unpacked(value.0)
+    }
+}
+
+impl From<UnpackedLispSymbol> for LispSymbol {
+    fn from(value: UnpackedLispSymbol) -> Self {
+        Self(value.to_raw_packed())
+    }
+}
 
 impl std::fmt::Debug for Symbol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -89,62 +132,13 @@ impl std::fmt::Display for Symbol {
     }
 }
 
-impl From<Ident> for Symbol {
-    fn from(value: Ident) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&Ident> for Symbol {
-    fn from(value: &Ident) -> Self {
-        Self::new(*value)
-    }
-}
-
-impl From<&str> for Symbol {
-    fn from(value: &str) -> Self {
-        Self::new(value.into())
-    }
-}
-
-impl From<String> for Symbol {
-    fn from(value: String) -> Self {
-        Self::new(value.into())
-    }
-}
-
 impl Symbol {
-    pub fn new(name: Ident) -> Self {
-        Self {
-            name,
-            phantom: PhantomData,
-        }
+    pub fn new(name: Ident, symbol_map: &SymbolMap) -> Self {
+        todo!()
     }
 
     pub fn name<'a>(&self) -> &'a str {
         self.name.text()
-    }
-}
-
-impl TryFrom<*mut Ident> for Symbol {
-    type Error = ();
-
-    fn try_from(value: *mut Ident) -> Result<Self, Self::Error> {
-        Ok(unsafe {
-            let ident: Ident = std::mem::transmute(value as u64);
-            Self::new(ident)
-        })
-    }
-}
-
-impl TryFrom<*mut Symbol> for Symbol {
-    type Error = ();
-
-    fn try_from(value: *mut Symbol) -> Result<Self, Self::Error> {
-        Ok(unsafe {
-            tracing::debug!("symbol's tryinto: {:?}", value as u64);
-            std::mem::transmute(value as u64)
-        })
     }
 }
 

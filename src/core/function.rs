@@ -12,6 +12,33 @@ use crate::{
     gc::Gc,
 };
 
+#[derive(Debug, Clone, Trace)]
+pub struct LispFunction(pub(crate) Gc<Function>);
+impl_tagged_for_gc!(LispFunction, LispType::Function, Function);
+
+
+#[derive(Debug, Clone, Trace)]
+pub struct Function {
+    #[no_trace]
+    pub func_id: FuncId,
+
+    #[no_trace]
+    pub func_type: FunctionType,
+
+    #[no_trace]
+    pub func_ptr: Option<FuncPtr>,
+    // #[no_trace]
+    // signature: FunctionSignature,
+}
+
+#[derive(Debug, Clone, Trace)]
+pub enum FunctionType {
+    #[no_trace]
+    Subr(SubrFn),
+    Lambda(LambdaFn),
+}
+
+
 #[derive(Debug, Clone, Copy)]
 pub struct SubrFn {
     name: Ident,
@@ -32,27 +59,6 @@ pub struct LambdaFn {
     pub captures: HashMap<Ident, Object>,
 }
 
-#[derive(Debug, Clone, Trace)]
-pub enum FunctionType {
-    #[no_trace]
-    Subr(SubrFn),
-    Lambda(LambdaFn),
-}
-
-#[derive(Debug, Clone, Trace)]
-pub struct Function {
-    #[no_trace]
-    pub func_id: FuncId,
-
-    #[no_trace]
-    pub func_type: FunctionType,
-
-    #[no_trace]
-    pub func_ptr: Option<FuncPtr>,
-    // #[no_trace]
-    // signature: FunctionSignature,
-}
-
 #[allow(unused)]
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,10 +69,6 @@ pub struct FunctionSignature {
     /// whether this function accepts variable args, like `&rest`
     pub variable_arg: bool,
 }
-
-#[derive(Debug, Clone, Trace)]
-pub struct LispFunction(pub(crate) Gc<Function>);
-impl_tagged_for_gc!(LispFunction, LispType::Function, Function);
 
 impl FunctionType {
     pub fn as_closure_mut(&mut self) -> Option<&mut LambdaFn> {

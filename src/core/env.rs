@@ -1,11 +1,9 @@
+use indexmap::IndexMap;
 use rustc_hash::FxBuildHasher;
 use scc::hash_index::{Entry, OccupiedEntry};
 
 use crate::core::{
-    error::{RuntimeError, RuntimeResult},
-    object::{Object, ObjectRef},
-    symbol::{Symbol, SymbolCell, SymbolMap},
-    tagged_ptr::TaggedObj,
+    error::{RuntimeError, RuntimeResult}, ident::Ident, object::{Object, ObjectRef}, symbol::{Symbol, SymbolCell, SymbolMap}, tagged_ptr::TaggedObj
 };
 
 #[derive(Debug, Default)]
@@ -74,6 +72,14 @@ impl Environment {
                 vacant_entry.insert_entry(SymbolCell::new(symbol, special))
             }
         }
+    }
+
+    pub fn push_stackmap(&self, obj: &Object) {
+        self.stack_map.push(obj);
+    }
+
+    pub fn pop_stackmap(&self, obj: &Object) {
+        self.stack_map.pop(obj);
     }
 
     pub fn init_nil_t(&self) {

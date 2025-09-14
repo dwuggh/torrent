@@ -9,7 +9,6 @@ use syn::{
 
 mod defun;
 mod defun_internal;
-// mod defun_new;
 mod function;
 mod variantly;
 

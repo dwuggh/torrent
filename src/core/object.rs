@@ -8,7 +8,7 @@ use crate::{
         number::{Character, Float, Integer, LispCharacter, LispFloat, LispInteger},
         string::{LispStr, Str},
         symbol::{LispSymbol, Symbol},
-        tagged_ptr::{get_tag, Tagged, TaggedObj},
+        tagged_ptr::{get_tag, TaggedObj},
         vector::{LispVector, Vector},
     },
     gc::Trace,
@@ -40,8 +40,8 @@ pub fn tru() -> Object {
 
 impl Object {
     pub fn inc_rc(&self) {
-        let val = self.clone();
-        std::mem::forget(val);
+        let obj = self.clone();
+        std::mem::forget(obj);
     }
 
     pub fn is_primitive(&self) -> bool {
@@ -78,17 +78,11 @@ unsafe impl Trace for Object {
 
 impl Clone for Object {
     fn clone(&self) -> Self {
-        let val = Self(self.0);
-        let val = val.untag();
-        let result = val.clone().tag();
-        std::mem::forget(val);
+        let obj = Self(self.0);
+        let obj = obj.untag();
+        let result = obj.clone().tag();
+        std::mem::forget(obj);
         result
-    }
-}
-
-impl From<LispCons> for Object {
-    fn from(cons: LispCons) -> Self {
-        cons.tag()
     }
 }
 
@@ -319,10 +313,10 @@ macro_rules! impl_try_from_for_object {
         impl<'a> TryFrom<&'a Object> for &'a $name {
             type Error = &'static str;
 
-            fn try_from(value: &'a Object) -> Result<Self, Self::Error> {
-                tracing::debug!("in try_into: {value:?}, {}", value.0);
-                match value.untagged_as_ref::<$lispname>() {
-                    Some(val) => Ok(val),
+            fn try_from(object: &'a Object) -> Result<Self, Self::Error> {
+                tracing::debug!("in try_into: {object:?}, {}", object.0);
+                match object.untagged_as_ref::<$lispname>() {
+                    Some(obj) => Ok(obj),
                     None => Err("wrong type"),
                 }
             }
@@ -331,9 +325,9 @@ macro_rules! impl_try_from_for_object {
         impl<'a> TryFrom<&'a Object> for &'a mut $name {
             type Error = &'static str;
 
-            fn try_from(value: &'a Object) -> Result<Self, Self::Error> {
-                match value.untagged_as_mut::<$lispname>() {
-                    Some(val) => Ok(val),
+            fn try_from(object: &'a Object) -> Result<Self, Self::Error> {
+                match object.untagged_as_mut::<$lispname>() {
+                    Some(obj) => Ok(obj),
                     None => Err("wrong type"),
                 }
             }
@@ -346,28 +340,20 @@ macro_rules! impl_try_from_for_primitive {
         impl TryFrom<&Object> for $name {
             type Error = &'static str;
 
-            fn try_from(value: &Object) -> Result<Self, Self::Error> {
-                if get_tag(value.0 as i64) == $lispname::TAG {
-                    match value.untagged_as_ref::<$lispname>() {
-                        Some(val) => Ok(val),
-                        None => Err("wrong type"),
-                    }
-                } else {
-                    Err("wrong")
+            fn try_from(object: &Object) -> Result<Self, Self::Error> {
+                match object.untagged_as_ref::<$lispname>() {
+                    Some(obj) => Ok(obj),
+                    None => Err("wrong type"),
                 }
             }
         }
         impl TryFrom<&mut Object> for $name {
             type Error = &'static str;
 
-            fn try_from(value: &mut Object) -> Result<Self, Self::Error> {
-                if get_tag(value.0 as i64) == $lispname::TAG {
-                    match value.untagged_as_ref::<$lispname>() {
-                        Some(val) => Ok(val),
-                        None => Err("wrong type"),
-                    }
-                } else {
-                    Err("wrong")
+            fn try_from(object: &mut Object) -> Result<Self, Self::Error> {
+                match object.untagged_as_ref::<$lispname>() {
+                    Some(obj) => Ok(obj),
+                    None => Err("wrong type"),
                 }
             }
         }

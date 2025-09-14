@@ -7,7 +7,7 @@ pub static INTERNER: LazyLock<ThreadedRodeo<Ident>> = LazyLock::new(ThreadedRode
 
 #[repr(transparent)]
 #[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Ident(pub u64);
+pub struct Ident(pub u32);
 
 unsafe impl Key for Ident {
     fn into_usize(self) -> usize {
@@ -15,7 +15,7 @@ unsafe impl Key for Ident {
     }
 
     fn try_from_usize(int: usize) -> Option<Self> {
-        Some(Self(int as u64))
+        Some(Self(int as u32))
     }
 }
 
@@ -32,7 +32,7 @@ impl std::fmt::Display for Ident {
 }
 
 impl Ident {
-    pub fn new(key: u64) -> Self {
+    pub fn new(key: u32) -> Self {
         // HACK put padding here to prevent null pointer check
         // tracing::debug!("spur: {spur:?}");
         Self(key)
@@ -50,13 +50,13 @@ impl Ident {
 
 impl From<u64> for Ident {
     fn from(value: u64) -> Self {
-        Self(value)
+        Self(value as u32)
     }
 }
 
 impl From<Ident> for u64 {
     fn from(val: Ident) -> Self {
-        val.0
+        val.0 as u64
     }
 }
 

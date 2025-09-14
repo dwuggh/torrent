@@ -17,7 +17,7 @@ pub mod gc;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
-    // init_gc();
+    // gc::collector::init_gc();
     let text = include_str!("test.el");
     let runtime_env = Environment::default();
     let mut jit = JIT::new(&runtime_env);
