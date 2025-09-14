@@ -1,7 +1,7 @@
 use crate::core::{
     ident::Ident,
     number::{LispCharacter, LispFloat, LispInteger},
-    string::LispStr,
+    string::LispStr, symbol::Symbol,
 };
 use std::sync::Arc;
 
@@ -16,7 +16,7 @@ pub enum Expr {
 }
 
 pub enum Var {
-    Symbol(Ident),
+    Symbol(Symbol),
     Local(Local),
 }
 
