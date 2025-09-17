@@ -9,10 +9,13 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::core::env::Environment;
 use crate::core::ident::Ident;
+use crate::core::number::{Character, Integer, LispCharacter, LispFloat, LispInteger};
 use crate::core::parser::expr::{
-    new_refbox, Args, Expr, If, Let, Literal, Number, Progn, SpecialForm, Var,
+    new_refbox, Args, Call, Expr, If, Interactive, Lambda, Let, Literal, Number, Progn, Quote,
+    QuoteKind, QuotedData, SpecialForm, Var,
 };
 use crate::core::parser::lexer::Token;
+use crate::core::string::LispStr;
 
 // type NodeInput<'s> = impl Input<'s, Node, SimpleSpan>;
 
@@ -124,34 +127,74 @@ where
             .or(just(Token::LParen).ignore_then(just(Token::RParen).ignored()))
             .map(|_| Expr::Nil);
 
+        let literal = select! {
+            Token::Integer(n) => Literal::Number(Number::Integer(LispInteger::new(n))),
+            Token::Float(f) => Literal::Number(Number::Real(LispFloat::new(f))),
+            Token::Character(c) => Literal::Character(LispCharacter::new(c)),
+            Token::Str(s) => Literal::String(LispStr::new(s))
+        }
+        .boxed();
+
+        let literal_expr = literal.clone().map(Expr::Literal);
+
         let vector = vecref
             .clone()
-            .delimited_by(just(Token::LBracket), just(Token::RBracket));
+            .delimited_by(just(Token::LBracket), just(Token::RBracket))
+            .map(|vector| Expr::Vector(vector))
+            .boxed();
 
         let progn = vecref.clone().map(Progn::new).boxed();
 
-        let symbol = ident.map(|ident| Cell::new(Var::Symbol(ident.into())));
+        let var = ident
+            .map(|ident| Cell::new(Var::Symbol(ident.into())))
+            .boxed();
+        let symbol_expr = var.clone().map(|var| Expr::Symbol(var)).boxed();
+        let string = any::<I, Extra>()
+            .try_map(|node, span| match node {
+                Token::Str(str) => Ok(str),
+                _ => Err(Rich::custom(span, "Expected string")),
+            })
+            .boxed();
 
-        let bindings = choice((
-            ident_interned.then(refexpr.map(Option::Some)),
-            ident_interned.map(|ident| (ident, None)),
-        ))
-        .repeated()
-        .collect::<Vec<_>>()
-        .map(Rc::new)
+        // call
+
+        let call = sexp(var.clone().then(vecref.clone()))
+            .map(|(symbol, args)| Expr::Call(Call { symbol, args }))
+            .boxed();
+
+        // special forms
+
+        // let
+        let bindings = sexp(
+            choice((
+                sexp(ident_interned.then(refexpr.map(Option::Some))).boxed(),
+                ident_interned.map(|ident| (ident, None)),
+            ))
+            .repeated()
+            .collect::<Vec<_>>()
+            .map(Rc::new),
+        )
         .boxed();
 
-        let let_expr = sexp(keyword("let").ignore_then(bindings).then(progn.clone())).map(
-            |(bindings, body)| Expr::SpecialForm(SpecialForm::Let(Let { bindings, body, id: 1 })),
-        ).boxed();
+        let let_expr = sexp(keyword("let").ignore_then(bindings).then(progn.clone()))
+            .map(|(bindings, body)| Let {
+                bindings,
+                body,
+                id: 1,
+            })
+            .boxed();
 
+        // if
         let if_expr = sexp(
             keyword("if")
                 .ignore_then(boxref.clone())
                 .then(boxref.clone())
                 .then(progn.clone()),
         )
-            .map(|((cond, then), els)| Expr::SpecialForm(SpecialForm::If(If { cond, then, els }))).boxed();
+        .map(|((cond, then), els)| If { cond, then, els })
+        .boxed();
+
+        // lambda
 
         let normal_arg = ident
             .try_map(|ident, span| {
@@ -169,39 +212,93 @@ where
             .collect::<Vec<_>>()
             .boxed();
 
-        let args = normal_arg
-            .clone()
-            .repeated()
-            .collect::<Vec<_>>()
-            .then(optional_arg.or_not())
-            .then(keyword("&rest").ignore_then(normal_arg.clone()).or_not())
-            .map(|((normal, optional), rest)| {
-                let args = Args {
-                    normal,
-                    optional,
-                    rest,
-                };
-                Rc::new(args)
-            })
-            .boxed();
+        let args = sexp(
+            normal_arg
+                .clone()
+                .repeated()
+                .collect::<Vec<_>>()
+                .then(optional_arg.or_not())
+                .then(keyword("&rest").ignore_then(normal_arg.clone()).or_not())
+                .map(|((normal, optional), rest)| {
+                    let args = Args {
+                        normal,
+                        optional,
+                        rest,
+                    };
+                    Rc::new(args)
+                }),
+        )
+        .boxed();
 
-        let string = any::<I, Extra>()
-            .try_map(|node, span| match node {
-                Token::Str(str) => Ok(str),
-                _ => Err(Rich::custom(span, "Expected string")),
-            })
-            .boxed();
-        let interactive = keyword;
-        // let lambda = keyword("lambda")
-        //     .ignore_then()
+        let interactive = sexp(
+            keyword("interactive")
+                .ignore_then(string.clone().or_not())
+                .then(
+                    var.clone()
+                        .repeated()
+                        .at_least(1)
+                        .collect::<Vec<_>>()
+                        .or_not(),
+                ),
+        )
+        .map(|(arg_desc, modes)| Interactive { arg_desc, modes })
+        .boxed();
 
-        let primitive = select! {
-            Token::Integer(n) => Expr::new_int(n),
-            Token::Float(f) => Expr::new_float(f),
-            Token::Character(c) => Expr::new_char(c),
-            Token::Str(s) => Expr::new_str(s),
-        };
-        choice((primitive, let_expr, if_expr))
+        let lambda = sexp(
+            keyword("lambda")
+                .ignore_then(args)
+                .then(string.clone().or_not())
+                .then(interactive.or_not())
+                .then(progn),
+        )
+        .map(|(((args, docstring), interactive), body)| Lambda {
+            args,
+            docstring,
+            interactive,
+            declare: None,
+            body,
+            captures: RefCell::new(Vec::new()),
+        })
+        .boxed();
+
+        let quoted_data = recursive(|quoted_data| {
+            let unquote = just(Token::Unquote).ignore_then(boxref.clone().map(QuotedData::Unquote));
+            let unquote_splice = just(Token::UnquoteSplice)
+                .ignore_then(boxref.clone().map(QuotedData::UnquoteSplice));
+
+            let list = sexp(quoted_data.clone().repeated().collect::<Vec<_>>()).boxed();
+            let vector = quoted_data
+                .repeated()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LBracket), just(Token::RBracket));
+            choice((
+                var.clone().map(QuotedData::Symbol),
+                literal.clone().map(QuotedData::Literal),
+                list.map(QuotedData::List),
+                vector.map(QuotedData::Vector),
+                unquote,
+                unquote_splice,
+            ))
+        });
+
+        let quote = choice((
+            just(Token::Quote).map(|_| QuoteKind::Quote),
+            just(Token::Backquote).map(|_| QuoteKind::Backquote),
+        ))
+        .then(quoted_data)
+        .map(|(kind, expr)| Quote { kind, expr })
+        .boxed();
+
+        let special_form = choice((
+            lambda.map(|form| Expr::SpecialForm(SpecialForm::Lambda(form))),
+            if_expr.map(|form| Expr::SpecialForm(SpecialForm::If(form))),
+            let_expr.map(|form| Expr::SpecialForm(SpecialForm::Let(form))),
+            quote.map(|form| Expr::SpecialForm(SpecialForm::Quote(form))),
+        ));
+
+
+
+        choice((nil, literal_expr, symbol_expr, vector, call, special_form))
     })
 }
 
@@ -215,62 +312,63 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::core::number::LispInteger;
+
     use super::*;
     use chumsky::input::Stream;
     use chumsky::Parser;
+    use logos::Logos;
 
-    fn parse_tokens(tokens: Vec<Token>) -> Result<Expr, Vec<Rich<Token>>> {
-        let stream = Stream::from_iter(tokens).spanned(SimpleSpan::new(0, 0));
+    fn parse_src(src: &str) -> Result<Expr, Vec<Rich<Token>>> {
+        let tokens = Token::lexer(src).spanned().map(|(tok, span)| match tok {
+            Ok(tok) => (tok, span.into()),
+            Err(_) => (Token::Error, span.into()),
+        });
+        let stream = Stream::from_iter(tokens).map((0..src.len()).into(), |(t, s)| (t, s));
         parser().parse(stream).into_result()
     }
 
     #[test]
     fn test_parse_primitives() {
         // Test integer
-        let tokens = vec![Token::Integer(42)];
-        let result = parse_tokens(tokens).unwrap();
+        let result = parse_src("42").unwrap();
         match result {
-            Expr::Literal(Literal::Number(Number::Int(n))) => assert_eq!(n, 42),
+            Expr::Literal(Literal::Number(Number::Integer(n))) => assert_eq!(n.0, 42),
             _ => panic!("Expected integer literal"),
         }
 
         // Test float
-        let tokens = vec![Token::Float(3.14)];
-        let result = parse_tokens(tokens).unwrap();
+        let result = parse_src("3.14").unwrap();
         match result {
-            Expr::Literal(Literal::Number(Number::Float(f))) => assert_eq!(f, 3.14),
+            Expr::Literal(Literal::Number(Number::Real(f))) => assert_eq!(f.0, 3.14),
             _ => panic!("Expected float literal"),
         }
 
         // Test character
-        let tokens = vec![Token::Character('a')];
-        let result = parse_tokens(tokens).unwrap();
+        let result = parse_src("?a").unwrap();
         match result {
-            Expr::Literal(Literal::Character(c)) => assert_eq!(c, 'a'),
+            Expr::Literal(Literal::Character(c)) => assert_eq!(c.0.to_char().unwrap(), 'a'),
             _ => panic!("Expected character literal"),
         }
 
         // Test string
-        let tokens = vec![Token::Str("hello")];
-        let result = parse_tokens(tokens).unwrap();
+        let result = parse_src("\"hello\"").unwrap();
         match result {
-            Expr::Literal(Literal::Str(s)) => assert_eq!(s, "hello"),
+            Expr::Literal(Literal::String(s)) => assert_eq!(s.to_string(), "hello"),
             _ => panic!("Expected string literal"),
         }
 
         // Test nil (keyword)
-        let tokens = vec![Token::Ident("nil")];
-        let result = parse_tokens(tokens).unwrap();
+        let result = parse_src("nil").unwrap();
         match result {
-            Expr::Nil => {},
+            Expr::Nil => {}
             _ => panic!("Expected nil"),
         }
 
         // Test nil (empty list)
-        let tokens = vec![Token::LParen, Token::RParen];
-        let result = parse_tokens(tokens).unwrap();
+        let result = parse_src("()").unwrap();
         match result {
-            Expr::Nil => {},
+            Expr::Nil => {}
             _ => panic!("Expected nil from empty list"),
         }
     }
@@ -278,132 +376,114 @@ mod tests {
     #[test]
     fn test_parse_if_expression() {
         // Test (if condition then else)
-        let tokens = vec![
-            Token::LParen,
-            Token::Ident("if"),
-            Token::Integer(1),  // condition
-            Token::Integer(2),  // then
-            Token::Integer(3),  // else
-            Token::RParen,
-        ];
-        let result = parse_tokens(tokens).unwrap();
-        
+        let result = parse_src("(if 1 2 3)").unwrap();
+
         match result {
             Expr::SpecialForm(SpecialForm::If(if_expr)) => {
                 // Verify condition is integer 1
-                match if_expr.cond.borrow().as_ref() {
-                    Expr::Literal(Literal::Number(Number::Int(1))) => {},
+                match *if_expr.cond.borrow() {
+                    Expr::Literal(Literal::Number(_)) => {}
                     _ => panic!("Expected condition to be integer 1"),
                 }
-                
+
                 // Verify then is integer 2
-                match if_expr.then.borrow().as_ref() {
-                    Expr::Literal(Literal::Number(Number::Int(2))) => {},
+                match *if_expr.then.borrow() {
+                    Expr::Literal(Literal::Number(Number::Integer(LispInteger(2)))) => {}
                     _ => panic!("Expected then to be integer 2"),
                 }
-                
+
                 // Verify else body contains integer 3
-                assert_eq!(if_expr.els.exprs.len(), 1);
-                match if_expr.els.exprs[0].borrow().as_ref() {
-                    Expr::Literal(Literal::Number(Number::Int(3))) => {},
+                assert_eq!(if_expr.els.body.len(), 1);
+                match *if_expr.els.body[0].borrow() {
+                    Expr::Literal(Literal::Number(Number::Integer(LispInteger(3)))) => {}
                     _ => panic!("Expected else to be integer 3"),
                 }
-            },
+            }
             _ => panic!("Expected if expression"),
         }
     }
 
     #[test]
     fn test_parse_let_expression() {
-        // Test (let (x 42) x)
-        let tokens = vec![
-            Token::LParen,
-            Token::Ident("let"),
-            Token::Ident("x"),
-            Token::Integer(42),
-            Token::Ident("x"),
-            Token::RParen,
-        ];
-        let result = parse_tokens(tokens).unwrap();
-        
+        let result = parse_src("(let ((x 42)) x)").unwrap();
+
         match result {
             Expr::SpecialForm(SpecialForm::Let(let_expr)) => {
                 // Verify bindings
                 assert_eq!(let_expr.bindings.len(), 1);
                 let (ident, value) = &let_expr.bindings[0];
-                assert_eq!(ident.name(), "x");
-                
-                match value.as_ref().unwrap().borrow().as_ref() {
-                    Expr::Literal(Literal::Number(Number::Int(42))) => {},
+                assert_eq!(ident.text(), "x");
+
+                match *value.as_ref().unwrap().borrow() {
+                    Expr::Literal(Literal::Number(Number::Integer(LispInteger(42)))) => {}
                     _ => panic!("Expected binding value to be integer 42"),
                 }
-                
+
                 // Verify body contains variable reference
-                assert_eq!(let_expr.body.exprs.len(), 1);
-                match let_expr.body.exprs[0].borrow().as_ref() {
-                    Expr::Var(var) => {
-                        match var.get() {
-                            Var::Symbol(sym) => assert_eq!(sym.name(), "x"),
-                            _ => panic!("Expected symbol variable"),
-                        }
+                assert_eq!(let_expr.body.body.len(), 1);
+                match &*let_expr.body.body[0].borrow() {
+                    Expr::Symbol(var) => match var.get() {
+                        Var::Symbol(sym) => assert_eq!(sym.name(), "x"),
+                        _ => panic!("Expected symbol variable"),
                     },
                     _ => panic!("Expected variable in let body"),
                 }
-            },
+            }
             _ => panic!("Expected let expression"),
         }
     }
 
     #[test]
     fn test_parse_let_without_value() {
-        // Test (let x x) - binding without initial value
-        let tokens = vec![
-            Token::LParen,
-            Token::Ident("let"),
-            Token::Ident("x"),
-            Token::Ident("x"),
-            Token::RParen,
-        ];
-        let result = parse_tokens(tokens).unwrap();
-        
+        let result = parse_src("(let (x) x)").unwrap();
+
         match result {
             Expr::SpecialForm(SpecialForm::Let(let_expr)) => {
                 // Verify bindings
                 assert_eq!(let_expr.bindings.len(), 1);
                 let (ident, value) = &let_expr.bindings[0];
-                assert_eq!(ident.name(), "x");
+                assert_eq!(ident.text(), "x");
                 assert!(value.is_none(), "Expected no initial value");
-            },
+            }
             _ => panic!("Expected let expression"),
         }
     }
 
     #[test]
     fn test_parse_nested_expressions() {
-        // Test (if (let x 1 x) 2 3)
-        let tokens = vec![
-            Token::LParen,
-            Token::Ident("if"),
-            Token::LParen,
-            Token::Ident("let"),
-            Token::Ident("x"),
-            Token::Integer(1),
-            Token::Ident("x"),
-            Token::RParen,
-            Token::Integer(2),
-            Token::Integer(3),
-            Token::RParen,
-        ];
-        let result = parse_tokens(tokens).unwrap();
-        
+        let result = parse_src("(if (let ((x 1)) x) 2 3)").unwrap();
+
         match result {
             Expr::SpecialForm(SpecialForm::If(if_expr)) => {
                 // Verify condition is a let expression
-                match if_expr.cond.borrow().as_ref() {
-                    Expr::SpecialForm(SpecialForm::Let(_)) => {},
+                match &*if_expr.cond.borrow() {
+                    Expr::SpecialForm(SpecialForm::Let(_)) => {}
                     _ => panic!("Expected condition to be let expression"),
                 }
-            },
+            }
+            _ => panic!("Expected if expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_lambda() {
+        let result = parse_src(
+            "(lambda (x y &optional z &optional x &rest args)
+(interactive \"P\")
+)",
+        )
+        .unwrap();
+
+        match result {
+            Expr::SpecialForm(SpecialForm::Lambda(lambda)) => {
+                let normal = lambda.args.normal.len();
+                let optional = lambda.args.optional.as_ref().unwrap();
+                let rest = lambda.args.rest;
+                assert_eq!(normal, 2);
+                assert_eq!(optional.len(), 2);
+                assert!(rest.is_some());
+                assert!(lambda.interactive.is_some());
+            }
             _ => panic!("Expected if expression"),
         }
     }
