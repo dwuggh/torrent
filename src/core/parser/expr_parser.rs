@@ -216,9 +216,195 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chumsky::input::Stream;
+    use chumsky::Parser;
+
+    fn parse_tokens(tokens: Vec<Token>) -> Result<Expr, Vec<Rich<Token>>> {
+        let stream = Stream::from_iter(tokens).spanned(SimpleSpan::new(0, 0));
+        parser().parse(stream).into_result()
+    }
 
     #[test]
-    fn test_parse_expr() {
-        // parser().
+    fn test_parse_primitives() {
+        // Test integer
+        let tokens = vec![Token::Integer(42)];
+        let result = parse_tokens(tokens).unwrap();
+        match result {
+            Expr::Literal(Literal::Number(Number::Int(n))) => assert_eq!(n, 42),
+            _ => panic!("Expected integer literal"),
+        }
+
+        // Test float
+        let tokens = vec![Token::Float(3.14)];
+        let result = parse_tokens(tokens).unwrap();
+        match result {
+            Expr::Literal(Literal::Number(Number::Float(f))) => assert_eq!(f, 3.14),
+            _ => panic!("Expected float literal"),
+        }
+
+        // Test character
+        let tokens = vec![Token::Character('a')];
+        let result = parse_tokens(tokens).unwrap();
+        match result {
+            Expr::Literal(Literal::Character(c)) => assert_eq!(c, 'a'),
+            _ => panic!("Expected character literal"),
+        }
+
+        // Test string
+        let tokens = vec![Token::Str("hello")];
+        let result = parse_tokens(tokens).unwrap();
+        match result {
+            Expr::Literal(Literal::Str(s)) => assert_eq!(s, "hello"),
+            _ => panic!("Expected string literal"),
+        }
+
+        // Test nil (keyword)
+        let tokens = vec![Token::Ident("nil")];
+        let result = parse_tokens(tokens).unwrap();
+        match result {
+            Expr::Nil => {},
+            _ => panic!("Expected nil"),
+        }
+
+        // Test nil (empty list)
+        let tokens = vec![Token::LParen, Token::RParen];
+        let result = parse_tokens(tokens).unwrap();
+        match result {
+            Expr::Nil => {},
+            _ => panic!("Expected nil from empty list"),
+        }
+    }
+
+    #[test]
+    fn test_parse_if_expression() {
+        // Test (if condition then else)
+        let tokens = vec![
+            Token::LParen,
+            Token::Ident("if"),
+            Token::Integer(1),  // condition
+            Token::Integer(2),  // then
+            Token::Integer(3),  // else
+            Token::RParen,
+        ];
+        let result = parse_tokens(tokens).unwrap();
+        
+        match result {
+            Expr::SpecialForm(SpecialForm::If(if_expr)) => {
+                // Verify condition is integer 1
+                match if_expr.cond.borrow().as_ref() {
+                    Expr::Literal(Literal::Number(Number::Int(1))) => {},
+                    _ => panic!("Expected condition to be integer 1"),
+                }
+                
+                // Verify then is integer 2
+                match if_expr.then.borrow().as_ref() {
+                    Expr::Literal(Literal::Number(Number::Int(2))) => {},
+                    _ => panic!("Expected then to be integer 2"),
+                }
+                
+                // Verify else body contains integer 3
+                assert_eq!(if_expr.els.exprs.len(), 1);
+                match if_expr.els.exprs[0].borrow().as_ref() {
+                    Expr::Literal(Literal::Number(Number::Int(3))) => {},
+                    _ => panic!("Expected else to be integer 3"),
+                }
+            },
+            _ => panic!("Expected if expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_let_expression() {
+        // Test (let (x 42) x)
+        let tokens = vec![
+            Token::LParen,
+            Token::Ident("let"),
+            Token::Ident("x"),
+            Token::Integer(42),
+            Token::Ident("x"),
+            Token::RParen,
+        ];
+        let result = parse_tokens(tokens).unwrap();
+        
+        match result {
+            Expr::SpecialForm(SpecialForm::Let(let_expr)) => {
+                // Verify bindings
+                assert_eq!(let_expr.bindings.len(), 1);
+                let (ident, value) = &let_expr.bindings[0];
+                assert_eq!(ident.name(), "x");
+                
+                match value.as_ref().unwrap().borrow().as_ref() {
+                    Expr::Literal(Literal::Number(Number::Int(42))) => {},
+                    _ => panic!("Expected binding value to be integer 42"),
+                }
+                
+                // Verify body contains variable reference
+                assert_eq!(let_expr.body.exprs.len(), 1);
+                match let_expr.body.exprs[0].borrow().as_ref() {
+                    Expr::Var(var) => {
+                        match var.get() {
+                            Var::Symbol(sym) => assert_eq!(sym.name(), "x"),
+                            _ => panic!("Expected symbol variable"),
+                        }
+                    },
+                    _ => panic!("Expected variable in let body"),
+                }
+            },
+            _ => panic!("Expected let expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_let_without_value() {
+        // Test (let x x) - binding without initial value
+        let tokens = vec![
+            Token::LParen,
+            Token::Ident("let"),
+            Token::Ident("x"),
+            Token::Ident("x"),
+            Token::RParen,
+        ];
+        let result = parse_tokens(tokens).unwrap();
+        
+        match result {
+            Expr::SpecialForm(SpecialForm::Let(let_expr)) => {
+                // Verify bindings
+                assert_eq!(let_expr.bindings.len(), 1);
+                let (ident, value) = &let_expr.bindings[0];
+                assert_eq!(ident.name(), "x");
+                assert!(value.is_none(), "Expected no initial value");
+            },
+            _ => panic!("Expected let expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nested_expressions() {
+        // Test (if (let x 1 x) 2 3)
+        let tokens = vec![
+            Token::LParen,
+            Token::Ident("if"),
+            Token::LParen,
+            Token::Ident("let"),
+            Token::Ident("x"),
+            Token::Integer(1),
+            Token::Ident("x"),
+            Token::RParen,
+            Token::Integer(2),
+            Token::Integer(3),
+            Token::RParen,
+        ];
+        let result = parse_tokens(tokens).unwrap();
+        
+        match result {
+            Expr::SpecialForm(SpecialForm::If(if_expr)) => {
+                // Verify condition is a let expression
+                match if_expr.cond.borrow().as_ref() {
+                    Expr::SpecialForm(SpecialForm::Let(_)) => {},
+                    _ => panic!("Expected condition to be let expression"),
+                }
+            },
+            _ => panic!("Expected if expression"),
+        }
     }
 }
