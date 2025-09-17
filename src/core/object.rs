@@ -366,28 +366,98 @@ impl_try_from_for_object!(Function, LispFunction);
 impl_try_from_for_object!(HashTable, LispHashTable);
 
 
-impl TryFrom<LispObject> for Token {
-    type Error = ();
-
-    fn try_from(value: LispObject) -> Result<Self, <Token as TryFrom<LispObject>>::Error> {
-        match value {
-            LispObject::Nil => Ok(Token::Ident("nil".into())),
-            LispObject::True => todo!(),
-            LispObject::Int(lisp_integer) => Ok(Token::Integer(lisp_integer.0)),
-            LispObject::Float(lisp_float) => Ok(Token::Float(lisp_float.0)),
-            LispObject::Character(lisp_character) => Ok(Token::Character(lisp_character.value())),
-            LispObject::Str(lisp_str) => Ok(Token::Str(lisp_str.to_string())),
-            LispObject::Symbol(lisp_symbol) => Ok(Token::Ident(lisp_symbol.0.ident())),
-            LispObject::Vector(lisp_vector) => {
-                let mut vec = Vec::new();
-                for item in lisp_vector.0.get().iter() {
-                    match item.try_into() {
-                    } 
-                }
+/// Convert a LispObject into a sequence of tokens for macro expansion
+pub fn lisp_object_to_tokens(obj: &LispObject) -> Vec<Token> {
+    match obj {
+        LispObject::Nil => vec![Token::Ident("nil".into())],
+        LispObject::True => vec![Token::Ident("t".into())],
+        LispObject::Int(lisp_integer) => vec![Token::Integer(lisp_integer.0)],
+        LispObject::Float(lisp_float) => vec![Token::Float(lisp_float.0)],
+        LispObject::Character(lisp_character) => vec![Token::Character(lisp_character.value())],
+        LispObject::Str(lisp_str) => vec![Token::Str(lisp_str.to_string())],
+        LispObject::Symbol(lisp_symbol) => vec![Token::Ident(lisp_symbol.0.ident())],
+        LispObject::Vector(lisp_vector) => {
+            let mut tokens = vec![Token::LBracket];
+            for item in lisp_vector.0.get().iter() {
+                let item_obj = item.untag();
+                tokens.extend(lisp_object_to_tokens(&item_obj));
             }
-            LispObject::Cons(lisp_cons) => todo!(),
-            LispObject::Function(lisp_function) => todo!(),
-            LispObject::HashTable(lisp_hash_table) => todo!(),
+            tokens.push(Token::RBracket);
+            tokens
         }
+        LispObject::Cons(lisp_cons) => {
+            cons_to_tokens(&lisp_cons.0)
+        }
+        LispObject::Function(_) => {
+            // Functions can't be directly converted to tokens for macro expansion
+            vec![Token::Ident("#<function>".into())]
+        }
+        LispObject::HashTable(_) => {
+            // Hash tables can't be directly converted to tokens for macro expansion
+            vec![Token::Ident("#<hash-table>".into())]
+        }
+    }
+}
+
+/// Convert a cons cell to tokens, handling proper list structure
+fn cons_to_tokens(cons: &Cons) -> Vec<Token> {
+    let mut tokens = vec![Token::LParen];
+    
+    // Handle the car
+    let car_obj = cons.car().untag();
+    tokens.extend(lisp_object_to_tokens(&car_obj));
+    
+    // Handle the cdr - could be nil (proper list), another cons (list continues), or atom (dotted pair)
+    let mut current_cdr = cons.cdr();
+    
+    loop {
+        match current_cdr.as_ref() {
+            ObjectRef::Nil => {
+                // Proper list termination
+                break;
+            }
+            ObjectRef::Cons(next_cons) => {
+                // List continues
+                let car_obj = next_cons.car().untag();
+                tokens.extend(lisp_object_to_tokens(&car_obj));
+                current_cdr = next_cons.cdr();
+            }
+            _ => {
+                // Dotted pair - for now, represent as a comment since we don't have Token::Dot
+                // This is a limitation that should be addressed by adding Token::Dot to the lexer
+                tokens.push(Token::Ident("...".into())); // Placeholder for dotted pair
+                break;
+            }
+        }
+    }
+    
+    tokens.push(Token::RParen);
+    tokens
+}
+
+/// Iterator adapter for streaming tokens from a LispObject
+pub struct LispObjectTokenIterator {
+    tokens: std::vec::IntoIter<Token>,
+}
+
+impl LispObjectTokenIterator {
+    pub fn new(obj: &LispObject) -> Self {
+        Self {
+            tokens: lisp_object_to_tokens(obj).into_iter(),
+        }
+    }
+}
+
+impl Iterator for LispObjectTokenIterator {
+    type Item = Token;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.tokens.next()
+    }
+}
+
+impl From<&LispObject> for LispObjectTokenIterator {
+    fn from(obj: &LispObject) -> Self {
+        Self::new(obj)
     }
 }
