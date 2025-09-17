@@ -11,8 +11,10 @@ use crate::core::env::Environment;
 use crate::core::ident::Ident;
 use crate::core::number::{Character, Integer, LispCharacter, LispFloat, LispInteger};
 use crate::core::parser::expr::{
-    new_refbox, Args, Call, Expr, If, Interactive, Lambda, Let, Literal, Number, Progn, Quote,
-    QuoteKind, QuotedData, SpecialForm, Var,
+    new_refbox, Args, Call, Catch, Cond, CondClause, ConditionCase, ConditionHandler, Defconst,
+    Defvar, Expr, Function, If, Interactive, Lambda, Let, LetStar, Literal, Number, Prog1, Prog2,
+    Progn, Quote, QuoteKind, QuotedData, Set, Setq, SetqDefault, SpecialForm, UnwindProtect, Var,
+    While,
 };
 use crate::core::parser::lexer::Token;
 use crate::core::string::LispStr;
@@ -289,11 +291,204 @@ where
         .map(|(kind, expr)| Quote { kind, expr })
         .boxed();
 
+        // and/or
+        let and_expr = sexp(keyword("and").ignore_then(vecref.clone()))
+            .map(|exprs| Expr::SpecialForm(SpecialForm::And(exprs)))
+            .boxed();
+
+        let or_expr = sexp(keyword("or").ignore_then(vecref.clone()))
+            .map(|exprs| Expr::SpecialForm(SpecialForm::Or(exprs)))
+            .boxed();
+
+        // catch
+        let catch_expr = sexp(
+            keyword("catch")
+                .ignore_then(boxref.clone())
+                .then(progn.clone())
+        )
+        .map(|(tag, body)| Catch { tag, body })
+        .boxed();
+
+        // cond
+        let cond_clause = sexp(
+            refexpr.clone()
+                .then(progn.clone())
+        )
+        .map(|(condition, body)| CondClause { condition, body })
+        .boxed();
+
+        let cond_expr = sexp(
+            keyword("cond")
+                .ignore_then(cond_clause.repeated().collect::<Vec<_>>())
+        )
+        .map(|clauses| Cond { clauses })
+        .boxed();
+
+        // condition-case
+        let condition_handler = sexp(
+            refexpr.clone()
+                .then(progn.clone())
+        )
+        .map(|(condition, body)| ConditionHandler { condition, body })
+        .boxed();
+
+        let condition_case_expr = sexp(
+            keyword("condition-case")
+                .ignore_then(ident_interned.or_not())
+                .then(boxref.clone())
+                .then(condition_handler.repeated().collect::<Vec<_>>())
+        )
+        .map(|((var, protected), handlers)| ConditionCase { var, protected, handlers })
+        .boxed();
+
+        // defvar/defconst
+        let defvar_expr = sexp(
+            keyword("defvar")
+                .ignore_then(ident_interned)
+                .then(refexpr.clone().map(|e| RefCell::new(Box::new(e))).or_not())
+                .then(string.clone().or_not())
+        )
+        .map(|((symbol, value), docstring)| Defvar { symbol, value, docstring })
+        .boxed();
+
+        let defconst_expr = sexp(
+            keyword("defconst")
+                .ignore_then(ident_interned)
+                .then(refexpr.clone().map(|e| RefCell::new(Box::new(e))))
+                .then(string.clone().or_not())
+        )
+        .map(|((symbol, value), docstring)| Defconst { symbol, value, docstring })
+        .boxed();
+
+        // function
+        let function_expr = sexp(
+            keyword("function")
+                .ignore_then(progn.clone())
+        )
+        .map(|body| Function { body })
+        .boxed();
+
+        // let*
+        let let_star_expr = sexp(keyword("let*").ignore_then(bindings).then(progn.clone()))
+            .map(|(bindings, body)| LetStar {
+                bindings,
+                body,
+                id: 1,
+            })
+            .boxed();
+
+        // prog1/prog2
+        let prog1_expr = sexp(
+            keyword("prog1")
+                .ignore_then(boxref.clone())
+                .then(progn.clone())
+        )
+        .map(|(first, rest)| Prog1 { first, rest })
+        .boxed();
+
+        let prog2_expr = sexp(
+            keyword("prog2")
+                .ignore_then(boxref.clone())
+                .then(boxref.clone())
+                .then(progn.clone())
+        )
+        .map(|((first, second), rest)| Prog2 { first, second, rest })
+        .boxed();
+
+        // progn
+        let progn_expr = sexp(keyword("progn").ignore_then(progn.clone()))
+            .map(|body| Expr::SpecialForm(SpecialForm::Progn(body)))
+            .boxed();
+
+        // set/setq/setq-default
+        let set_expr = sexp(
+            keyword("set")
+                .ignore_then(ident_interned)
+                .then(expr.clone().map(Box::new))
+        )
+        .map(|(symbol, value)| Set { symbol, value })
+        .boxed();
+
+        let setq_assignment = ident_interned.then(refexpr.clone());
+        let setq_expr = sexp(
+            keyword("setq")
+                .ignore_then(setq_assignment.repeated().collect::<Vec<_>>())
+        )
+        .map(|assignments| Setq { assignments })
+        .boxed();
+
+        let setq_default_expr = sexp(
+            keyword("setq-default")
+                .ignore_then(setq_assignment.repeated().collect::<Vec<_>>())
+        )
+        .map(|assignments| SetqDefault { assignments })
+        .boxed();
+
+        // save-* forms
+        let save_current_buffer_expr = sexp(
+            keyword("save-current-buffer")
+                .ignore_then(progn.clone())
+        )
+        .map(|body| Expr::SpecialForm(SpecialForm::SaveCurrentBuffer(body)))
+        .boxed();
+
+        let save_excursion_expr = sexp(
+            keyword("save-excursion")
+                .ignore_then(progn.clone())
+        )
+        .map(|body| Expr::SpecialForm(SpecialForm::SaveExcursion(body)))
+        .boxed();
+
+        let save_restriction_expr = sexp(
+            keyword("save-restriction")
+                .ignore_then(progn.clone())
+        )
+        .map(|body| Expr::SpecialForm(SpecialForm::SaveRestriction(body)))
+        .boxed();
+
+        // unwind-protect
+        let unwind_protect_expr = sexp(
+            keyword("unwind-protect")
+                .ignore_then(boxref.clone())
+                .then(progn.clone())
+        )
+        .map(|(protected, cleanup)| UnwindProtect { protected, cleanup })
+        .boxed();
+
+        // while
+        let while_expr = sexp(
+            keyword("while")
+                .ignore_then(boxref.clone())
+                .then(progn.clone())
+        )
+        .map(|(condition, body)| While { condition, body })
+        .boxed();
+
         let special_form = choice((
             lambda.map(|form| Expr::SpecialForm(SpecialForm::Lambda(form))),
             if_expr.map(|form| Expr::SpecialForm(SpecialForm::If(form))),
             let_expr.map(|form| Expr::SpecialForm(SpecialForm::Let(form))),
+            let_star_expr.map(|form| Expr::SpecialForm(SpecialForm::LetStar(form))),
             quote.map(|form| Expr::SpecialForm(SpecialForm::Quote(form))),
+            and_expr,
+            or_expr,
+            catch_expr.map(|form| Expr::SpecialForm(SpecialForm::Catch(form))),
+            cond_expr.map(|form| Expr::SpecialForm(SpecialForm::Cond(form))),
+            condition_case_expr.map(|form| Expr::SpecialForm(SpecialForm::ConditionCase(form))),
+            defvar_expr.map(|form| Expr::SpecialForm(SpecialForm::Defvar(form))),
+            defconst_expr.map(|form| Expr::SpecialForm(SpecialForm::Defconst(form))),
+            function_expr.map(|form| Expr::SpecialForm(SpecialForm::Function(form))),
+            prog1_expr.map(|form| Expr::SpecialForm(SpecialForm::Prog1(form))),
+            prog2_expr.map(|form| Expr::SpecialForm(SpecialForm::Prog2(form))),
+            progn_expr,
+            set_expr.map(|form| Expr::SpecialForm(SpecialForm::Set(form))),
+            setq_expr.map(|form| Expr::SpecialForm(SpecialForm::Setq(form))),
+            setq_default_expr.map(|form| Expr::SpecialForm(SpecialForm::SetqDefault(form))),
+            save_current_buffer_expr,
+            save_excursion_expr,
+            save_restriction_expr,
+            unwind_protect_expr.map(|form| Expr::SpecialForm(SpecialForm::UnwindProtect(form))),
+            while_expr.map(|form| Expr::SpecialForm(SpecialForm::While(form))),
         ));
 
 
@@ -484,7 +679,46 @@ mod tests {
                 assert!(rest.is_some());
                 assert!(lambda.interactive.is_some());
             }
-            _ => panic!("Expected if expression"),
+            _ => panic!("Expected lambda expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_and_or() {
+        let result = parse_src("(and 1 2 3)").unwrap();
+        match result {
+            Expr::SpecialForm(SpecialForm::And(exprs)) => {
+                assert_eq!(exprs.len(), 3);
+            }
+            _ => panic!("Expected and expression"),
+        }
+
+        let result = parse_src("(or nil t)").unwrap();
+        match result {
+            Expr::SpecialForm(SpecialForm::Or(exprs)) => {
+                assert_eq!(exprs.len(), 2);
+            }
+            _ => panic!("Expected or expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_cond() {
+        let result = parse_src("(cond ((= x 1) 'one) ((= x 2) 'two) (t 'other))").unwrap();
+        match result {
+            Expr::SpecialForm(SpecialForm::Cond(cond_expr)) => {
+                assert_eq!(cond_expr.clauses.len(), 3);
+            }
+            _ => panic!("Expected cond expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_while() {
+        let result = parse_src("(while (< i 10) (setq i (+ i 1)))").unwrap();
+        match result {
+            Expr::SpecialForm(SpecialForm::While(_)) => {}
+            _ => panic!("Expected while expression"),
         }
     }
 }
