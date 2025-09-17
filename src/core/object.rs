@@ -2,14 +2,7 @@ use proc_macros::Trace;
 
 use crate::{
     core::{
-        cons::{Cons, LispCons},
-        function::{Function, LispFunction},
-        hashtable::{HashTable, LispHashTable},
-        number::{Character, Float, Integer, LispCharacter, LispFloat, LispInteger},
-        string::{LispStr, Str},
-        symbol::{LispSymbol, Symbol},
-        tagged_ptr::{get_tag, TaggedObj},
-        vector::{LispVector, Vector},
+        cons::{Cons, LispCons}, function::{Function, LispFunction}, hashtable::{HashTable, LispHashTable}, number::{Character, Float, Integer, LispCharacter, LispFloat, LispInteger}, parser::lexer::Token, string::{LispStr, Str}, symbol::{LispSymbol, Symbol}, tagged_ptr::{get_tag, TaggedObj}, vector::{LispVector, Vector}
     },
     gc::Trace,
 };
@@ -88,7 +81,7 @@ impl Clone for Object {
 
 impl Drop for Object {
     fn drop(&mut self) {
-        tracing::info!("calling drop: {self:?}");
+        tracing::trace!("calling drop: {self:?}");
         let new_this = Object(self.0);
         new_this.untag();
     }
@@ -371,3 +364,30 @@ impl_try_from_for_object!(Vector, LispVector);
 impl_try_from_for_object!(Cons, LispCons);
 impl_try_from_for_object!(Function, LispFunction);
 impl_try_from_for_object!(HashTable, LispHashTable);
+
+
+impl TryFrom<LispObject> for Token {
+    type Error = ();
+
+    fn try_from(value: LispObject) -> Result<Self, <Token as TryFrom<LispObject>>::Error> {
+        match value {
+            LispObject::Nil => Ok(Token::Ident("nil".into())),
+            LispObject::True => todo!(),
+            LispObject::Int(lisp_integer) => Ok(Token::Integer(lisp_integer.0)),
+            LispObject::Float(lisp_float) => Ok(Token::Float(lisp_float.0)),
+            LispObject::Character(lisp_character) => Ok(Token::Character(lisp_character.value())),
+            LispObject::Str(lisp_str) => Ok(Token::Str(lisp_str.to_string())),
+            LispObject::Symbol(lisp_symbol) => Ok(Token::Ident(lisp_symbol.0.ident())),
+            LispObject::Vector(lisp_vector) => {
+                let mut vec = Vec::new();
+                for item in lisp_vector.0.get().iter() {
+                    match item.try_into() {
+                    } 
+                }
+            }
+            LispObject::Cons(lisp_cons) => todo!(),
+            LispObject::Function(lisp_function) => todo!(),
+            LispObject::HashTable(lisp_hash_table) => todo!(),
+        }
+    }
+}
