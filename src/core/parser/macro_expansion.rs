@@ -1,10 +1,12 @@
+use std::rc::Rc;
+
 use crate::core::{
     cons::Cons,
     env::{Environment, FuncCellType},
     error::{RuntimeError, RuntimeResult},
     object::{LispObject, ObjectRef},
     parser::{
-        expr::{Call, Expr}, scope::Scope, token::Token
+        expr::{Call, Expr, ExprType, SpecialForm, Var}, scope::Scope, token::Token
     },
 };
 use chumsky::{
@@ -275,10 +277,10 @@ fn expand_special_form_subexpressions(special_form: &mut SpecialForm, scope: &Sc
     match special_form {
         SpecialForm::If(if_expr) => {
             let expanded_cond = macro_expand_all_with_scope((*if_expr.cond).clone(), scope, env)?;
-            *if_expr.cond = Box::new(expanded_cond);
+            *if_expr.cond = expanded_cond;
             
             let expanded_then = macro_expand_all_with_scope((*if_expr.then).clone(), scope, env)?;
-            *if_expr.then = Box::new(expanded_then);
+            *if_expr.then = expanded_then;
             
             for else_expr in if_expr.els.body.iter_mut() {
                 let expanded = macro_expand_all_with_scope(else_expr.clone(), scope, env)?;
@@ -287,7 +289,7 @@ fn expand_special_form_subexpressions(special_form: &mut SpecialForm, scope: &Sc
         }
         SpecialForm::While(while_expr) => {
             let expanded_cond = macro_expand_all_with_scope((*while_expr.condition).clone(), scope, env)?;
-            *while_expr.condition = Box::new(expanded_cond);
+            *while_expr.condition = expanded_cond;
             
             for body_expr in while_expr.body.body.iter_mut() {
                 let expanded = macro_expand_all_with_scope(body_expr.clone(), scope, env)?;
