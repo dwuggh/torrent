@@ -110,9 +110,7 @@ where
             .or(just(Token::LParen).ignore_then(just(Token::RParen).ignored()))
             .map_with(|_, ex| {
                 Expr::new(ExprType::Nil, ex.span())
-            })
-            ;
-            // .map(|_| ExprType::Nil);
+            });
 
         let literal = select! {
             Token::Integer(n) => Literal::Number(Number::Integer(LispInteger::new(n))),
@@ -122,12 +120,14 @@ where
         }
         .boxed();
 
-        let literal_expr = literal.clone().map(Expr::Literal);
+        let literal_expr = literal.clone().map_with(|lit, ex| {
+            Expr::new(ExprType::Literal(lit), ex.span())
+        });
 
         let vector = vecref
             .clone()
             .delimited_by(just(Token::LBracket), just(Token::RBracket))
-            .map(|vector| Expr::Vector(vector))
+            .map_with(|vector, ex| Expr::new(ExprType::Vector(vector), ex.span()))
             .boxed();
 
         let progn = vecref.clone().map(Progn::new).boxed();
@@ -135,7 +135,9 @@ where
         let var = ident
             .map(|ident| Cell::new(Var::Symbol(ident.into())))
             .boxed();
-        let symbol_expr = var.clone().map(|var| Expr::Symbol(var)).boxed();
+        let symbol_expr = var.clone().map_with(|var, ex| {
+            Expr::new(ExprType::Symbol(var), ex.span())
+        }).boxed();
         let string = any::<I, Extra>()
             .try_map(|node, span| match node {
                 Token::Str(str) => Ok(str),
@@ -146,7 +148,9 @@ where
         // call
 
         let call = sexp(var.clone().then(vecref.clone()))
-            .map(|(symbol, args)| Expr::Call(Call { symbol, args }))
+            .map_with(|(symbol, args), ex| {
+                Expr::new(ExprType::Call(Call { symbol, args }), ex.span())
+            })
             .boxed();
 
         // special forms
@@ -287,11 +291,11 @@ where
 
         // and/or
         let and_expr = sexp(keyword("and").ignore_then(vecref.clone()))
-            .map(|exprs| Expr::SpecialForm(SpecialForm::And(exprs)))
+            .map_with(|exprs, ex| Expr::new(ExprType::SpecialForm(SpecialForm::And(exprs)), ex.span()))
             .boxed();
 
         let or_expr = sexp(keyword("or").ignore_then(vecref.clone()))
-            .map(|exprs| Expr::SpecialForm(SpecialForm::Or(exprs)))
+            .map_with(|exprs, ex| Expr::new(ExprType::SpecialForm(SpecialForm::Or(exprs)), ex.span()))
             .boxed();
 
         // catch
@@ -388,7 +392,7 @@ where
 
         // progn
         let progn_expr = sexp(keyword("progn").ignore_then(progn.clone()))
-            .map(|body| Expr::SpecialForm(SpecialForm::Progn(body)))
+            .map_with(|body, ex| Expr::new(ExprType::SpecialForm(SpecialForm::Progn(body)), ex.span()))
             .boxed();
 
         // set/setq/setq-default
@@ -415,15 +419,15 @@ where
         // save-* forms
         let save_current_buffer_expr =
             sexp(keyword("save-current-buffer").ignore_then(progn.clone()))
-                .map(|body| Expr::SpecialForm(SpecialForm::SaveCurrentBuffer(body)))
+                .map_with(|body, ex| Expr::new(ExprType::SpecialForm(SpecialForm::SaveCurrentBuffer(body)), ex.span()))
                 .boxed();
 
         let save_excursion_expr = sexp(keyword("save-excursion").ignore_then(progn.clone()))
-            .map(|body| Expr::SpecialForm(SpecialForm::SaveExcursion(body)))
+            .map_with(|body, ex| Expr::new(ExprType::SpecialForm(SpecialForm::SaveExcursion(body)), ex.span()))
             .boxed();
 
         let save_restriction_expr = sexp(keyword("save-restriction").ignore_then(progn.clone()))
-            .map(|body| Expr::SpecialForm(SpecialForm::SaveRestriction(body)))
+            .map_with(|body, ex| Expr::new(ExprType::SpecialForm(SpecialForm::SaveRestriction(body)), ex.span()))
             .boxed();
 
         // unwind-protect
@@ -445,34 +449,33 @@ where
         .boxed();
 
         let special_form = choice((
-            lambda.map(|form| Expr::SpecialForm(SpecialForm::Lambda(form))),
-            if_expr.map(|form| Expr::SpecialForm(SpecialForm::If(form))),
-            let_expr.map(|form| Expr::SpecialForm(SpecialForm::Let(form))),
-            let_star_expr.map(|form| Expr::SpecialForm(SpecialForm::LetStar(form))),
-            quote.map(|form| Expr::SpecialForm(SpecialForm::Quote(form))),
+            lambda.map_with(|form, ex| Expr::new(ExprType::SpecialForm(SpecialForm::Lambda(form)), ex.span())),
+            if_expr.map_with(|form, ex| Expr::new(ExprType::SpecialForm(SpecialForm::If(form)), ex.span())),
+            let_expr.map_with(|form, ex| Expr::new(ExprType::SpecialForm(SpecialForm::Let(form)), ex.span())),
+            let_star_expr.map_with(|form, ex| Expr::new(ExprType::SpecialForm(SpecialForm::LetStar(form)), ex.span())),
+            quote.map_with(|form, ex| Expr::new(ExprType::SpecialForm(SpecialForm::Quote(form)), ex.span())),
             and_expr,
             or_expr,
-            catch_expr.map(|form| Expr::SpecialForm(SpecialForm::Catch(form))),
-            cond_expr.map(|form| Expr::SpecialForm(SpecialForm::Cond(form))),
-            condition_case_expr.map(|form| Expr::SpecialForm(SpecialForm::ConditionCase(form))),
-            defvar_expr.map(|form| Expr::SpecialForm(SpecialForm::Defvar(form))),
-            defconst_expr.map(|form| Expr::SpecialForm(SpecialForm::Defconst(form))),
-            function_expr.map(|form| Expr::SpecialForm(SpecialForm::Function(form))),
-            prog1_expr.map(|form| Expr::SpecialForm(SpecialForm::Prog1(form))),
-            prog2_expr.map(|form| Expr::SpecialForm(SpecialForm::Prog2(form))),
+            catch_expr.map_with(|form, ex| Expr::new(ExprType::SpecialForm(SpecialForm::Catch(form)), ex.span())),
+            cond_expr.map_with(|form, ex| Expr::new(ExprType::SpecialForm(SpecialForm::Cond(form)), ex.span())),
+            condition_case_expr.map_with(|form, ex| Expr::new(ExprType::SpecialForm(SpecialForm::ConditionCase(form)), ex.span())),
+            defvar_expr.map_with(|form, ex| Expr::new(ExprType::SpecialForm(SpecialForm::Defvar(form)), ex.span())),
+            defconst_expr.map_with(|form, ex| Expr::new(ExprType::SpecialForm(SpecialForm::Defconst(form)), ex.span())),
+            function_expr.map_with(|form, ex| Expr::new(ExprType::SpecialForm(SpecialForm::Function(form)), ex.span())),
+            prog1_expr.map_with(|form, ex| Expr::new(ExprType::SpecialForm(SpecialForm::Prog1(form)), ex.span())),
+            prog2_expr.map_with(|form, ex| Expr::new(ExprType::SpecialForm(SpecialForm::Prog2(form)), ex.span())),
             progn_expr,
-            set_expr.map(|form| Expr::SpecialForm(SpecialForm::Set(form))),
-            setq_expr.map(|form| Expr::SpecialForm(SpecialForm::Setq(form))),
-            setq_default_expr.map(|form| Expr::SpecialForm(SpecialForm::SetqDefault(form))),
+            set_expr.map_with(|form, ex| Expr::new(ExprType::SpecialForm(SpecialForm::Set(form)), ex.span())),
+            setq_expr.map_with(|form, ex| Expr::new(ExprType::SpecialForm(SpecialForm::Setq(form)), ex.span())),
+            setq_default_expr.map_with(|form, ex| Expr::new(ExprType::SpecialForm(SpecialForm::SetqDefault(form)), ex.span())),
             save_current_buffer_expr,
             save_excursion_expr,
             save_restriction_expr,
-            unwind_protect_expr.map(|form| Expr::SpecialForm(SpecialForm::UnwindProtect(form))),
-            while_expr.map(|form| Expr::SpecialForm(SpecialForm::While(form))),
+            unwind_protect_expr.map_with(|form, ex| Expr::new(ExprType::SpecialForm(SpecialForm::UnwindProtect(form)), ex.span())),
+            while_expr.map_with(|form, ex| Expr::new(ExprType::SpecialForm(SpecialForm::While(form)), ex.span())),
         ));
 
-        // choice((nil, literal_expr, symbol_expr, vector, special_form, call))
-        todo()
+        choice((nil, literal_expr, symbol_expr, vector, special_form, call))
     })
 }
 
@@ -493,55 +496,55 @@ mod tests {
     use chumsky::Parser;
     use logos::Logos;
 
-    fn parse_src(src: &str) -> Result<ExprType, Vec<Rich<Token>>> {
+    fn parse_src(src: &str) -> Result<Expr, Vec<Rich<Token>>> {
         let tokens = Token::lexer(src).spanned().map(|(tok, span)| match tok {
             Ok(tok) => (tok, span.into()),
             Err(_) => (Token::Error, span.into()),
         });
         let stream = Stream::from_iter(tokens).map((0..src.len()).into(), |(t, s)| (t, s));
-        parser().parse(stream).into_result().map(|a| a.ty)
+        parser().parse(stream).into_result()
     }
 
     #[test]
     fn test_parse_primitives() {
         // Test integer
         let result = parse_src("42").unwrap();
-        match result {
+        match result.ty {
             ExprType::Literal(Literal::Number(Number::Integer(n))) => assert_eq!(n.0, 42),
             _ => panic!("Expected integer literal"),
         }
 
         // Test float
         let result = parse_src("3.14").unwrap();
-        match result {
+        match result.ty {
             ExprType::Literal(Literal::Number(Number::Real(f))) => assert_eq!(f.0, 3.14),
             _ => panic!("Expected float literal"),
         }
 
         // Test character
         let result = parse_src("?a").unwrap();
-        match result {
+        match result.ty {
             ExprType::Literal(Literal::Character(c)) => assert_eq!(c.0.to_char().unwrap(), 'a'),
             _ => panic!("Expected character literal"),
         }
 
         // Test string
         let result = parse_src("\"hello\"").unwrap();
-        match result {
+        match result.ty {
             ExprType::Literal(Literal::String(s)) => assert_eq!(s.to_string(), "hello"),
             _ => panic!("Expected string literal"),
         }
 
         // Test nil (keyword)
         let result = parse_src("nil").unwrap();
-        match result {
+        match result.ty {
             ExprType::Nil => {}
             _ => panic!("Expected nil"),
         }
 
         // Test nil (empty list)
         let result = parse_src("()").unwrap();
-        match result {
+        match result.ty {
             ExprType::Nil => {}
             _ => panic!("Expected nil from empty list"),
         }
@@ -552,23 +555,23 @@ mod tests {
         // Test (if condition then else)
         let result = parse_src("(if 1 2 3)").unwrap();
 
-        match result {
+        match result.ty {
             ExprType::SpecialForm(SpecialForm::If(if_expr)) => {
                 // Verify condition is integer 1
-                match *if_expr.cond.borrow().ty {
+                match if_expr.cond.borrow().ty {
                     ExprType::Literal(Literal::Number(_)) => {}
                     _ => panic!("Expected condition to be integer 1"),
                 }
 
                 // Verify then is integer 2
-                match *if_expr.then.borrow().ty {
+                match if_expr.then.borrow().ty {
                     ExprType::Literal(Literal::Number(Number::Integer(LispInteger(2)))) => {}
                     _ => panic!("Expected then to be integer 2"),
                 }
 
                 // Verify else body contains integer 3
                 assert_eq!(if_expr.els.body.len(), 1);
-                match *if_expr.els.body[0].borrow() {
+                match if_expr.els.body[0].borrow().ty {
                     ExprType::Literal(Literal::Number(Number::Integer(LispInteger(3)))) => {}
                     _ => panic!("Expected else to be integer 3"),
                 }
@@ -581,21 +584,21 @@ mod tests {
     fn test_parse_let_expression() {
         let result = parse_src("(let ((x 42)) x)").unwrap();
 
-        match result {
+        match result.ty {
             ExprType::SpecialForm(SpecialForm::Let(let_expr)) => {
                 // Verify bindings
                 assert_eq!(let_expr.bindings.len(), 1);
                 let (ident, value) = &let_expr.bindings[0];
                 assert_eq!(ident.text(), "x");
 
-                match *value.as_ref().unwrap().borrow() {
+                match value.as_ref().unwrap().borrow().ty {
                     ExprType::Literal(Literal::Number(Number::Integer(LispInteger(42)))) => {}
                     _ => panic!("Expected binding value to be integer 42"),
                 }
 
                 // Verify body contains variable reference
                 assert_eq!(let_expr.body.body.len(), 1);
-                match &*let_expr.body.body[0].borrow() {
+                match &let_expr.body.body[0].borrow().ty {
                     ExprType::Symbol(var) => match var.get() {
                         Var::Symbol(sym) => assert_eq!(sym.name(), "x"),
                         _ => panic!("Expected symbol variable"),
@@ -611,7 +614,7 @@ mod tests {
     fn test_parse_let_without_value() {
         let result = parse_src("(let (x) x)").unwrap();
 
-        match result {
+        match result.ty {
             ExprType::SpecialForm(SpecialForm::Let(let_expr)) => {
                 // Verify bindings
                 assert_eq!(let_expr.bindings.len(), 1);
@@ -627,10 +630,10 @@ mod tests {
     fn test_parse_nested_expressions() {
         let result = parse_src("(if (let ((x 1)) x) 2 3)").unwrap();
 
-        match result {
+        match result.ty {
             ExprType::SpecialForm(SpecialForm::If(if_expr)) => {
                 // Verify condition is a let expression
-                match &*if_expr.cond.borrow() {
+                match &if_expr.cond.borrow().ty {
                     ExprType::SpecialForm(SpecialForm::Let(_)) => {}
                     _ => panic!("Expected condition to be let expression"),
                 }
@@ -648,7 +651,7 @@ mod tests {
         )
         .unwrap();
 
-        match result {
+        match result.ty {
             ExprType::SpecialForm(SpecialForm::Lambda(lambda)) => {
                 let normal = lambda.args.normal.len();
                 let optional = lambda.args.optional.as_ref().unwrap();
@@ -665,7 +668,7 @@ mod tests {
     #[test]
     fn test_parse_and_or() {
         let result = parse_src("(and 1 2 3)").unwrap();
-        match result {
+        match result.ty {
             ExprType::SpecialForm(SpecialForm::And(exprs)) => {
                 assert_eq!(exprs.len(), 3);
             }
@@ -673,7 +676,7 @@ mod tests {
         }
 
         let result = parse_src("(or nil t)").unwrap();
-        match result {
+        match result.ty {
             ExprType::SpecialForm(SpecialForm::Or(exprs)) => {
                 assert_eq!(exprs.len(), 2);
             }
@@ -684,7 +687,7 @@ mod tests {
     #[test]
     fn test_parse_cond() {
         let result = parse_src("(cond ((= x 1) 'one) ((= x 2) 'two) (t 'other))").unwrap();
-        match result {
+        match result.ty {
             ExprType::SpecialForm(SpecialForm::Cond(cond_expr)) => {
                 assert_eq!(cond_expr.clauses.len(), 3);
             }
@@ -695,7 +698,7 @@ mod tests {
     #[test]
     fn test_parse_while() {
         let result = parse_src("(while (< i 10) (setq i (+ i 1)))").unwrap();
-        match result {
+        match result.ty {
             ExprType::SpecialForm(SpecialForm::While(_)) => {}
             _ => panic!("Expected while expression"),
         }
