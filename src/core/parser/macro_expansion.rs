@@ -2,9 +2,10 @@ use crate::core::{
     env::{Environment, FuncCellType},
     error::{RuntimeError, RuntimeResult},
     ident::Ident,
-    object::{LispObject, ObjectRef},
-    parser::expr::{Call, Expr},
+    object::{LispObject, ObjectRef, lisp_object_to_tokens},
+    parser::{expr::{Call, Expr}, token::Token},
 };
+use chumsky::{input::Stream, Parser};
 
 pub fn macro_expand(expr: Expr, env: &Environment) -> Expr {
     todo!()
@@ -28,10 +29,21 @@ pub fn macro_expand_call(call: &Call, env: &Environment) -> Option<RuntimeResult
                     obj.tag()
                 })
                 .collect::<Vec<_>>();
-            let result = func.run(&args, env).and_then(|result| lisp_object_to_idents(result.untag())).and_then(|tokens| {
-
-    let stream = Stream::from_iter(tokens).map((0..src.len()).into(), |(t, s)| (t, s));
-
+            
+            let result = func.run(&args, env).and_then(|result| {
+                // Convert the macro result to tokens
+                let tokens = lisp_object_to_tokens(result.untag());
+                
+                // Parse the tokens back into an expression
+                let tokens_with_span = tokens.into_iter().map(|tok| (tok, crate::core::parser::Span::dummy()));
+                let stream = Stream::from_iter(tokens_with_span).map(crate::core::parser::Span::dummy(), |(t, s)| (t, s));
+                
+                match crate::core::parser::expr_parser::expr_parser().parse(stream).into_result() {
+                    Ok(expr) => Ok(expr),
+                    Err(parse_errors) => Err(RuntimeError::MacroExpansionError {
+                        message: format!("Failed to parse macro expansion result: {:?}", parse_errors),
+                    }),
+                }
             });
             Ok(result)
         })
