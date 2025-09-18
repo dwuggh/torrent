@@ -362,7 +362,7 @@ impl From<Var> for LispObject {
     fn from(var: Var) -> Self {
         match var {
             Var::Global(symbol) => LispObject::Symbol(LispSymbol(symbol)),
-            Var::Local(local) => LispObject::Symbol(LispSymbol(ident.into())),
+            Var::Local(ident) => LispObject::Symbol(LispSymbol(ident.into())),
             Var::Captured(ident) => LispObject::Symbol(LispSymbol(ident.into())),
             Var::Argument(ident) => LispObject::Symbol(LispSymbol(ident.into())),
             Var::Unresolved(ident) => LispObject::Symbol(LispSymbol(ident.into())),

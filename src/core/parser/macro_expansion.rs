@@ -12,11 +12,323 @@ use chumsky::{
     Parser,
 };
 
-pub fn macro_expand(expr: &Expr, env: &Environment) {
-    let ty = expr.ty.borrow_mut();
+/// Expand all macros in an expression recursively until no more expansions are possible
+pub fn macro_expand_all(expr: Expr, env: &Environment) -> RuntimeResult<Expr> {
     let scope = Scope::Global(env);
+    macro_expand_all_with_scope(expr, &scope, env)
 }
 
+/// Expand macros once (macroexpand-1 equivalent)
+pub fn macro_expand_once(expr: Expr, env: &Environment) -> RuntimeResult<Expr> {
+    let scope = Scope::Global(env);
+    macro_expand_once_with_scope(expr, &scope, env)
+}
+
+/// Internal function for recursive macro expansion with scope tracking
+fn macro_expand_all_with_scope(expr: Expr, scope: &Scope, env: &Environment) -> RuntimeResult<Expr> {
+    let mut current_expr = expr;
+    
+    // Keep expanding until no more changes occur
+    loop {
+        let expanded = macro_expand_once_with_scope(current_expr.clone(), scope, env)?;
+        
+        // Check if expansion occurred by comparing the expressions
+        if expressions_equal(&current_expr, &expanded) {
+            // No more expansions possible, now recursively expand subexpressions
+            return expand_subexpressions(expanded, scope, env);
+        }
+        
+        current_expr = expanded;
+    }
+}
+
+/// Expand macros once with scope tracking
+fn macro_expand_once_with_scope(expr: Expr, scope: &Scope, env: &Environment) -> RuntimeResult<Expr> {
+    let expr_type = expr.ty.borrow();
+    
+    match &*expr_type {
+        ExprType::Call(call) => {
+            // First resolve the function symbol in the current scope
+            let resolved_var = scope.resolve(call.symbol.get().into());
+            
+            // Check if this is a macro call
+            if let Some(expanded) = try_expand_macro_call(call, resolved_var, env)? {
+                Ok(expanded)
+            } else {
+                // Not a macro, return original expression
+                drop(expr_type);
+                Ok(expr)
+            }
+        }
+        ExprType::SpecialForm(special_form) => {
+            // Handle special forms that might contain macro calls
+            drop(expr_type);
+            expand_special_form_macros(expr, scope, env)
+        }
+        _ => {
+            // Literals, symbols, vectors, etc. - no macro expansion needed
+            drop(expr_type);
+            Ok(expr)
+        }
+    }
+}
+
+/// Recursively expand subexpressions after top-level expansion is complete
+fn expand_subexpressions(expr: Expr, scope: &Scope, env: &Environment) -> RuntimeResult<Expr> {
+    let mut expr_type = expr.ty.borrow_mut();
+    
+    match &mut *expr_type {
+        ExprType::Vector(exprs) => {
+            for expr in exprs.iter_mut() {
+                let expanded = macro_expand_all_with_scope(expr.clone(), scope, env)?;
+                *expr = expanded;
+            }
+        }
+        ExprType::Call(call) => {
+            // Expand arguments
+            for arg in call.args.iter_mut() {
+                let expanded = macro_expand_all_with_scope(arg.clone(), scope, env)?;
+                *arg = expanded;
+            }
+        }
+        ExprType::SpecialForm(special_form) => {
+            expand_special_form_subexpressions(special_form, scope, env)?;
+        }
+        _ => {
+            // No subexpressions to expand
+        }
+    }
+    
+    drop(expr_type);
+    Ok(expr)
+}
+
+/// Try to expand a macro call, returning Some(expanded) if it's a macro, None otherwise
+fn try_expand_macro_call(call: &Call, resolved_var: Var, env: &Environment) -> RuntimeResult<Option<Expr>> {
+    let symbol = match resolved_var {
+        Var::Global(symbol) => symbol,
+        _ => return Ok(None), // Only global symbols can be macros
+    };
+    
+    // Try to load as a macro
+    let result = env.load_symbol_with(symbol, Some(FuncCellType::Macro), |val| {
+        let ObjectRef::Function(func) = val.as_ref() else {
+            return Ok(None);
+        };
+        
+        // Convert arguments to LispObjects (unevaluated for macros)
+        let args = call
+            .args
+            .iter()
+            .map(|arg| {
+                let obj: LispObject = arg.clone().into();
+                obj.tag()
+            })
+            .collect::<Vec<_>>();
+        
+        // Execute the macro
+        let result = func.run(&args, env)?;
+        
+        // Convert result back to Expr
+        let tokens = lisp_object_to_tokens(result.untag());
+        let expanded_expr = parse_tokens_to_expr(tokens)?;
+        
+        Ok(Some(expanded_expr))
+    });
+    
+    match result {
+        Ok(Some(expanded)) => Ok(Some(expanded)),
+        Ok(None) => Ok(None),
+        Err(_) => Ok(None), // Symbol not found or not a macro
+    }
+}
+
+/// Handle macro expansion in special forms
+fn expand_special_form_macros(expr: Expr, scope: &Scope, env: &Environment) -> RuntimeResult<Expr> {
+    let expr_type = expr.ty.borrow();
+    
+    match &*expr_type {
+        ExprType::SpecialForm(special_form) => {
+            match special_form {
+                SpecialForm::Let(let_expr) => {
+                    drop(expr_type);
+                    expand_let_macros(expr, scope, env)
+                }
+                SpecialForm::LetStar(let_star) => {
+                    drop(expr_type);
+                    expand_let_star_macros(expr, scope, env)
+                }
+                SpecialForm::Lambda(lambda) => {
+                    drop(expr_type);
+                    expand_lambda_macros(expr, scope, env)
+                }
+                _ => {
+                    // Other special forms don't introduce new scopes for macro expansion
+                    drop(expr_type);
+                    Ok(expr)
+                }
+            }
+        }
+        _ => {
+            drop(expr_type);
+            Ok(expr)
+        }
+    }
+}
+
+/// Expand macros in let bindings and body with proper scope
+fn expand_let_macros(expr: Expr, parent_scope: &Scope, env: &Environment) -> RuntimeResult<Expr> {
+    let mut expr_type = expr.ty.borrow_mut();
+    
+    if let ExprType::SpecialForm(SpecialForm::Let(let_expr)) = &mut *expr_type {
+        // Create new lexical scope for the let binding
+        let new_scope = Scope::Lexical {
+            binding: let_expr.bindings.clone(),
+            parent: Box::new(parent_scope.clone()),
+        };
+        
+        // Expand value expressions in the parent scope (before binding)
+        for (_, value) in let_expr.bindings.iter_mut() {
+            if let Some(val_expr) = value {
+                let expanded = macro_expand_all_with_scope(val_expr.clone(), parent_scope, env)?;
+                *val_expr = expanded;
+            }
+        }
+        
+        // Expand body in the new scope (after binding)
+        for body_expr in let_expr.body.body.iter_mut() {
+            let expanded = macro_expand_all_with_scope(body_expr.clone(), &new_scope, env)?;
+            *body_expr = expanded;
+        }
+    }
+    
+    drop(expr_type);
+    Ok(expr)
+}
+
+/// Expand macros in let* bindings and body with incremental scope
+fn expand_let_star_macros(expr: Expr, parent_scope: &Scope, env: &Environment) -> RuntimeResult<Expr> {
+    let mut expr_type = expr.ty.borrow_mut();
+    
+    if let ExprType::SpecialForm(SpecialForm::LetStar(let_star)) = &mut *expr_type {
+        let mut current_scope = parent_scope.clone();
+        
+        // For let*, each binding sees the previous bindings
+        for (i, (_, value)) in let_star.bindings.iter_mut().enumerate() {
+            if let Some(val_expr) = value {
+                let expanded = macro_expand_all_with_scope(val_expr.clone(), &current_scope, env)?;
+                *val_expr = expanded;
+            }
+            
+            // Create new scope that includes this binding for subsequent bindings
+            if i < let_star.bindings.len() - 1 {
+                let partial_bindings: Vec<_> = let_star.bindings.iter().take(i + 1).cloned().collect();
+                current_scope = Scope::Lexical {
+                    binding: Rc::new(partial_bindings),
+                    parent: Box::new(current_scope),
+                };
+            }
+        }
+        
+        // Create final scope for body
+        let final_scope = Scope::Lexical {
+            binding: let_star.bindings.clone(),
+            parent: Box::new(parent_scope.clone()),
+        };
+        
+        // Expand body in the final scope
+        for body_expr in let_star.body.body.iter_mut() {
+            let expanded = macro_expand_all_with_scope(body_expr.clone(), &final_scope, env)?;
+            *body_expr = expanded;
+        }
+    }
+    
+    drop(expr_type);
+    Ok(expr)
+}
+
+/// Expand macros in lambda body with function scope
+fn expand_lambda_macros(expr: Expr, parent_scope: &Scope, env: &Environment) -> RuntimeResult<Expr> {
+    let mut expr_type = expr.ty.borrow_mut();
+    
+    if let ExprType::SpecialForm(SpecialForm::Lambda(lambda)) = &mut *expr_type {
+        // Create function scope
+        let function_scope = Scope::Function {
+            args: lambda.args.clone(),
+            captures: lambda.captures.clone(),
+            parent: Box::new(parent_scope.clone()),
+        };
+        
+        // Expand body in function scope
+        for body_expr in lambda.body.body.iter_mut() {
+            let expanded = macro_expand_all_with_scope(body_expr.clone(), &function_scope, env)?;
+            *body_expr = expanded;
+        }
+    }
+    
+    drop(expr_type);
+    Ok(expr)
+}
+
+/// Expand subexpressions in special forms
+fn expand_special_form_subexpressions(special_form: &mut SpecialForm, scope: &Scope, env: &Environment) -> RuntimeResult<()> {
+    match special_form {
+        SpecialForm::If(if_expr) => {
+            let expanded_cond = macro_expand_all_with_scope((*if_expr.cond).clone(), scope, env)?;
+            *if_expr.cond = Box::new(expanded_cond);
+            
+            let expanded_then = macro_expand_all_with_scope((*if_expr.then).clone(), scope, env)?;
+            *if_expr.then = Box::new(expanded_then);
+            
+            for else_expr in if_expr.els.body.iter_mut() {
+                let expanded = macro_expand_all_with_scope(else_expr.clone(), scope, env)?;
+                *else_expr = expanded;
+            }
+        }
+        SpecialForm::While(while_expr) => {
+            let expanded_cond = macro_expand_all_with_scope((*while_expr.condition).clone(), scope, env)?;
+            *while_expr.condition = Box::new(expanded_cond);
+            
+            for body_expr in while_expr.body.body.iter_mut() {
+                let expanded = macro_expand_all_with_scope(body_expr.clone(), scope, env)?;
+                *body_expr = expanded;
+            }
+        }
+        // Add other special forms as needed
+        _ => {
+            // For now, handle other special forms generically
+        }
+    }
+    
+    Ok(())
+}
+
+/// Parse tokens back into an expression
+fn parse_tokens_to_expr(tokens: Vec<Token>) -> RuntimeResult<Expr> {
+    let tokens_with_span = tokens
+        .into_iter()
+        .map(|tok| (tok, crate::core::parser::Span::dummy()));
+    let stream = Stream::from_iter(tokens_with_span)
+        .map(crate::core::parser::Span::dummy(), |(t, s)| (t, s));
+    
+    match crate::core::parser::expr_parser::expr_parser()
+        .parse(stream)
+        .into_result()
+    {
+        Ok(expr) => Ok(expr),
+        Err(parse_errors) => Err(RuntimeError::MacroExpansionError {
+            message: format!("Failed to parse macro expansion result: {:?}", parse_errors),
+        }),
+    }
+}
+
+/// Compare two expressions for equality (used to detect when expansion stops)
+fn expressions_equal(expr1: &Expr, expr2: &Expr) -> bool {
+    // Simple comparison - in practice you might want a more sophisticated approach
+    format!("{:?}", expr1.ty.borrow()) == format!("{:?}", expr2.ty.borrow())
+}
+
+/// Legacy function - now redirects to the new macro expansion system
 pub fn macro_expand_call(call: &Call, env: &Environment) -> Option<RuntimeResult<Expr>> {
     let symbol = call.symbol.get().into();
     let result = env
