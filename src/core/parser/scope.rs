@@ -1,5 +1,3 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::core::env::Environment;
@@ -12,12 +10,17 @@ pub enum Scope<'a> {
     Function {
         args: Rc<Args>,
         captures: Captures,
-        parent: Box<Scope<'a>>,
+        parent: Rc<Scope<'a>>,
     },
     Lexical {
-        binding: Rc<Binding>,
-        parent: Box<Scope<'a>>,
+        bindings: Rc<Binding>,
+        seq: Option<usize>,
+        parent: Rc<Scope<'a>>,
     },
+    GlobalDef {
+        var: Ident,
+        parent: Rc<Scope<'a>>,
+    }
 }
 
 impl<'a> Scope<'a> {
@@ -33,13 +36,13 @@ impl<'a> Scope<'a> {
         match self {
             Scope::Global(_environment) => {
                 // If we have captures, this variable needs to be captured from global scope
-                if let Some(captures) = current_captures {
-                    let global_var = Var::Global(ident.into());
-                    captures.borrow_mut().push(global_var);
-                    Var::Captured(ident)
-                } else {
+                // if let Some(captures) = current_captures {
+                //     let global_var = Var::Global(ident.into());
+                //     captures.borrow_mut().push(global_var);
+                //     Var::Captured(ident)
+                // } else {
+                // }
                     Var::Global(ident.into())
-                }
             }
             Scope::Function {
                 args,
@@ -72,14 +75,15 @@ impl<'a> Scope<'a> {
                         current_captures
                             .map(|captures| captures.borrow_mut().push(Var::Captured(ident)));
                     }
+                    Var::Global(_) => {}
                     _ => unreachable!(),
                 }
 
                 result
             }
-            Scope::Lexical { binding, parent } => {
+            Scope::Lexical { bindings, seq: seq_eval, parent } => {
                 // Check if this identifier is bound in this lexical scope
-                if binding.iter().any(|binding| binding.0 == ident) {
+                if bindings.iter().take(seq_eval.unwrap_or(bindings.len())).any(|binding| binding.0 == ident) {
                     // Found in current lexical scope
                     if let Some(captures) = current_captures {
                         // If we're in a function that needs to capture, add to captures
@@ -91,6 +95,13 @@ impl<'a> Scope<'a> {
                     }
                 } else {
                     // Not found in current scope, continue searching in parent
+                    parent.resolve_inner(ident, current_captures)
+                }
+            }
+            Scope::GlobalDef { var, parent } => {
+                if *var == ident {
+                    Var::Global(ident.into())
+                } else {
                     parent.resolve_inner(ident, current_captures)
                 }
             }
@@ -118,7 +129,7 @@ mod tests {
     use std::rc::Rc;
 
     fn create_test_env() -> Environment {
-        Environment::new()
+        Environment::default()
     }
 
     fn create_test_args(normal: Vec<&str>, optional: Option<Vec<&str>>, rest: Option<&str>) -> Rc<Args> {
@@ -174,7 +185,7 @@ mod tests {
         let scope = Scope::Function {
             args,
             captures,
-            parent: Box::new(Scope::Global(&env)),
+            parent: Rc::new(Scope::Global(&env)),
         };
         
         // Test resolving function argument
@@ -209,7 +220,7 @@ mod tests {
         let scope = Scope::Function {
             args,
             captures,
-            parent: Box::new(Scope::Global(&env)),
+            parent: Rc::new(Scope::Global(&env)),
         };
         
         // Test normal argument
@@ -233,7 +244,7 @@ mod tests {
         let scope = Scope::Function {
             args,
             captures,
-            parent: Box::new(Scope::Global(&env)),
+            parent: Rc::new(Scope::Global(&env)),
         };
         
         // Test rest argument
@@ -251,8 +262,9 @@ mod tests {
         let binding = create_test_binding(vec![("local-var", true), ("another-var", false)]);
         
         let scope = Scope::Lexical {
-            binding,
-            parent: Box::new(Scope::Global(&env)),
+            bindings: binding,
+            seq: None,
+            parent: Rc::new(Scope::Global(&env)),
         };
         
         // Test resolving local binding
@@ -296,13 +308,15 @@ mod tests {
         let inner_binding = create_test_binding(vec![("inner-var", true)]);
         
         let outer_scope = Scope::Lexical {
-            binding: outer_binding,
-            parent: Box::new(Scope::Global(&env)),
+            bindings: outer_binding,
+            seq: None,
+            parent: Rc::new(Scope::Global(&env)),
         };
         
         let inner_scope = Scope::Lexical {
-            binding: inner_binding,
-            parent: Box::new(outer_scope),
+            bindings: inner_binding,
+            seq: None,
+            parent: Rc::new(outer_scope),
         };
         
         // Test resolving inner variable
@@ -325,13 +339,15 @@ mod tests {
         let inner_binding = create_test_binding(vec![("x", true)]);
         
         let outer_scope = Scope::Lexical {
-            binding: outer_binding,
-            parent: Box::new(Scope::Global(&env)),
+            bindings: outer_binding,
+            seq: None,
+            parent: Rc::new(Scope::Global(&env)),
         };
         
         let inner_scope = Scope::Lexical {
-            binding: inner_binding,
-            parent: Box::new(outer_scope),
+            bindings: inner_binding,
+            seq: None,
+            parent: Rc::new(outer_scope),
         };
         
         // Inner scope should shadow outer scope
@@ -347,14 +363,15 @@ mod tests {
         let captures = Rc::new(RefCell::new(Vec::new()));
         
         let lexical_scope = Scope::Lexical {
-            binding,
-            parent: Box::new(Scope::Global(&env)),
+            bindings: binding,
+            seq: None,
+            parent: Rc::new(Scope::Global(&env)),
         };
         
         let function_scope = Scope::Function {
             args,
             captures: captures.clone(),
-            parent: Box::new(lexical_scope),
+            parent: Rc::new(lexical_scope),
         };
         
         // Resolve a variable that should be captured
@@ -378,19 +395,17 @@ mod tests {
         let function_scope = Scope::Function {
             args,
             captures: captures.clone(),
-            parent: Box::new(Scope::Global(&env)),
+            parent: Rc::new(Scope::Global(&env)),
         };
         
         // Resolve a global variable that should be captured
         let result = function_scope.resolve(Ident::from("global-var"));
         
-        // Should return captured
-        assert!(matches!(result, Var::Captured(_)));
+        // Globals should not be captured
+        assert!(matches!(result, Var::Global(_)));
         
-        // Check that it was added to captures
         let captures_vec = captures.borrow();
-        assert_eq!(captures_vec.len(), 1);
-        assert!(matches!(captures_vec[0], Var::Global(_)));
+        assert_eq!(captures_vec.len(), 0);
     }
 
     #[test]
@@ -402,7 +417,7 @@ mod tests {
         let function_scope = Scope::Function {
             args,
             captures: captures.clone(),
-            parent: Box::new(Scope::Global(&env)),
+            parent: Rc::new(Scope::Global(&env)),
         };
         
         // Resolve a variable that's already captured
@@ -420,6 +435,7 @@ mod tests {
     fn test_complex_nested_scopes() {
         let env = create_test_env();
         
+        // (let (outer) (lambda (param) (let (inner) x)))
         // Create: Global -> Lexical -> Function -> Lexical
         let outer_binding = create_test_binding(vec![("outer", true)]);
         let args = create_test_args(vec!["param"], None, None);
@@ -429,25 +445,27 @@ mod tests {
         let global_scope = Scope::Global(&env);
         
         let outer_lexical = Scope::Lexical {
-            binding: outer_binding,
-            parent: Box::new(global_scope),
+            bindings: outer_binding,
+            seq: None,
+            parent: Rc::new(global_scope),
         };
         
         let function_scope = Scope::Function {
             args,
             captures: captures.clone(),
-            parent: Box::new(outer_lexical),
+            parent: Rc::new(outer_lexical),
         };
         
         let inner_lexical = Scope::Lexical {
-            binding: inner_binding,
-            parent: Box::new(function_scope),
+            bindings: inner_binding,
+            seq: None,
+            parent: Rc::new(function_scope),
         };
         
         // Test various resolutions
         assert!(matches!(inner_lexical.resolve(Ident::from("inner")), Var::Local(_)));
         assert!(matches!(inner_lexical.resolve(Ident::from("param")), Var::Argument(_)));
-        assert!(matches!(inner_lexical.resolve(Ident::from("outer")), Var::Local(_)));
+        assert!(matches!(inner_lexical.resolve(Ident::from("outer")), Var::Captured(_)));
         assert!(matches!(inner_lexical.resolve(Ident::from("global")), Var::Global(_)));
         
         // Check captures were recorded
