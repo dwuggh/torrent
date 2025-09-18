@@ -1,10 +1,14 @@
 use crate::core::{
+    cons::{Cons, LispCons},
     ident::Ident,
     number::{LispCharacter, LispFloat, LispInteger},
+    object::{LispObject, nil},
     parser::Span,
     string::LispStr,
-    symbol::Symbol,
+    symbol::{LispSymbol, Symbol},
+    vector::LispVector,
 };
+use crate::gc::Gc;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -348,6 +352,166 @@ impl ExprType {
 
     pub fn new_str(str: String) -> Self {
         Self::Literal(Literal::String(LispStr::new(str)))
+    }
+}
+
+impl From<Literal> for LispObject {
+    fn from(literal: Literal) -> Self {
+        match literal {
+            Literal::Number(Number::Integer(int)) => LispObject::Int(int),
+            Literal::Number(Number::Real(float)) => LispObject::Float(float),
+            Literal::Character(char) => LispObject::Character(char),
+            Literal::String(string) => LispObject::Str(string),
+        }
+    }
+}
+
+impl From<Var> for LispObject {
+    fn from(var: Var) -> Self {
+        match var {
+            Var::Symbol(symbol) => LispObject::Symbol(LispSymbol(symbol)),
+            Var::Local(local) => LispObject::Symbol(LispSymbol(local.ident.into())),
+        }
+    }
+}
+
+impl From<Expr> for LispObject {
+    fn from(expr: Expr) -> Self {
+        let expr_type = expr.ty.into_inner();
+        match expr_type {
+            ExprType::Nil => LispObject::Nil,
+            ExprType::Literal(literal) => literal.into(),
+            ExprType::Symbol(var) => var.get().into(),
+            ExprType::Vector(exprs) => {
+                let objects: Vec<_> = exprs.into_iter().map(|e| e.into()).map(|obj: LispObject| obj.tag()).collect();
+                LispObject::Vector(LispVector(Gc::new(objects)))
+            }
+            ExprType::Call(call) => {
+                // Convert function call to a list: (function arg1 arg2 ...)
+                let mut elements = Vec::new();
+                elements.push(call.symbol.get().into());
+                elements.extend(call.args.into_iter().map(|arg| arg.into()));
+                
+                // Convert Vec<LispObject> to proper cons list
+                if elements.is_empty() {
+                    LispObject::Nil
+                } else {
+                    let mut result = nil();
+                    for obj in elements.into_iter().rev() {
+                        result = LispCons::new(obj.tag(), result).tag();
+                    }
+                    result.untag()
+                }
+            }
+            ExprType::SpecialForm(special_form) => {
+                // Convert special forms to lists as well
+                match special_form {
+                    SpecialForm::If(if_expr) => {
+                        let mut elements = vec![
+                            LispObject::Symbol(LispSymbol(Symbol::from("if"))),
+                            (*if_expr.cond).clone().into(),
+                            (*if_expr.then).clone().into(),
+                        ];
+                        // Add else expressions
+                        elements.extend(if_expr.els.body.into_iter().map(|e| e.into()));
+                        
+                        let mut result = nil();
+                        for obj in elements.into_iter().rev() {
+                            result = LispCons::new(obj.tag(), result).tag();
+                        }
+                        result.untag()
+                    }
+                    SpecialForm::Let(let_expr) => {
+                        let mut elements = vec![LispObject::Symbol(LispSymbol(Symbol::from("let")))];
+                        
+                        // Convert bindings to list of lists
+                        let mut bindings_list = nil();
+                        for (ident, value) in let_expr.bindings.iter().rev() {
+                            let binding = if let Some(val) = value {
+                                // (var value)
+                                let var_obj = LispObject::Symbol(LispSymbol(Symbol::from(*ident)));
+                                let val_obj = val.clone().into();
+                                LispCons::new(
+                                    var_obj.tag(),
+                                    LispCons::new(val_obj.tag(), nil()).tag()
+                                ).tag()
+                            } else {
+                                // just var
+                                LispObject::Symbol(LispSymbol(Symbol::from(*ident))).tag()
+                            };
+                            bindings_list = LispCons::new(binding, bindings_list).tag();
+                        }
+                        elements.push(bindings_list.untag());
+                        
+                        // Add body expressions
+                        elements.extend(let_expr.body.body.into_iter().map(|e| e.into()));
+                        
+                        let mut result = nil();
+                        for obj in elements.into_iter().rev() {
+                            result = LispCons::new(obj.tag(), result).tag();
+                        }
+                        result.untag()
+                    }
+                    SpecialForm::Quote(quote) => {
+                        let symbol = match quote.kind {
+                            QuoteKind::Quote => "quote",
+                            QuoteKind::Backquote => "backquote",
+                        };
+                        let quoted_obj = quote_data_to_lisp_object(quote.expr);
+                        
+                        let mut result = nil();
+                        result = LispCons::new(quoted_obj.tag(), result).tag();
+                        result = LispCons::new(LispObject::Symbol(LispSymbol(Symbol::from(symbol))).tag(), result).tag();
+                        result.untag()
+                    }
+                    // Add other special forms as needed
+                    _ => {
+                        // For now, convert unhandled special forms to a symbol
+                        LispObject::Symbol(LispSymbol(Symbol::from("unhandled-special-form")))
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn quote_data_to_lisp_object(data: QuotedData) -> LispObject {
+    match data {
+        QuotedData::Literal(literal) => literal.into(),
+        QuotedData::Symbol(var) => var.get().into(),
+        QuotedData::List(items) => {
+            if items.is_empty() {
+                LispObject::Nil
+            } else {
+                let mut result = nil();
+                for item in items.into_iter().rev() {
+                    let obj = quote_data_to_lisp_object(item);
+                    result = LispCons::new(obj.tag(), result).tag();
+                }
+                result.untag()
+            }
+        }
+        QuotedData::Vector(items) => {
+            let objects: Vec<_> = items.into_iter()
+                .map(quote_data_to_lisp_object)
+                .map(|obj| obj.tag())
+                .collect();
+            LispObject::Vector(LispVector(Gc::new(objects)))
+        }
+        QuotedData::Unquote(expr) => {
+            // Convert unquote to (unquote expr)
+            let mut result = nil();
+            result = LispCons::new((*expr).clone().into().tag(), result).tag();
+            result = LispCons::new(LispObject::Symbol(LispSymbol(Symbol::from("unquote"))).tag(), result).tag();
+            result.untag()
+        }
+        QuotedData::UnquoteSplice(expr) => {
+            // Convert unquote-splice to (unquote-splicing expr)
+            let mut result = nil();
+            result = LispCons::new((*expr).clone().into().tag(), result).tag();
+            result = LispCons::new(LispObject::Symbol(LispSymbol(Symbol::from("unquote-splicing"))).tag(), result).tag();
+            result.untag()
+        }
     }
 }
 
