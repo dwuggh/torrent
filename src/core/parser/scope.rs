@@ -27,20 +27,19 @@ impl<'a> Scope<'a> {
     }
 
     pub fn resolve(&self, ident: Ident) -> Var {
-        let mut capture_fns = Vec::new();
-        self.resolve_inner(ident, &mut capture_fns)
+        self.resolve_inner(ident, None)
     }
-    pub fn resolve_inner(&self, ident: Ident, capture_fns: &mut Vec<Captures>) -> Var {
+    
+    pub fn resolve_inner(&self, ident: Ident, current_captures: Option<Captures>) -> Var {
         match self {
-            Scope::Global(environment) => {
-                if capture_fns.is_empty() {
-                    Var::Global(ident.into())
-                } else {
-                    for captures in &capture_fns[1..] {
-                        captures.borrow_mut().push(Var::Captured(ident));
-                    }
-                    capture_fns[0].borrow_mut().push(Var::Global(ident.into()));
+            Scope::Global(_environment) => {
+                // If we have captures, this variable needs to be captured from global scope
+                if let Some(captures) = current_captures {
+                    let global_var = Var::Global(ident.into());
+                    captures.borrow_mut().push(global_var);
                     Var::Captured(ident)
+                } else {
+                    Var::Global(ident.into())
                 }
             }
             Scope::Function {
@@ -48,11 +47,13 @@ impl<'a> Scope<'a> {
                 captures,
                 parent,
             } => {
+                // Check if this is a function argument
                 if args.contains(ident) {
-                    // function argument should not be captured, direct return
+                    // Function arguments are directly accessible, no capture needed
                     return Var::Argument(ident);
                 }
 
+                // Check if already captured
                 if captures
                     .borrow()
                     .iter()
@@ -61,18 +62,31 @@ impl<'a> Scope<'a> {
                     return Var::Captured(ident);
                 }
 
-                capture_fns.push(Rc::clone(captures));
-
-                parent.resolve_inner(ident, capture_fns)
+                // Look in parent scope, but now this function needs to capture the variable
+                let resolved = parent.resolve_inner(ident, Some(Rc::clone(captures)));
+                
+                // If the parent resolved it and we're capturing, return captured
+                match resolved {
+                    Var::Global(_) | Var::Argument(_) | Var::Local(_) | Var::Captured(_) => {
+                        Var::Captured(ident)
+                    }
+                }
             }
             Scope::Lexical { binding, parent } => {
+                // Check if this identifier is bound in this lexical scope
                 if binding.iter().any(|binding| binding.0 == ident) {
-                    for captures in capture_fns.iter() {
-                        captures.borrow_mut().push(Var::Captured(ident));
+                    // Found in current lexical scope
+                    if let Some(captures) = current_captures {
+                        // If we're in a function that needs to capture, add to captures
+                        captures.borrow_mut().push(Var::Local(ident.into()));
+                        Var::Captured(ident)
+                    } else {
+                        // Direct access to local binding
+                        Var::Local(ident.into())
                     }
-                    return Var::Captured(ident);
                 } else {
-                    parent.resolve_inner(ident, capture_fns)
+                    // Not found in current scope, continue searching in parent
+                    parent.resolve_inner(ident, current_captures)
                 }
             }
         }
