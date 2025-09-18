@@ -38,6 +38,7 @@ scc = "3.0.6"
 # gxhash = "3.5.0"
 rapidhash = "4.1.0"
 rustc-hash = "2.1.1"
+logos = "0.15.1"
 
 [build-dependencies]
 syn = { workspace = true }

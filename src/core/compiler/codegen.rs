@@ -8,13 +8,13 @@ use cranelift_module::FuncId;
 use cranelift_module::Module;
 
 use crate::core::compiler::error::{CodegenError, CodegenResult};
-use crate::core::compiler::ir::*;
 use crate::core::compiler::scope::CompileScope;
 use crate::core::compiler::scope::FrameScope;
 use crate::core::compiler::scope::Val;
 use crate::core::function::LispFunction;
 use crate::core::object::NIL;
 use crate::core::object::TRUE;
+use crate::core::parser::expr::*;
 use crate::core::symbol::LispSymbol;
 use crate::core::symbol::Symbol;
 use crate::core::Tagged;
@@ -88,10 +88,10 @@ impl<'a> Codegen<'a> {
         builtin_funcs: &'a HashMap<String, FuncId>,
         fctx: &'a mut FunctionBuilderContext,
         ctx: &'a mut Context,
-        args: &[Arg],
+        args: &Args,
         parent_scope: &'s CompileScope,
     ) -> CodegenResult<(Self, CompileScope<'s>)> {
-        tracing::debug!("Creating new codegen with {} args", args.len());
+        tracing::debug!("Creating new codegen with args: {:?}", args);
 
         // make signature
         let sig = &mut ctx.func.signature;
@@ -128,9 +128,8 @@ impl<'a> Codegen<'a> {
         let env = block_params[2];
 
         let mut variables = HashMap::new();
-        for (i, arg) in args.iter().enumerate() {
-            let arg = arg.ident;
-            let sym = arg;
+        for (i, arg) in args.normal.iter().enumerate() {
+            let sym = *arg;
             let var = builder.declare_var(types::I64);
             variables.insert(sym, var);
 
@@ -172,6 +171,14 @@ impl<'a> Codegen<'a> {
     fn not_nil(&mut self, val: Value) -> Value {
         let nil = self.nil();
         self.builder.ins().icmp(IntCC::NotEqual, val, nil)
+    }
+
+    pub fn translate_progn<'s>(
+        &mut self,
+        progn: &Progn,
+        scope: &CompileScope<'s>,
+    ) -> CodegenResult<Value> {
+        self.translate_exprs(&progn.body, scope)
     }
 
     pub fn translate_exprs<'s>(
@@ -324,17 +331,17 @@ impl<'a> Codegen<'a> {
         scope: &CompileScope<'s>,
         load_function_cell: bool,
     ) -> CodegenResult<Value> {
-        match expr {
-            Expr::Nil => Ok(self.nil()),
-            Expr::Symbol(ident) => {
-                let symbol = (*ident).into();
+        match &*expr.ty() {
+            ExprType::Nil => Ok(self.nil()),
+            ExprType::Symbol(ident) => {
+                let symbol = ident.get().into();
                 let val = self.load_symbol(scope, symbol, load_function_cell)?;
                 Ok(val)
             }
-            Expr::Literal(literal) => self.translate_literal(literal),
-            Expr::Vector(exprs) => self.translate_vector(exprs, scope),
-            Expr::Call(call) => self.translate_call(call, scope),
-            Expr::SpecialForm(special_form) => self.translate_special_form(special_form, scope),
+            ExprType::Literal(literal) => self.translate_literal(literal),
+            ExprType::Vector(exprs) => self.translate_vector(exprs, scope),
+            ExprType::Call(call) => self.translate_call(call, scope),
+            ExprType::SpecialForm(special_form) => self.translate_special_form(special_form, scope),
         }
     }
 
@@ -398,7 +405,8 @@ impl<'a> Codegen<'a> {
         //     _ => ()
         // };
 
-        let func = self.translate_expr(call.func.as_ref(), scope, true)?;
+        let func = self.load_symbol(scope, call.symbol.get().into(), true)?;
+        // let func = self.translate_expr(call.symbol, scope, true)?;
         let args = self.translate_arg_exprs(&call.args, scope)?;
         let argc = args.len();
 
@@ -446,7 +454,7 @@ impl<'a> Codegen<'a> {
             SpecialForm::Let(let_expr) => self.translate_let_expr(let_expr, scope),
             SpecialForm::Lambda(lambda) => self.translate_lambda_expr(lambda, scope),
             SpecialForm::Quote(quote) => self.translate_quote(quote, scope),
-            SpecialForm::Progn(exprs) => self.translate_exprs(exprs, scope),
+            SpecialForm::Progn(exprs) => self.translate_progn(exprs, scope),
             SpecialForm::And(exprs) => self.translate_and(exprs, scope),
             SpecialForm::Or(exprs) => self.translate_or(exprs, scope),
             SpecialForm::Defvar(exprs) => self.translate_defvar(exprs, scope),
@@ -480,7 +488,7 @@ impl<'a> Codegen<'a> {
 
         self.builder.switch_to_block(else_block);
         self.builder.seal_block(else_block);
-        let else_return = self.translate_exprs(&if_expr.els, scope)?;
+        let else_return = self.translate_progn(&if_expr.els, scope)?;
         self.builder.ins().jump(merge_block, &[else_return.into()]);
 
         self.builder.switch_to_block(merge_block);
@@ -639,7 +647,7 @@ impl<'a> Codegen<'a> {
         match data {
             QuotedData::Literal(literal) => self.translate_literal(literal),
             QuotedData::Symbol(ident) => {
-                let symbol: Symbol = (*ident).into();
+                let symbol: Symbol = ident.get().into();
                 Ok(self.translate_lispobj(&LispSymbol::from(symbol)))
             }
             QuotedData::List(_items) => {
@@ -661,10 +669,7 @@ impl<'a> Codegen<'a> {
         lambda: &Lambda,
         scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
-        tracing::info!(
-            "Translating lambda with {} args: {lambda:?}",
-            lambda.args.len()
-        );
+        tracing::info!("Translating lambda with {:?}: {lambda:?}", lambda.args);
         let mut fctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
 
@@ -678,11 +683,7 @@ impl<'a> Codegen<'a> {
             scope,
         )?;
 
-        tracing::debug!(
-            "Translating lambda body with {} expressions",
-            lambda.body.len()
-        );
-        let result = codegen.translate_exprs(&lambda.body, &new_scope)?;
+        let result = codegen.translate_exprs(&lambda.body.body, &new_scope)?;
 
         let func_id = codegen.func_id;
         // TODO make sure this is still valid after storing func_ptr
@@ -692,7 +693,6 @@ impl<'a> Codegen<'a> {
         self.module.define_function(func_id, &mut ctx)?;
         self.module.clear_context(&mut ctx);
 
-        tracing::debug!("Finalizing lambda function definitions");
         self.module.finalize_definitions()?;
         let func_ptr = self.module.get_finalized_function(func_id);
         func.set_func_ptr(func_ptr);
@@ -709,7 +709,7 @@ impl<'a> Codegen<'a> {
         let mut new_vars = HashMap::new();
         let mut binding_values = Vec::new();
 
-        for (ident, value_expr) in &let_expr.bindings {
+        for (ident, value_expr) in &*let_expr.bindings {
             let var = self.builder.declare_var(types::I64);
             new_vars.insert(*ident, var);
 
@@ -735,7 +735,7 @@ impl<'a> Codegen<'a> {
         }
 
         // translate body
-        let result = self.translate_exprs(&let_expr.body, &new_scope)?;
+        let result = self.translate_exprs(&let_expr.body.body, &new_scope)?;
 
         // resolve bindings for closures capturing let-bound variables
         if let CompileScope::Frame(frame) = &new_scope {

@@ -2,7 +2,15 @@ use proc_macros::Trace;
 
 use crate::{
     core::{
-        cons::{Cons, LispCons}, function::{Function, LispFunction}, hashtable::{HashTable, LispHashTable}, number::{Character, Float, Integer, LispCharacter, LispFloat, LispInteger}, parser::lexer::Token, string::{LispStr, Str}, symbol::{LispSymbol, Symbol}, tagged_ptr::{get_tag, TaggedObj}, vector::{LispVector, Vector}
+        cons::{Cons, LispCons},
+        function::{Function, LispFunction},
+        hashtable::{HashTable, LispHashTable},
+        number::{Character, Float, Integer, LispCharacter, LispFloat, LispInteger},
+        parser::token::Token,
+        string::{LispStr, Str},
+        symbol::{LispSymbol, Symbol},
+        tagged_ptr::{get_tag, TaggedObj},
+        vector::{LispVector, Vector},
     },
     gc::Trace,
 };
@@ -365,9 +373,8 @@ impl_try_from_for_object!(Cons, LispCons);
 impl_try_from_for_object!(Function, LispFunction);
 impl_try_from_for_object!(HashTable, LispHashTable);
 
-
 /// Convert a LispObject into a sequence of tokens for macro expansion
-pub fn lisp_object_to_tokens(obj: &LispObject) -> Vec<Token> {
+pub fn lisp_object_to_tokens(obj: LispObject) -> Vec<Token> {
     match obj {
         LispObject::Nil => vec![Token::Ident("nil".into())],
         LispObject::True => vec![Token::Ident("t".into())],
@@ -378,16 +385,14 @@ pub fn lisp_object_to_tokens(obj: &LispObject) -> Vec<Token> {
         LispObject::Symbol(lisp_symbol) => vec![Token::Ident(lisp_symbol.0.ident())],
         LispObject::Vector(lisp_vector) => {
             let mut tokens = vec![Token::LBracket];
-            for item in lisp_vector.0.get().iter() {
-                let item_obj = item.untag();
-                tokens.extend(lisp_object_to_tokens(&item_obj));
+            for item in lisp_vector.0.get() {
+                let item_obj = item.clone().untag();
+                tokens.extend(lisp_object_to_tokens(item_obj));
             }
             tokens.push(Token::RBracket);
             tokens
         }
-        LispObject::Cons(lisp_cons) => {
-            cons_to_tokens(&lisp_cons.0)
-        }
+        LispObject::Cons(lisp_cons) => cons_to_tokens(&lisp_cons.0.get()),
         LispObject::Function(_) => {
             // Functions can't be directly converted to tokens for macro expansion
             vec![Token::Ident("#<function>".into())]
@@ -402,36 +407,15 @@ pub fn lisp_object_to_tokens(obj: &LispObject) -> Vec<Token> {
 /// Convert a cons cell to tokens, handling proper list structure
 fn cons_to_tokens(cons: &Cons) -> Vec<Token> {
     let mut tokens = vec![Token::LParen];
-    
+
+    let vec = cons.to_vec().unwrap();
     // Handle the car
-    let car_obj = cons.car().untag();
-    tokens.extend(lisp_object_to_tokens(&car_obj));
-    
-    // Handle the cdr - could be nil (proper list), another cons (list continues), or atom (dotted pair)
-    let mut current_cdr = cons.cdr();
-    
-    loop {
-        match current_cdr.as_ref() {
-            ObjectRef::Nil => {
-                // Proper list termination
-                break;
-            }
-            ObjectRef::Cons(next_cons) => {
-                // List continues
-                let car_obj = next_cons.car().untag();
-                tokens.extend(lisp_object_to_tokens(&car_obj));
-                current_cdr = next_cons.cdr();
-            }
-            _ => {
-                // Dotted pair - for now, represent as a comment since we don't have Token::Dot
-                // This is a limitation that should be addressed by adding Token::Dot to the lexer
-                tokens.push(Token::Ident("...".into())); // Placeholder for dotted pair
-                break;
-            }
-        }
+    tokens.push(Token::LParen);
+    for obj in vec.into_iter() {
+        tokens.extend(lisp_object_to_tokens(obj.untag()));
     }
-    
     tokens.push(Token::RParen);
+
     tokens
 }
 
@@ -441,7 +425,7 @@ pub struct LispObjectTokenIterator {
 }
 
 impl LispObjectTokenIterator {
-    pub fn new(obj: &LispObject) -> Self {
+    pub fn new(obj: LispObject) -> Self {
         Self {
             tokens: lisp_object_to_tokens(obj).into_iter(),
         }
@@ -456,8 +440,8 @@ impl Iterator for LispObjectTokenIterator {
     }
 }
 
-impl From<&LispObject> for LispObjectTokenIterator {
-    fn from(obj: &LispObject) -> Self {
+impl From<LispObject> for LispObjectTokenIterator {
+    fn from(obj: LispObject) -> Self {
         Self::new(obj)
     }
 }

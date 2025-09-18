@@ -9,7 +9,6 @@ use crate::{
         object::{nil, tru, Object, ObjectRef},
         symbol::{LispSymbol, Symbol},
         tagged_ptr::TaggedObj,
-        Tagged,
     },
     runtime_bail,
 };
@@ -131,10 +130,7 @@ fn load_captured(ident: Ident, func: &mut Function) -> Result<Object> {
 
 #[internal_fn]
 pub fn store_symbol_function(symbol: Symbol, func: Object, env: &Environment) {
-    tracing::debug!(
-        "storing function {func:?} to symbol {}",
-        symbol.name()
-    );
+    tracing::debug!("storing function {func:?} to symbol {}", symbol.name());
     let data_ref = env.get_or_init_symbol(symbol);
     let symbol = LispSymbol::from("function").tag();
     let cell = LispCons::new(symbol, func);

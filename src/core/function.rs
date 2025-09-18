@@ -16,7 +16,6 @@ use crate::{
 pub struct LispFunction(pub(crate) Gc<Function>);
 impl_tagged_for_gc!(LispFunction, LispType::Function, Function);
 
-
 #[derive(Debug, Clone, Trace)]
 pub struct Function {
     #[no_trace]
@@ -37,7 +36,6 @@ pub enum FunctionType {
     Subr(SubrFn),
     Lambda(LambdaFn),
 }
-
 
 #[derive(Debug, Clone, Copy)]
 pub struct SubrFn {

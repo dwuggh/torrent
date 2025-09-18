@@ -9,6 +9,7 @@ pub mod hashtable;
 pub mod ident;
 pub mod number;
 pub mod object;
+pub mod parser;
 pub mod runtime;
 pub mod string;
 pub mod symbol;

@@ -1,13 +1,9 @@
-use indexmap::IndexMap;
 use rustc_hash::FxBuildHasher;
-use scc::hash_index::{Entry, OccupiedEntry};
 
 use crate::core::{
     error::{RuntimeError, RuntimeResult},
-    ident::Ident,
     object::{Object, ObjectRef},
-    symbol::{LispSymbol, Symbol, SymbolCell, SymbolMap},
-    tagged_ptr::TaggedObj,
+    symbol::{Symbol, SymbolCell, SymbolMap},
 };
 
 #[derive(Debug, Default)]
@@ -55,17 +51,11 @@ impl Environment {
         })
     }
 
-    pub fn get_symbol_cell(
-        &self,
-        symbol: Symbol,
-    ) -> Option<&SymbolCell> {
+    pub fn get_symbol_cell(&self, symbol: Symbol) -> Option<&SymbolCell> {
         self.symbol_map.get_symbol_cell(symbol)
     }
 
-    pub fn get_or_init_symbol(
-        &self,
-        symbol: Symbol,
-    ) -> &SymbolCell {
+    pub fn get_or_init_symbol(&self, symbol: Symbol) -> &SymbolCell {
         self.symbol_map.get_or_init_symbol(symbol)
     }
 

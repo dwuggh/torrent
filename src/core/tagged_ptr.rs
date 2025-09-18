@@ -90,14 +90,14 @@ macro_rules! impl_tagged_for_gc {
                 // Ok(val)
             }
 
-            unsafe fn cast<'a>(val: u64) -> Self::Data<'a> {
+            unsafe fn cast<'a>(val: u64) -> <$name as Tagged>::Data<'a> {
                 let val = crate::core::tagged_ptr::shifting_untag(val);
                 let ptr = val as *mut crate::gc::GcInner<$inner>;
                 let data_ref = ptr.as_ref().map(AsRef::as_ref).unwrap();
                 std::mem::transmute(data_ref)
             }
 
-            unsafe fn cast_mut<'a>(val: u64) -> Self::DataMut<'a> {
+            unsafe fn cast_mut<'a>(val: u64) -> <$name as Tagged>::DataMut<'a> {
                 let val = crate::core::tagged_ptr::shifting_untag(val);
                 let ptr = val as *mut crate::gc::GcInner<$inner>;
                 let data_ref = ptr.as_mut().map(AsMut::as_mut).unwrap();

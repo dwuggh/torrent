@@ -9,10 +9,10 @@ use cranelift_module::Module;
 
 use super::scope::CompileScope;
 use crate::core::compiler::codegen::Codegen;
-use crate::core::compiler::ir::Expr;
 use crate::core::compiler::BuiltinFnPlugin;
 use crate::core::env::Environment;
 use crate::core::function::LispFunction;
+use crate::core::parser::expr::Expr;
 use crate::core::runtime::store_symbol_function;
 use crate::core::symbol::Symbol;
 use crate::core::tagged_ptr::TaggedObj;

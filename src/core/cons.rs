@@ -1,12 +1,12 @@
 use proc_macros::Trace;
 
 use crate::{
+    core::Tagged,
     core::{
         object::{nil, LispType, Object, ObjectRef},
         tagged_ptr::TaggedObj,
     },
     gc::Gc,
-    Tagged,
 };
 
 #[derive(Clone, Trace, Debug)]

@@ -1,7 +1,7 @@
 use lasso::{Key, ThreadedRodeo};
 use std::sync::LazyLock;
 
-use crate::core::symbol::{LispSymbol, Symbol};
+use crate::core::symbol::Symbol;
 
 pub static INTERNER: LazyLock<ThreadedRodeo<Ident>> = LazyLock::new(ThreadedRodeo::new);
 

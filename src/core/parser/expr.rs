@@ -1,27 +1,86 @@
 use crate::core::{
     ident::Ident,
     number::{LispCharacter, LispFloat, LispInteger},
-    string::LispStr, symbol::Symbol,
+    parser::Span,
+    string::LispStr,
+    symbol::Symbol,
 };
-use std::sync::Arc;
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 #[derive(Clone, Debug)]
-pub enum Expr {
+pub struct Expr {
+    pub ty: RefCell<ExprType>,
+    pub span: Span,
+}
+
+impl Expr {
+    pub fn new(ty: ExprType, span: Span) -> Self {
+        let ty = RefCell::new(ty);
+        Self { ty, span }
+    }
+
+    pub fn ty(&self) -> std::cell::Ref<'_, ExprType> {
+        self.ty.borrow()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ExprType {
     Nil,
     Literal(Literal),
-    Symbol(Ident),
+    Symbol(Cell<Var>),
     Vector(Vec<Expr>),
     Call(Call),
     SpecialForm(SpecialForm),
 }
 
-#[derive(Clone, Debug)]
+pub type RefExpr = Expr;
+pub type BoxRefExpr = Box<Expr>;
+pub type CellVar = Cell<Var>;
+
+#[derive(Debug, Clone)]
+pub struct Progn {
+    pub body: Vec<Expr>,
+}
+
+impl Progn {
+    pub fn new(body: Vec<Expr>) -> Self {
+        Self { body }
+    }
+}
+
+pub fn new_refbox(expr: Expr) -> BoxRefExpr {
+    Box::new(expr)
+}
+
+#[derive(Clone, Debug, Copy)]
 pub enum Var {
     Symbol(Symbol),
     Local(Local),
 }
 
-#[derive(Clone, Debug)]
+impl From<Var> for Ident {
+    fn from(var: Var) -> Self {
+        match var {
+            Var::Symbol(symbol) => symbol.into(),
+            Var::Local(local) => local.ident,
+        }
+    }
+}
+
+impl From<Var> for Symbol {
+    fn from(var: Var) -> Self {
+        match var {
+            Var::Symbol(symbol) => symbol,
+            Var::Local(local) => local.ident.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Copy)]
 pub struct Local {
     pub ident: Ident,
     pub id: u32,
@@ -29,26 +88,26 @@ pub struct Local {
 
 #[derive(Clone, Debug)]
 pub enum SpecialForm {
-    And(Vec<Expr>),
+    And(Vec<RefExpr>),
+    Or(Vec<RefExpr>),
+    If(If),
     Catch(Catch),
     Cond(Cond),
     ConditionCase(ConditionCase),
     Defconst(Defconst),
     Defvar(Defvar),
     Function(Function),
-    If(If),
     Interactive(Interactive),
     Lambda(Lambda),
     Let(Let),
     LetStar(LetStar),
-    Or(Vec<Expr>),
     Prog1(Prog1),
     Prog2(Prog2),
-    Progn(Vec<Expr>),
+    Progn(Progn),
     Quote(Quote),
-    SaveCurrentBuffer(SaveCurrentBuffer),
-    SaveExcursion(SaveExcursion),
-    SaveRestriction(SaveRestriction),
+    SaveCurrentBuffer(Progn),
+    SaveExcursion(Progn),
+    SaveRestriction(Progn),
     Set(Set),
     Setq(Setq),
     SetqDefault(SetqDefault),
@@ -56,48 +115,65 @@ pub enum SpecialForm {
     While(While),
 }
 
+// enum PrognType {
+//     Normal,
+//     SaveExcursion,
+//     SaveRestriction,
+// }
+
+type Binding = Vec<(Ident, Option<Expr>)>;
+
 #[derive(Debug, Clone)]
 pub struct Let {
-    pub bindings: Vec<(Ident, Option<Expr>)>,
-    pub body: Vec<Expr>,
+    pub bindings: Rc<Binding>,
+    pub body: Progn,
+    pub id: u32,
 }
 
 #[derive(Debug, Clone)]
 pub struct LetStar {
-    pub bindings: Vec<(Ident, Option<Expr>)>,
-    pub body: Vec<Expr>,
+    pub bindings: Rc<Binding>,
+    pub body: Progn,
+    pub id: u32,
 }
 
 #[derive(Debug, Clone)]
 pub struct If {
-    pub cond: Arc<Expr>,
-    pub then: Arc<Expr>,
-    pub els: Vec<Expr>,
+    pub cond: BoxRefExpr,
+    pub then: BoxRefExpr,
+    pub els: Progn,
+}
+
+#[derive(Debug, Clone)]
+pub struct Args {
+    pub normal: Vec<Ident>,
+    pub optional: Option<Vec<Ident>>,
+    pub rest: Option<Ident>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Lambda {
-    pub args: Vec<Arg>,
+    pub args: Rc<Args>,
     // NOTE if there's exactly 1 string after args and no other exprs,
     // then this string should be placed in body.
     // i.e. (lambda () "foo") should return "foo"
     pub docstring: Option<String>,
     pub interactive: Option<Interactive>,
     pub declare: Option<Vec<Expr>>,
-    pub body: Vec<Expr>,
-    pub captures: Vec<Ident>, // For closure analysis
+    pub body: Progn,
+    pub captures: RefCell<Vec<Var>>, // For closure analysis
 }
 
 #[derive(Debug, Clone)]
 pub struct Interactive {
     pub arg_desc: Option<String>,
-    pub modes: Vec<Ident>,
+    pub modes: Option<Vec<CellVar>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Call {
-    pub func: Box<Expr>,
-    pub args: Vec<Expr>,
+    pub symbol: CellVar,
+    pub args: Vec<RefExpr>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,26 +184,26 @@ pub struct Set {
 
 #[derive(Debug, Clone)]
 pub struct Setq {
-    pub assignments: Vec<(Ident, Expr)>,
+    pub assignments: Vec<(Ident, RefExpr)>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Defvar {
     pub symbol: Ident,
-    pub value: Option<Box<Expr>>,
+    pub value: Option<BoxRefExpr>,
     pub docstring: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Defconst {
     pub symbol: Ident,
-    pub value: Box<Expr>,
+    pub value: BoxRefExpr,
     pub docstring: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Function {
-    pub name: Ident,
+    pub body: Progn,
 }
 
 #[derive(Debug, Clone)]
@@ -137,72 +213,72 @@ pub struct Cond {
 
 #[derive(Debug, Clone)]
 pub struct CondClause {
-    pub condition: Expr,
-    pub body: Vec<Expr>,
+    pub condition: RefExpr,
+    pub body: Progn,
 }
 
 #[derive(Debug, Clone)]
 pub struct While {
-    pub condition: Box<Expr>,
-    pub body: Vec<Expr>,
+    pub condition: BoxRefExpr,
+    pub body: Progn,
 }
 
 #[derive(Debug, Clone)]
 pub struct Prog1 {
-    pub first: Box<Expr>,
-    pub rest: Vec<Expr>,
+    pub first: BoxRefExpr,
+    pub rest: Progn,
 }
 
 #[derive(Debug, Clone)]
 pub struct Prog2 {
-    pub first: Box<Expr>,
-    pub second: Box<Expr>,
-    pub rest: Vec<Expr>,
+    pub first: BoxRefExpr,
+    pub second: BoxRefExpr,
+    pub rest: Progn,
 }
 
 #[derive(Debug, Clone)]
 pub struct Catch {
-    pub tag: Box<Expr>,
-    pub body: Vec<Expr>,
+    pub tag: BoxRefExpr,
+    pub body: Progn,
 }
 
 #[derive(Debug, Clone)]
 pub struct UnwindProtect {
-    pub protected: Box<Expr>,
-    pub cleanup: Vec<Expr>,
+    pub protected: BoxRefExpr,
+    pub cleanup: Progn,
 }
 
 #[derive(Debug, Clone)]
 pub struct ConditionCase {
     pub var: Option<Ident>,
-    pub protected: Box<Expr>,
+    pub protected: BoxRefExpr,
     pub handlers: Vec<ConditionHandler>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ConditionHandler {
-    pub condition: Expr,
-    pub body: Vec<Expr>,
+    pub condition: RefExpr,
+    pub body: Progn,
 }
 
-#[derive(Debug, Clone)]
-pub struct SaveCurrentBuffer {
-    pub body: Vec<Expr>,
-}
+// #[derive(Debug, Clone)]
+// pub struct SaveCurrentBuffer {
+//     pub body: Vec<Expr>,
+// }
 
-#[derive(Debug, Clone)]
-pub struct SaveExcursion {
-    pub body: Vec<Expr>,
-}
+// #[derive(Debug, Clone)]
+// pub struct SaveExcursion {
+//     pub body: Vec<Expr>,
+// }
 
-#[derive(Debug, Clone)]
-pub struct SaveRestriction {
-    pub body: Vec<Expr>,
-}
+// #[derive(Debug, Clone)]
+// pub struct SaveRestriction {
+//     pub body: Vec<Expr>,
+// }
 
 #[derive(Debug, Clone)]
 pub struct SetqDefault {
-    pub assignments: Vec<(Ident, Expr)>,
+    pub assignments: Vec<(Ident, RefExpr)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -234,15 +310,15 @@ pub enum QuoteKind {
 pub enum QuotedData {
     // Simple literals that evaluate to themselves
     Literal(Literal),
-    Symbol(Ident),
+    Symbol(CellVar),
 
     // Collections that may contain unquotes
     List(Vec<QuotedData>),
     Vector(Vec<QuotedData>),
 
     // Unquoting (only valid inside backquotes)
-    Unquote(Box<Expr>),       // ,expr
-    UnquoteSplice(Box<Expr>), // ,@expr
+    Unquote(BoxRefExpr),       // ,expr
+    UnquoteSplice(BoxRefExpr), // ,@expr
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -256,6 +332,24 @@ pub enum Literal {
     Number(Number),
     Character(LispCharacter),
     String(LispStr),
+}
+
+impl ExprType {
+    pub fn new_int(n: i64) -> Self {
+        Self::Literal(Literal::Number(Number::Integer(LispInteger::new(n))))
+    }
+
+    pub fn new_float(f: f64) -> Self {
+        Self::Literal(Literal::Number(Number::Real(LispFloat::new(f))))
+    }
+
+    pub fn new_char(c: char) -> Self {
+        Self::Literal(Literal::Character(LispCharacter::new(c)))
+    }
+
+    pub fn new_str(str: String) -> Self {
+        Self::Literal(Literal::String(LispStr::new(str)))
+    }
 }
 
 // impl TryFrom<LispValue> for Expr {

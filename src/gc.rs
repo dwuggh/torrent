@@ -261,6 +261,16 @@ impl<T: ?Sized> Gc<T> {
     }
 }
 
+// impl<T: Sized> Gc<T> {
+
+//     pub fn take(self) -> T {
+//         unsafe {
+//             let a = self.ptr.as_mut().data;
+//             a.into_inner()
+//         }
+//     }
+// }
+
 /// Fat pointer to the header and data of the Gc
 /// we customize a fat pointer to avoid types like `dyn FnMut(GcInner<dyn Trace>)`
 /// which is "fatter"

@@ -37,11 +37,9 @@ impl BuiltinFnPlugin {
     }
 }
 
-pub mod ast_to_ir;
 mod codegen;
 pub mod error;
-pub mod ir;
 pub mod jit;
 pub mod macro_item;
-pub mod node_parser;
+pub mod optimization;
 pub mod scope;

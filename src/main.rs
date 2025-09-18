@@ -1,18 +1,14 @@
 use chumsky::Parser;
 
-use crate::{
-    ast::elisp_parser,
-    core::{
-        compiler::{ast_to_ir::node_to_ir, jit::JIT, scope::CompileScope},
-        env::Environment,
-        object::Object,
-        Tagged,
-    },
-};
-
-pub mod ast;
 pub mod core;
 pub mod gc;
+
+use crate::core::{
+    compiler::{jit::JIT, scope::CompileScope},
+    env::Environment,
+    object::Object,
+    parser::parse_src,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -43,22 +39,33 @@ unsafe fn run_code(
 ) -> anyhow::Result<Vec<anyhow::Result<Object>>> {
     unsafe {
         // Pass the string to the JIT, and it returns a raw pointer to machine code.
-        let node = elisp_parser().parse(code).unwrap();
+        match parse_src(code) {
+            Ok(node) => {
+                let vals = node
+                    .into_iter()
+                    .map(|expr| {
+                        let f = jit.compile_expr(&expr, &ctx).unwrap();
+                        let code_fn = std::mem::transmute::<_, fn(*const Environment) -> Object>(f);
+                        // And now we can call it!
+                        let value = code_fn(env as *const Environment);
+                        let result = value;
+                        println!("result: {result:?}");
+                        Ok(result)
+                    })
+                    .collect::<Vec<_>>();
+                Ok(vals)
+            }
+            Err(err) => {
+                for e in err.iter() {
+                    let span = e.span();
+                    println!("{:?} at {}", e.reason(), e.span());
+                    println!("{:?}", &code[span.start()..span.end()]);
+                }
+                panic!()
+            }
+        }
         // println!("{node:?}");
-        let vals = node
-            .into_iter()
-            .map(node_to_ir)
-            .map(|expr| {
-                let expr = expr?;
-                let f = jit.compile_expr(&expr, &ctx).unwrap();
-                let code_fn = std::mem::transmute::<_, fn(*const Environment) -> Object>(f);
-                // And now we can call it!
-                let value = code_fn(env as *const Environment);
-                let result = value;
-                println!("result: {result:?}");
-                Ok(result)
-            })
-            .collect::<Vec<_>>();
-        Ok(vals)
     }
 }
+
+// fn main() {}

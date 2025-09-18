@@ -1,9 +1,27 @@
-
-pub mod node;
 pub mod expr;
-pub mod node_to_expr;
+pub mod expr_parser;
+pub mod token;
 
-#[derive(Debug, Clone, PartialEq, PartialOrd, Copy, Eq)]
+pub use chumsky::prelude::SimpleSpan;
+use chumsky::{
+    error::Rich,
+    input::{Input, Stream},
+    Parser,
+};
+use logos::Logos;
+
+use crate::core::parser::{expr::Expr, expr_parser::exprs_parser, token::Token};
+
+pub fn parse_src<'s>(src: &'s str) -> Result<Vec<Expr>, Vec<Rich<'s, Token, Span>>> {
+    let tokens = Token::lexer(src).spanned().map(|(tok, span)| match tok {
+        Ok(tok) => (tok, span.into()),
+        Err(_) => (Token::Error, span.into()),
+    });
+    let stream = Stream::from_iter(tokens).map((0..src.len()).into(), |(t, s)| (t, s));
+    exprs_parser().parse(stream).into_result()
+}
+
+#[derive(Clone, PartialEq, PartialOrd, Copy, Eq)]
 pub struct Span {
     start: usize,
     end: usize,
@@ -22,7 +40,10 @@ impl Span {
 
     /// Create a span at a single position
     pub fn at(pos: usize) -> Self {
-        Self { start: pos, end: pos }
+        Self {
+            start: pos,
+            end: pos,
+        }
     }
 
     /// Get the start position
@@ -72,10 +93,56 @@ impl Span {
     }
 }
 
+impl chumsky::span::Span for Span {
+    type Context = ();
+
+    type Offset = usize;
+
+    fn new(_: Self::Context, range: std::ops::Range<Self::Offset>) -> Self {
+        Self {
+            start: range.start,
+            end: range.end,
+        }
+    }
+
+    fn context(&self) -> Self::Context {
+        ()
+    }
+
+    fn start(&self) -> Self::Offset {
+        self.start
+    }
+
+    fn end(&self) -> Self::Offset {
+        self.end
+    }
+}
+
+impl std::fmt::Debug for Span {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}..{}", self.start, self.end)
+    }
+}
+
+impl std::fmt::Display for Span {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}..{}", self.start, self.end)
+    }
+}
+
+impl From<std::ops::Range<usize>> for Span {
+    fn from(value: std::ops::Range<usize>) -> Self {
+        Self {
+            start: value.start,
+            end: value.end,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, PartialOrd, Copy, Eq)]
 pub struct WithSpan<T> {
     content: T,
-    span: Span
+    span: Span,
 }
 
 impl<T> WithSpan<T> {

@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::{ast::Node, core::symbol::Symbol};
+use crate::core::symbol::Symbol;
 use cranelift_module::ModuleError;
 
 #[derive(Debug, Error)]
@@ -23,9 +23,8 @@ pub enum CodegenError {
     #[error("Let binding symbol must be an identifier")]
     LetBindingNotSymbol,
 
-    #[error("Invalid s-expression head. Expected symbol, got: {0:?}")]
-    InvalidSexpHead(Node),
-
+    // #[error("Invalid s-expression head. Expected symbol, got: {0:?}")]
+    // InvalidSexpHead(Node),
     #[error("Symbol not found: {0:?}")]
     SymbolNotFound(Symbol),
 
