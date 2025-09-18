@@ -51,6 +51,7 @@ fn macro_expand_once_with_scope(expr: &Expr, scope: &Scope, env: &Environment) -
         ExprType::Call(call) => {
             // First resolve the function symbol in the current scope
             let resolved_var = scope.resolve(call.symbol.get().into());
+            call.symbol.set(resolved_var);
             
             // Check if this is a macro call
             if let Some(expanded_expr_type) = try_expand_macro_call(call, resolved_var, env)? {
@@ -77,9 +78,9 @@ fn macro_expand_once_with_scope(expr: &Expr, scope: &Scope, env: &Environment) -
 
 /// Recursively expand subexpressions after top-level expansion is complete
 fn expand_subexpressions(expr: &Expr, scope: &Scope, env: &Environment) -> RuntimeResult<()> {
-    let mut expr_type = expr.ty.borrow_mut();
+    let expr_type = expr.ty.borrow();
     
-    match &mut *expr_type {
+    match &*expr_type {
         ExprType::Vector(exprs) => {
             for expr in exprs.iter() {
                 macro_expand_all_with_scope(expr, scope, env)?;
@@ -92,8 +93,11 @@ fn expand_subexpressions(expr: &Expr, scope: &Scope, env: &Environment) -> Runti
             }
         }
         ExprType::SpecialForm(special_form) => {
-            drop(expr_type);
             expand_special_form_subexpressions(expr, special_form, scope, env)?;
+        }
+        ExprType::Symbol(sym) => {
+            let resolved_var = scope.resolve(sym.get().into());
+            sym.set(resolved_var);
         }
         _ => {
             // No subexpressions to expand
@@ -185,7 +189,7 @@ fn expand_let_macros(expr: &Expr, parent_scope: &Scope, env: &Environment) -> Ru
         };
         
         // Expand value expressions in the parent scope (before binding)
-        for (_, value) in let_expr.bindings.iter_mut() {
+        for (_, value) in let_expr.bindings.iter() {
             if let Some(val_expr) = value {
                 macro_expand_all_with_scope(val_expr, parent_scope, env)?;
             }
@@ -208,7 +212,7 @@ fn expand_let_star_macros(expr: &Expr, parent_scope: &Scope, env: &Environment) 
         let mut current_scope = parent_scope.clone();
         
         // For let*, each binding sees the previous bindings
-        for (i, (_, value)) in let_star.bindings.iter_mut().enumerate() {
+        for (i, (_, value)) in let_star.bindings.iter().enumerate() {
             if let Some(val_expr) = value {
                 macro_expand_all_with_scope(val_expr, &current_scope, env)?;
             }
