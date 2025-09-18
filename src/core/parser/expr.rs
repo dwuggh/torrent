@@ -2,10 +2,11 @@ use crate::core::{
     cons::{Cons, LispCons},
     ident::Ident,
     number::{LispCharacter, LispFloat, LispInteger},
-    object::{LispObject, nil},
+    object::{nil, LispObject},
     parser::Span,
     string::LispStr,
     symbol::{LispSymbol, Symbol},
+    tagged_ptr::TaggedObj,
     vector::LispVector,
 };
 use crate::gc::Gc;
@@ -383,15 +384,19 @@ impl From<Expr> for LispObject {
             ExprType::Literal(literal) => literal.into(),
             ExprType::Symbol(var) => var.get().into(),
             ExprType::Vector(exprs) => {
-                let objects: Vec<_> = exprs.into_iter().map(|e| e.into()).map(|obj: LispObject| obj.tag()).collect();
+                let objects: Vec<_> = exprs
+                    .into_iter()
+                    .map(|e| e.into())
+                    .map(|obj: LispObject| obj.tag())
+                    .collect();
                 LispObject::Vector(LispVector(Gc::new(objects)))
             }
             ExprType::Call(call) => {
                 // Convert function call to a list: (function arg1 arg2 ...)
-                let mut elements = Vec::new();
+                let mut elements: Vec<LispObject> = Vec::new();
                 elements.push(call.symbol.get().into());
                 elements.extend(call.args.into_iter().map(|arg| arg.into()));
-                
+
                 // Convert Vec<LispObject> to proper cons list
                 if elements.is_empty() {
                     LispObject::Nil
@@ -414,7 +419,7 @@ impl From<Expr> for LispObject {
                         ];
                         // Add else expressions
                         elements.extend(if_expr.els.body.into_iter().map(|e| e.into()));
-                        
+
                         let mut result = nil();
                         for obj in elements.into_iter().rev() {
                             result = LispCons::new(obj.tag(), result).tag();
@@ -422,19 +427,21 @@ impl From<Expr> for LispObject {
                         result.untag()
                     }
                     SpecialForm::Let(let_expr) => {
-                        let mut elements = vec![LispObject::Symbol(LispSymbol(Symbol::from("let")))];
-                        
+                        let mut elements =
+                            vec![LispObject::Symbol(LispSymbol(Symbol::from("let")))];
+
                         // Convert bindings to list of lists
                         let mut bindings_list = nil();
                         for (ident, value) in let_expr.bindings.iter().rev() {
                             let binding = if let Some(val) = value {
                                 // (var value)
                                 let var_obj = LispObject::Symbol(LispSymbol(Symbol::from(*ident)));
-                                let val_obj = val.clone().into();
+                                let val_obj: LispObject = val.clone().into();
                                 LispCons::new(
                                     var_obj.tag(),
-                                    LispCons::new(val_obj.tag(), nil()).tag()
-                                ).tag()
+                                    LispCons::new(val_obj.tag(), nil()).tag(),
+                                )
+                                .tag()
                             } else {
                                 // just var
                                 LispObject::Symbol(LispSymbol(Symbol::from(*ident))).tag()
@@ -442,10 +449,10 @@ impl From<Expr> for LispObject {
                             bindings_list = LispCons::new(binding, bindings_list).tag();
                         }
                         elements.push(bindings_list.untag());
-                        
+
                         // Add body expressions
                         elements.extend(let_expr.body.body.into_iter().map(|e| e.into()));
-                        
+
                         let mut result = nil();
                         for obj in elements.into_iter().rev() {
                             result = LispCons::new(obj.tag(), result).tag();
@@ -458,10 +465,14 @@ impl From<Expr> for LispObject {
                             QuoteKind::Backquote => "backquote",
                         };
                         let quoted_obj = quote_data_to_lisp_object(quote.expr);
-                        
+
                         let mut result = nil();
                         result = LispCons::new(quoted_obj.tag(), result).tag();
-                        result = LispCons::new(LispObject::Symbol(LispSymbol(Symbol::from(symbol))).tag(), result).tag();
+                        result = LispCons::new(
+                            LispObject::Symbol(LispSymbol(Symbol::from(symbol))).tag(),
+                            result,
+                        )
+                        .tag();
                         result.untag()
                     }
                     // Add other special forms as needed
@@ -492,7 +503,8 @@ fn quote_data_to_lisp_object(data: QuotedData) -> LispObject {
             }
         }
         QuotedData::Vector(items) => {
-            let objects: Vec<_> = items.into_iter()
+            let objects: Vec<_> = items
+                .into_iter()
                 .map(quote_data_to_lisp_object)
                 .map(|obj| obj.tag())
                 .collect();
@@ -501,17 +513,26 @@ fn quote_data_to_lisp_object(data: QuotedData) -> LispObject {
         QuotedData::Unquote(expr) => {
             // Convert unquote to (unquote expr)
             let mut result = nil();
-            result = LispCons::new((*expr).clone().into().tag(), result).tag();
-            result = LispCons::new(LispObject::Symbol(LispSymbol(Symbol::from("unquote"))).tag(), result).tag();
+            let car: LispObject = (*expr).clone().into();
+            result = LispCons::new(car.tag(), result).tag();
+            result = LispCons::new(
+                LispObject::Symbol(LispSymbol(Symbol::from(","))).tag(),
+                result,
+            )
+            .tag();
             result.untag()
         }
         QuotedData::UnquoteSplice(expr) => {
             // Convert unquote-splice to (unquote-splicing expr)
             let mut result = nil();
-            result = LispCons::new((*expr).clone().into().tag(), result).tag();
-            result = LispCons::new(LispObject::Symbol(LispSymbol(Symbol::from("unquote-splicing"))).tag(), result).tag();
+            let car: LispObject = (*expr).clone().into();
+            result = LispCons::new(car.tag(), result).tag();
+            result = LispCons::new(
+                LispObject::Symbol(LispSymbol(Symbol::from(",@"))).tag(),
+                result,
+            )
+            .tag();
             result.untag()
         }
     }
 }
-
