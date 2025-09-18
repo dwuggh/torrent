@@ -12,28 +12,37 @@ pub fn macro_expand(expr: Expr, env: &Environment) -> Expr {
 
 pub fn macro_expand_call(call: &Call, env: &Environment) -> Option<RuntimeResult<Expr>> {
     let symbol = call.symbol.get().into();
-    let result = env.load_symbol_with(symbol, Some(FuncCellType::Macro), |val| {
-        let ObjectRef::Function(func) = val.as_ref() else {
-            return Ok(Err(RuntimeError::WrongType {
-                expected: "function",
-                actual: (val.get_tag()),
-            }));
-        };
-        let args = call.args.iter().map(|arg| {
-            let obj: LispObject = arg.clone().into();
-            obj.tag()
-        }
-        ).collect::<Vec<_>>();
-        let result = func.run(&args, env);
-        Ok(result)
-    }).ok();
+    let result = env
+        .load_symbol_with(symbol, Some(FuncCellType::Macro), |val| {
+            let ObjectRef::Function(func) = val.as_ref() else {
+                return Ok(Err(RuntimeError::WrongType {
+                    expected: "function",
+                    actual: (val.get_tag()),
+                }));
+            };
+            let args = call
+                .args
+                .iter()
+                .map(|arg| {
+                    let obj: LispObject = arg.clone().into();
+                    obj.tag()
+                })
+                .collect::<Vec<_>>();
+            let result = func.run(&args, env).and_then(|result| lisp_object_to_idents(result.untag())).and_then(|tokens| {
+
+    let stream = Stream::from_iter(tokens).map((0..src.len()).into(), |(t, s)| (t, s));
+
+            });
+            Ok(result)
+        })
+        .ok();
 
     result
 }
 
 /// Convert a LispObject to Vec<Ident> for macro expansion
 /// This extracts identifiers from various LispObject types
-pub fn lisp_object_to_idents(obj: LispObject) -> Result<Vec<Ident>, &'static str> {
+pub fn lisp_object_to_idents(obj: LispObject) -> RuntimeResult<Vec<Ident>> {
     match obj {
         LispObject::Nil => Ok(Vec::new()),
         LispObject::Symbol(symbol) => Ok(vec![symbol.0.ident()]),
@@ -44,12 +53,18 @@ pub fn lisp_object_to_idents(obj: LispObject) -> Result<Vec<Ident>, &'static str
                 for item in vec {
                     match item.as_ref() {
                         ObjectRef::Symbol(symbol) => idents.push(symbol.ident()),
-                        _ => return Err("List contains non-symbol elements"),
+                        _ => {
+                            return Err(RuntimeError::MacroExpansionError {
+                                message: "List contains non-symbol elements".to_string(),
+                            })
+                        }
                     }
                 }
                 Ok(idents)
             } else {
-                Err("Improper list cannot be converted to idents")
+                return Err(RuntimeError::MacroExpansionError {
+                    message: "Improper list cannot be converted to idents".to_string(),
+                });
             }
         }
         LispObject::Vector(vector) => {
@@ -57,12 +72,18 @@ pub fn lisp_object_to_idents(obj: LispObject) -> Result<Vec<Ident>, &'static str
             for item in vector.0.get() {
                 match item.as_ref() {
                     ObjectRef::Symbol(symbol) => idents.push(symbol.ident()),
-                    _ => return Err("Vector contains non-symbol elements"),
+                    _ => {
+                        return Err(RuntimeError::MacroExpansionError {
+                            message: "Vector contains non-symbol elements".to_string(),
+                        })
+                    }
                 }
             }
             Ok(idents)
         }
-        _ => Err("Cannot convert this type to Vec<Ident>"),
+        _ => Err(RuntimeError::MacroExpansionError {
+            message: "Cannot convert this type to Vec<Ident>".to_string(),
+        }),
     }
 }
 
