@@ -16,6 +16,16 @@ pub struct Expr {
     pub span: Span,
 }
 
+#[derive(Clone, Debug)]
+pub enum ExprType {
+    Nil,
+    Literal(Literal),
+    Symbol(Cell<Var>),
+    Vector(Vec<Expr>),
+    Call(Call),
+    SpecialForm(SpecialForm),
+}
+
 impl Expr {
     pub fn new(ty: ExprType, span: Span) -> Self {
         let ty = RefCell::new(ty);
@@ -27,18 +37,7 @@ impl Expr {
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum ExprType {
-    Nil,
-    Literal(Literal),
-    Symbol(Cell<Var>),
-    Vector(Vec<Expr>),
-    Call(Call),
-    SpecialForm(SpecialForm),
-}
-
-pub type RefExpr = Expr;
-pub type BoxRefExpr = Box<Expr>;
+pub type BoxExpr = Box<Expr>;
 pub type CellVar = Cell<Var>;
 
 #[derive(Debug, Clone)]
@@ -52,7 +51,7 @@ impl Progn {
     }
 }
 
-pub fn new_refbox(expr: Expr) -> BoxRefExpr {
+pub fn new_box(expr: Expr) -> BoxExpr {
     Box::new(expr)
 }
 
@@ -88,8 +87,8 @@ pub struct Local {
 
 #[derive(Clone, Debug)]
 pub enum SpecialForm {
-    And(Vec<RefExpr>),
-    Or(Vec<RefExpr>),
+    And(Vec<Expr>),
+    Or(Vec<Expr>),
     If(If),
     Catch(Catch),
     Cond(Cond),
@@ -139,8 +138,8 @@ pub struct LetStar {
 
 #[derive(Debug, Clone)]
 pub struct If {
-    pub cond: BoxRefExpr,
-    pub then: BoxRefExpr,
+    pub cond: BoxExpr,
+    pub then: BoxExpr,
     pub els: Progn,
 }
 
@@ -173,7 +172,7 @@ pub struct Interactive {
 #[derive(Debug, Clone)]
 pub struct Call {
     pub symbol: CellVar,
-    pub args: Vec<RefExpr>,
+    pub args: Vec<Expr>,
 }
 
 #[derive(Debug, Clone)]
@@ -184,20 +183,20 @@ pub struct Set {
 
 #[derive(Debug, Clone)]
 pub struct Setq {
-    pub assignments: Vec<(Ident, RefExpr)>,
+    pub assignments: Vec<(Ident, Expr)>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Defvar {
     pub symbol: Ident,
-    pub value: Option<BoxRefExpr>,
+    pub value: Option<BoxExpr>,
     pub docstring: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Defconst {
     pub symbol: Ident,
-    pub value: BoxRefExpr,
+    pub value: BoxExpr,
     pub docstring: Option<String>,
 }
 
@@ -213,51 +212,51 @@ pub struct Cond {
 
 #[derive(Debug, Clone)]
 pub struct CondClause {
-    pub condition: RefExpr,
+    pub condition: Expr,
     pub body: Progn,
 }
 
 #[derive(Debug, Clone)]
 pub struct While {
-    pub condition: BoxRefExpr,
+    pub condition: BoxExpr,
     pub body: Progn,
 }
 
 #[derive(Debug, Clone)]
 pub struct Prog1 {
-    pub first: BoxRefExpr,
+    pub first: BoxExpr,
     pub rest: Progn,
 }
 
 #[derive(Debug, Clone)]
 pub struct Prog2 {
-    pub first: BoxRefExpr,
-    pub second: BoxRefExpr,
+    pub first: BoxExpr,
+    pub second: BoxExpr,
     pub rest: Progn,
 }
 
 #[derive(Debug, Clone)]
 pub struct Catch {
-    pub tag: BoxRefExpr,
+    pub tag: BoxExpr,
     pub body: Progn,
 }
 
 #[derive(Debug, Clone)]
 pub struct UnwindProtect {
-    pub protected: BoxRefExpr,
+    pub protected: BoxExpr,
     pub cleanup: Progn,
 }
 
 #[derive(Debug, Clone)]
 pub struct ConditionCase {
     pub var: Option<Ident>,
-    pub protected: BoxRefExpr,
+    pub protected: BoxExpr,
     pub handlers: Vec<ConditionHandler>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ConditionHandler {
-    pub condition: RefExpr,
+    pub condition: Expr,
     pub body: Progn,
 }
 
@@ -278,7 +277,7 @@ pub struct ConditionHandler {
 
 #[derive(Debug, Clone)]
 pub struct SetqDefault {
-    pub assignments: Vec<(Ident, RefExpr)>,
+    pub assignments: Vec<(Ident, Expr)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -317,8 +316,8 @@ pub enum QuotedData {
     Vector(Vec<QuotedData>),
 
     // Unquoting (only valid inside backquotes)
-    Unquote(BoxRefExpr),       // ,expr
-    UnquoteSplice(BoxRefExpr), // ,@expr
+    Unquote(BoxExpr),       // ,expr
+    UnquoteSplice(BoxExpr), // ,@expr
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -352,56 +351,3 @@ impl ExprType {
     }
 }
 
-// impl TryFrom<LispValue> for Expr {
-//     type Error = RuntimeError;
-
-//     fn try_from(value: LispValue) -> Result<Self, Self::Error> {
-//         let node: Node = value.try_into()?;
-
-//         let expr = node_to_ir(node).map_err(|e| RuntimeError::MacroExpansionError {
-//             message: e.to_string(),
-//         })?;
-//         Ok(expr)
-//     }
-// }
-
-// impl TryFrom<LispValue> for Node {
-//     type Error = RuntimeError;
-
-//     fn try_from(value: LispValue) -> Result<Self, Self::Error> {
-//         let result = match value {
-//             LispValue::Nil => Self::Nil,
-//             LispValue::True => Self::Ident(Ident::from_string("t")),
-//             LispValue::Int(i) => Self::Integer(i),
-//             LispValue::Float(f) => Self::Float(f),
-//             LispValue::Character(c) => Self::Char(c),
-//             LispValue::String(lisp_string) => Self::Str(lisp_string.to_string()),
-//             LispValue::Symbol(symbol) => Self::Ident(symbol.name),
-//             LispValue::MacroItem(macro_item) => macro_item.try_into()?,
-//             _ => {
-//                 let err = Err(RuntimeError::MacroExpansionError {
-//                     message: format!("failed at {value:?}"),
-//                 });
-//                 return err;
-//             }
-//         };
-//         Ok(result)
-//     }
-// }
-
-// impl TryFrom<MacroItem> for Node {
-//     type Error = RuntimeError;
-//     fn try_from(value: MacroItem) -> Result<Self, Self::Error> {
-//         match value {
-//             MacroItem::List(lisp_values) => {
-//                 let mut sexp = Vec::new();
-//                 for val in lisp_values.into_iter() {
-//                     let node: Node = val.try_into()?;
-//                     sexp.push(node);
-//                 }
-//                 Ok(Node::Sexp(sexp))
-//             }
-//             _ => todo!(),
-//         }
-//     }
-// }
