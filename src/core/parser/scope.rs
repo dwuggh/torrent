@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::core::env::Environment;
-use crate::core::function::LispFunction;
 use crate::core::ident::Ident;
 use crate::core::parser::expr::{Args, Binding, Captures, Var};
 
@@ -29,8 +28,8 @@ impl<'a> Scope<'a> {
     pub fn resolve(&self, ident: Ident) -> Var {
         self.resolve_inner(ident, None)
     }
-    
-    pub fn resolve_inner(&self, ident: Ident, current_captures: Option<Captures>) -> Var {
+
+    fn resolve_inner(&self, ident: Ident, current_captures: Option<Captures>) -> Var {
         match self {
             Scope::Global(_environment) => {
                 // If we have captures, this variable needs to be captured from global scope
@@ -62,15 +61,21 @@ impl<'a> Scope<'a> {
                     return Var::Captured(ident);
                 }
 
-                // Look in parent scope, but now this function needs to capture the variable
-                let resolved = parent.resolve_inner(ident, Some(Rc::clone(captures)));
-                
-                // If the parent resolved it and we're capturing, return captured
-                match resolved {
-                    Var::Global(_) | Var::Argument(_) | Var::Local(_) | Var::Captured(_) => {
-                        Var::Captured(ident)
+                // let current_captures = current_captures.or(Some(Rc::clone(captures)));
+                let result = parent.resolve_inner(ident, Some(Rc::clone(captures)));
+                match result {
+                    Var::Captured(ident) => {
+                        current_captures
+                            .map(|captures| captures.borrow_mut().push(Var::Captured(ident)));
                     }
+                    Var::Argument(ident) => {
+                        current_captures
+                            .map(|captures| captures.borrow_mut().push(Var::Captured(ident)));
+                    }
+                    _ => unreachable!(),
                 }
+
+                result
             }
             Scope::Lexical { binding, parent } => {
                 // Check if this identifier is bound in this lexical scope

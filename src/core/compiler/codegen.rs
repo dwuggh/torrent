@@ -636,7 +636,7 @@ impl<'a> Codegen<'a> {
     ) -> CodegenResult<Value> {
         match quote.kind {
             QuoteKind::Quote => self.translate_quoted_data(&quote.expr),
-            QuoteKind::Backquote => {
+            _ => {
                 // TODO: implement backquote with unquote support
                 todo!("Backquote not yet implemented")
             }

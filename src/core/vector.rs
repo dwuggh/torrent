@@ -12,4 +12,10 @@ use crate::{
 pub struct LispVector(pub Gc<Vector>);
 pub type Vector = Vec<Object>;
 
+impl LispVector {
+    pub fn new(objs: Vec<Object>) -> Self {
+        Self(Gc::new(objs))
+    }
+}
+
 impl_tagged_for_gc!(LispVector, LispType::Vector, Vec<Object>);

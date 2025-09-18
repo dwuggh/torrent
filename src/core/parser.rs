@@ -1,5 +1,7 @@
 pub mod expr;
 pub mod expr_parser;
+pub mod macro_expansion;
+pub mod scope;
 pub mod token;
 
 pub use chumsky::prelude::SimpleSpan;

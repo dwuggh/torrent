@@ -26,7 +26,7 @@ where
     recursive(|expr| {
         let refexpr = expr.clone().boxed();
         let vecref = refexpr.clone().repeated().collect::<Vec<_>>().boxed();
-        let boxref = expr.clone().map(new_refbox);
+        let boxref = expr.clone().map(new_box);
 
         let ident = any::<I, Extra>().try_map(|node, span| match node {
             Token::Ident(ident) => Ok(ident),
@@ -60,9 +60,7 @@ where
 
         let progn = vecref.clone().map(Progn::new).boxed();
 
-        let var = ident
-            .map(|ident| Cell::new(Var::Symbol(ident.into())))
-            .boxed();
+        let var = ident.map(|ident| Cell::new(Var::Unresolved(ident))).boxed();
         let symbol_expr = var
             .clone()
             .map_with(|var, ex| Expr::new(ExprType::Symbol(var), ex.span()))
@@ -188,9 +186,9 @@ where
             args,
             docstring,
             interactive,
-            declare: None,
+            declare: None, // TODO declare parsing
             body,
-            captures: RefCell::new(Vec::new()),
+            captures: Rc::new(RefCell::new(Vec::new())),
         })
         .boxed();
 
@@ -300,11 +298,6 @@ where
         })
         .boxed();
 
-        // function
-        let function_expr = sexp(keyword("function").ignore_then(progn.clone()))
-            .map(|body| Function { body })
-            .boxed();
-
         // prog1/prog2
         let prog1_expr = sexp(
             keyword("prog1")
@@ -340,10 +333,13 @@ where
                 .ignore_then(ident_interned)
                 .then(expr.clone().map(Box::new)),
         )
-        .map(|(symbol, value)| Set { symbol, value })
+        .map(|(symbol, value)| Set {
+            symbol: new_cellvar(symbol),
+            value,
+        })
         .boxed();
 
-        let setq_assignment = ident_interned.then(refexpr.clone());
+        let setq_assignment = ident_interned.map(new_cellvar).then(refexpr.clone());
         let setq_expr = sexp(
             keyword("setq").ignore_then(setq_assignment.clone().repeated().collect::<Vec<_>>()),
         )
@@ -439,12 +435,6 @@ where
             defconst_expr.map_with(|form, ex| {
                 Expr::new(
                     ExprType::SpecialForm(SpecialForm::Defconst(form)),
-                    ex.span(),
-                )
-            }),
-            function_expr.map_with(|form, ex| {
-                Expr::new(
-                    ExprType::SpecialForm(SpecialForm::Function(form)),
                     ex.span(),
                 )
             }),
@@ -609,7 +599,7 @@ mod tests {
                 assert_eq!(let_expr.body.body.len(), 1);
                 match &*let_expr.body.body[0].ty() {
                     ExprType::Symbol(var) => match var.get() {
-                        Var::Symbol(sym) => assert_eq!(sym.name(), "x"),
+                        Var::Unresolved(sym) => assert_eq!(sym.text(), "x"),
                         _ => panic!("Expected symbol variable"),
                     },
                     _ => panic!("Expected variable in let body"),

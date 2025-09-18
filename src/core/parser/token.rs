@@ -145,9 +145,11 @@ impl TryFrom<Vec<Token>> for LispObject {
         }
 
         // Check if this is a parenthesized list or bracketed vector
-        let (start_token, end_token, is_vector) = match (tokens.first(), tokens.last()) {
+        let (_start_token, _end_token, is_vector) = match (tokens.first(), tokens.last()) {
             (Some(Token::LParen), Some(Token::RParen)) => (Token::LParen, Token::RParen, false),
-            (Some(Token::LBracket), Some(Token::RBracket)) => (Token::LBracket, Token::RBracket, true),
+            (Some(Token::LBracket), Some(Token::RBracket)) => {
+                (Token::LBracket, Token::RBracket, true)
+            }
             _ => return Err("Token sequence must be enclosed in matching delimiters"),
         };
 
@@ -155,12 +157,14 @@ impl TryFrom<Vec<Token>> for LispObject {
         if tokens.len() < 2 {
             return Err("Invalid token sequence");
         }
-        
-        let inner_tokens = &tokens[1..tokens.len()-1];
-        
+
+        let inner_tokens = &tokens[1..tokens.len() - 1];
+
         if inner_tokens.is_empty() {
             return if is_vector {
-                Ok(LispObject::Vector(crate::core::vector::LispVector::new(vec![])))
+                Ok(LispObject::Vector(crate::core::vector::LispVector::new(
+                    vec![],
+                )))
             } else {
                 Ok(LispObject::Nil)
             };
@@ -169,7 +173,7 @@ impl TryFrom<Vec<Token>> for LispObject {
         // Convert inner tokens to LispObjects
         let mut objects = Vec::new();
         let mut i = 0;
-        
+
         while i < inner_tokens.len() {
             match &inner_tokens[i] {
                 Token::LParen => {
@@ -184,11 +188,11 @@ impl TryFrom<Vec<Token>> for LispObject {
                         }
                         j += 1;
                     }
-                    
+
                     if depth != 0 {
                         return Err("Unmatched parentheses");
                     }
-                    
+
                     // Recursively convert the nested list
                     let nested_tokens = inner_tokens[i..j].to_vec();
                     let nested_obj = LispObject::try_from(nested_tokens)?;
@@ -207,11 +211,11 @@ impl TryFrom<Vec<Token>> for LispObject {
                         }
                         j += 1;
                     }
-                    
+
                     if depth != 0 {
                         return Err("Unmatched brackets");
                     }
-                    
+
                     // Recursively convert the nested vector
                     let nested_tokens = inner_tokens[i..j].to_vec();
                     let nested_obj = LispObject::try_from(nested_tokens)?;
@@ -232,7 +236,9 @@ impl TryFrom<Vec<Token>> for LispObject {
         if is_vector {
             // Convert to vector
             let tagged_objects: Vec<_> = objects.into_iter().map(|obj| obj.tag()).collect();
-            Ok(LispObject::Vector(crate::core::vector::LispVector::new(tagged_objects)))
+            Ok(LispObject::Vector(crate::core::vector::LispVector::new(
+                tagged_objects,
+            )))
         } else {
             // Convert to cons list
             if objects.is_empty() {
@@ -240,7 +246,9 @@ impl TryFrom<Vec<Token>> for LispObject {
             } else {
                 let tagged_objects: Vec<_> = objects.into_iter().map(|obj| obj.tag()).collect();
                 match crate::core::cons::Cons::from_vec(tagged_objects) {
-                    Some(cons) => Ok(LispObject::Cons(crate::core::cons::LispCons(crate::gc::Gc::new(cons)))),
+                    Some(cons) => Ok(LispObject::Cons(crate::core::cons::LispCons(
+                        crate::gc::Gc::new(cons),
+                    ))),
                     None => Ok(LispObject::Nil),
                 }
             }

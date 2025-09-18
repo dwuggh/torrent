@@ -2,6 +2,7 @@ use rustc_hash::FxBuildHasher;
 
 use crate::core::{
     error::{RuntimeError, RuntimeResult},
+    ident::{self, Ident},
     object::{Object, ObjectRef},
     symbol::{Symbol, SymbolCell, SymbolMap},
 };
@@ -14,11 +15,35 @@ pub struct Environment {
     pub stack_map: StackMap,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FuncCellType {
+    Function,
+    Macro,
+}
+
+impl FuncCellType {
+    fn ident(self) -> Ident {
+        match self {
+            FuncCellType::Function => Ident::special().function,
+            FuncCellType::Macro => Ident::special().mcro,
+        }
+    }
+
+    pub fn from_num(n: u64) -> Option<Self> {
+        match n {
+            0 => None,
+            1 => Some(Self::Function),
+            2 => Some(Self::Macro),
+            _ => unreachable!(),
+        }
+    }
+}
+
 impl Environment {
     pub fn load_symbol_with<F, T>(
         &self,
         symbol: Symbol,
-        load_function_cell: bool,
+        load_function_cell: Option<FuncCellType>,
         job: F,
     ) -> RuntimeResult<T>
     where
@@ -26,27 +51,27 @@ impl Environment {
     {
         self.symbol_map.get_symbol_cell_with(symbol, |cell| {
             let data = cell.data();
-            if load_function_cell {
-                let ObjectRef::Cons(cons) = data.func.as_ref() else {
-                    return Err(RuntimeError::wrong_type("cons", data.func.get_tag()));
-                };
-                let ObjectRef::Symbol(marker) = cons.car().as_ref() else {
-                    return Err(RuntimeError::wrong_type("symbol", cons.car().get_tag()));
-                };
+            match load_function_cell {
+                Some(ty) => {
+                    let ObjectRef::Cons(cons) = data.func.as_ref() else {
+                        return Err(RuntimeError::wrong_type("cons", data.func.get_tag()));
+                    };
+                    let ObjectRef::Symbol(marker) = cons.car().as_ref() else {
+                        return Err(RuntimeError::wrong_type("symbol", cons.car().get_tag()));
+                    };
 
-                let val = cons.cdr();
-                return job(val);
-                // match marker.name() {
-                //     "function" => {
-                //         let val = cons.cdr();
-                //         return job(val);
-                //     }
-                //     _ => return Err(RuntimeError::internal_error("function cell corrupted")),
-                // }
-            } else {
-                tracing::debug!("loaded value: {:?}", data.value);
-                // let value = Object(data.value.0);
-                return job(&data.value);
+                    if marker.ident() == ty.ident() {
+                        let val = cons.cdr();
+                        return job(val);
+                    } else {
+                        return Err(RuntimeError::internal_error("not a function"));
+                    }
+                }
+                None => {
+                    tracing::debug!("loaded value: {:?}", data.value);
+                    // let value = Object(data.value.0);
+                    return job(&data.value);
+                }
             }
         })
     }

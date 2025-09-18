@@ -3,7 +3,38 @@ use std::sync::LazyLock;
 
 use crate::core::symbol::Symbol;
 
-pub static INTERNER: LazyLock<ThreadedRodeo<Ident>> = LazyLock::new(ThreadedRodeo::new);
+pub static INTERNER: LazyLock<Interner> = LazyLock::new(Interner::new);
+
+#[derive(Debug, Clone, Copy)]
+pub struct SpecialIdent {
+    pub function: Ident,
+    pub mcro: Ident,
+    pub t: Ident,
+    pub nil: Ident,
+}
+
+#[derive(Debug)]
+pub struct Interner {
+    interner: ThreadedRodeo<Ident>,
+    pub special: SpecialIdent,
+}
+
+impl Interner {
+    pub fn new() -> Self {
+        let interner = ThreadedRodeo::new();
+        let function = interner.get_or_intern("function");
+        let mcro = interner.get_or_intern("mcro");
+        let t = interner.get_or_intern("t");
+        let nil = interner.get_or_intern("nil");
+        let special = SpecialIdent {
+            function,
+            mcro,
+            t,
+            nil,
+        };
+        Self { interner, special }
+    }
+}
 
 #[repr(transparent)]
 #[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -39,16 +70,20 @@ impl Ident {
     }
 
     pub fn text<'a>(&self) -> &'a str {
-        INTERNER.resolve(&self)
+        INTERNER.interner.resolve(&self)
     }
 
     pub fn from_string(name: &str) -> Self {
-        let key = INTERNER.get_or_intern(name);
+        let key = INTERNER.interner.get_or_intern(name);
         key
     }
 
     pub fn from_raw(value: u32) -> Self {
         Self(value)
+    }
+
+    pub fn special() -> SpecialIdent {
+        INTERNER.special
     }
 }
 

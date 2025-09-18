@@ -2,6 +2,7 @@ use super::env::Environment;
 use crate::{
     core::{
         cons::LispCons,
+        env::FuncCellType,
         error::{RuntimeError, RuntimeResult},
         function::{FuncPtr, Function, FunctionType},
         ident::Ident,
@@ -74,7 +75,7 @@ fn funcall(func: &Object, args: &[Object], env: &Environment) -> Result<Object> 
     tracing::debug!("calling funcall: {func:?} {:?}", args);
     match func.as_ref() {
         ObjectRef::Symbol(sym) => {
-            env.load_symbol_with(sym, true, |obj| {
+            env.load_symbol_with(sym, Some(FuncCellType::Function), |obj| {
                 let ObjectRef::Function(func) = obj.as_ref() else {
                     runtime_bail!(WrongType, expected: "function", actual: obj.get_tag());
                 };
@@ -143,19 +144,19 @@ fn load_symbol_value(symbol: Symbol, load_function_cell: u64, env: &Environment)
         "loading symbol value: {} {load_function_cell}",
         symbol.name()
     );
-    env.load_symbol_with(symbol, load_function_cell == 1, |obj| Ok(obj.0 as i64))
+    env.load_symbol_with(symbol, FuncCellType::from_num(load_function_cell), |obj| {
+        Ok(obj.0 as i64)
+    })
 }
 
 #[internal_fn]
 fn get_func_ptr(func: &Object, env: &Environment) -> Result<i64> {
     let func = match func.as_ref() {
         ObjectRef::Symbol(symbol) => {
-            env.load_symbol_with(symbol, true, |func| {
+            env.load_symbol_with(symbol, Some(FuncCellType::Function), |func| {
                 let ObjectRef::Function(func) = func.as_ref() else {
                     runtime_bail!(WrongType, expected: "function", actual: func.get_tag());
                 };
-                // TODO func will be dropped here
-                // to prevent that, we should add the caller as argument, and add the function to the caller
                 get_func_ptr_from_function(func, env)
             })
         }

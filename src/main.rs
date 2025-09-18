@@ -1,5 +1,3 @@
-use chumsky::Parser;
-
 pub mod core;
 pub mod gc;
 
@@ -67,5 +65,3 @@ unsafe fn run_code(
         // println!("{node:?}");
     }
 }
-
-// fn main() {}
