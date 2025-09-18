@@ -1,5 +1,5 @@
 use crate::core::{
-    cons::{Cons, LispCons},
+    cons::LispCons,
     ident::Ident,
     number::{LispCharacter, LispFloat, LispInteger},
     object::{nil, LispObject},
@@ -62,15 +62,21 @@ pub fn new_box(expr: Expr) -> BoxExpr {
 
 #[derive(Clone, Debug, Copy)]
 pub enum Var {
-    Symbol(Symbol),
-    Local(Local),
+    Global(Symbol),
+    Local(Ident),
+    Captured(Ident),
+    Argument(Ident),
+    Unresolved(Ident),
 }
 
 impl From<Var> for Ident {
     fn from(var: Var) -> Self {
         match var {
-            Var::Symbol(symbol) => symbol.into(),
-            Var::Local(local) => local.ident,
+            Var::Global(symbol) => symbol.into(),
+            Var::Local(ident) => ident,
+            Var::Captured(cap) => cap,
+            Var::Argument(arg) => arg,
+            Var::Unresolved(ident) => ident,
         }
     }
 }
@@ -78,8 +84,11 @@ impl From<Var> for Ident {
 impl From<Var> for Symbol {
     fn from(var: Var) -> Self {
         match var {
-            Var::Symbol(symbol) => symbol,
-            Var::Local(local) => local.ident.into(),
+            Var::Global(symbol) => symbol,
+            Var::Local(ident) => ident.into(),
+            Var::Captured(ident) => ident.into(),
+            Var::Argument(ident) => ident.into(),
+            Var::Unresolved(ident) => ident.into(),
         }
     }
 }
@@ -100,7 +109,6 @@ pub enum SpecialForm {
     ConditionCase(ConditionCase),
     Defconst(Defconst),
     Defvar(Defvar),
-    Function(Function),
     Interactive(Interactive),
     Lambda(Lambda),
     Let(Let),
@@ -125,7 +133,7 @@ pub enum SpecialForm {
 //     SaveRestriction,
 // }
 
-type Binding = Vec<(Ident, Option<Expr>)>;
+pub type Binding = Vec<(Ident, Option<Expr>)>;
 
 #[derive(Debug, Clone)]
 pub struct Let {
@@ -155,6 +163,8 @@ pub struct Args {
     pub rest: Option<Ident>,
 }
 
+pub type Captures = Rc<RefCell<Vec<Var>>>;
+
 #[derive(Debug, Clone)]
 pub struct Lambda {
     pub args: Rc<Args>,
@@ -165,7 +175,7 @@ pub struct Lambda {
     pub interactive: Option<Interactive>,
     pub declare: Option<Vec<Expr>>,
     pub body: Progn,
-    pub captures: RefCell<Vec<Var>>, // For closure analysis
+    pub captures: Captures
 }
 
 #[derive(Debug, Clone)]
@@ -203,11 +213,6 @@ pub struct Defconst {
     pub symbol: Ident,
     pub value: BoxExpr,
     pub docstring: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Function {
-    pub body: Progn,
 }
 
 #[derive(Debug, Clone)]
@@ -265,21 +270,6 @@ pub struct ConditionHandler {
     pub body: Progn,
 }
 
-// #[derive(Debug, Clone)]
-// pub struct SaveCurrentBuffer {
-//     pub body: Vec<Expr>,
-// }
-
-// #[derive(Debug, Clone)]
-// pub struct SaveExcursion {
-//     pub body: Vec<Expr>,
-// }
-
-// #[derive(Debug, Clone)]
-// pub struct SaveRestriction {
-//     pub body: Vec<Expr>,
-// }
-
 #[derive(Debug, Clone)]
 pub struct SetqDefault {
     pub assignments: Vec<(Ident, Expr)>,
@@ -308,6 +298,7 @@ pub struct Quote {
 pub enum QuoteKind {
     Quote,     // 'expr
     Backquote, // `expr
+    Function   // (function expr)
 }
 
 #[derive(Debug, Clone)]
@@ -370,8 +361,11 @@ impl From<Literal> for LispObject {
 impl From<Var> for LispObject {
     fn from(var: Var) -> Self {
         match var {
-            Var::Symbol(symbol) => LispObject::Symbol(LispSymbol(symbol)),
-            Var::Local(local) => LispObject::Symbol(LispSymbol(local.ident.into())),
+            Var::Global(symbol) => LispObject::Symbol(LispSymbol(symbol)),
+            Var::Local(local) => LispObject::Symbol(LispSymbol(ident.into())),
+            Var::Captured(ident) => LispObject::Symbol(LispSymbol(ident.into())),
+            Var::Argument(ident) => LispObject::Symbol(LispSymbol(ident.into())),
+            Var::Unresolved(ident) => LispObject::Symbol(LispSymbol(ident.into())),
         }
     }
 }
@@ -463,6 +457,7 @@ impl From<Expr> for LispObject {
                         let symbol = match quote.kind {
                             QuoteKind::Quote => "quote",
                             QuoteKind::Backquote => "backquote",
+                            QuoteKind::Function => "function",
                         };
                         let quoted_obj = quote_data_to_lisp_object(quote.expr);
 
@@ -513,7 +508,7 @@ impl From<Expr> for LispObject {
                         
                         for clause in cond_expr.clauses {
                             // Each clause is (condition body...)
-                            let mut clause_elements = vec![clause.condition.into()];
+                            let mut clause_elements: Vec<LispObject> = vec![clause.condition.into()];
                             clause_elements.extend(clause.body.body.into_iter().map(|e| e.into()));
                             
                             let mut clause_list = nil();
@@ -544,7 +539,7 @@ impl From<Expr> for LispObject {
                         
                         // Add handlers
                         for handler in condition_case.handlers {
-                            let mut handler_elements = vec![handler.condition.into()];
+                            let mut handler_elements: Vec<LispObject> = vec![handler.condition.into()];
                             handler_elements.extend(handler.body.body.into_iter().map(|e| e.into()));
                             
                             let mut handler_list = nil();
@@ -590,16 +585,6 @@ impl From<Expr> for LispObject {
                         if let Some(docstring) = defconst.docstring {
                             elements.push(LispObject::Str(LispStr::new(docstring)));
                         }
-                        
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::Function(function) => {
-                        let mut elements = vec![LispObject::Symbol(LispSymbol(Symbol::from("function")))];
-                        elements.extend(function.body.body.into_iter().map(|e| e.into()));
                         
                         let mut result = nil();
                         for obj in elements.into_iter().rev() {
