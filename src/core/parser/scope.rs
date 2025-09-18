@@ -507,4 +507,201 @@ mod tests {
         assert!(args.contains(Ident::from("x")));
         assert!(!args.contains(Ident::from("y")));
     }
+
+    #[test]
+    fn test_lexical_scope_with_seq_none() {
+        let env = create_test_env();
+        let binding = create_test_binding(vec![("a", true), ("b", true), ("c", true)]);
+        
+        let scope = Scope::Lexical {
+            bindings: binding,
+            seq: None, // All bindings are visible
+            parent: Rc::new(Scope::Global(&env)),
+        };
+        
+        // All variables should be accessible
+        assert!(matches!(scope.resolve(Ident::from("a")), Var::Local(_)));
+        assert!(matches!(scope.resolve(Ident::from("b")), Var::Local(_)));
+        assert!(matches!(scope.resolve(Ident::from("c")), Var::Local(_)));
+    }
+
+    #[test]
+    fn test_lexical_scope_with_seq_zero() {
+        let env = create_test_env();
+        let binding = create_test_binding(vec![("a", true), ("b", true), ("c", true)]);
+        
+        let scope = Scope::Lexical {
+            bindings: binding,
+            seq: Some(0), // No bindings are visible yet
+            parent: Rc::new(Scope::Global(&env)),
+        };
+        
+        // No local variables should be accessible, should go to global
+        assert!(matches!(scope.resolve(Ident::from("a")), Var::Global(_)));
+        assert!(matches!(scope.resolve(Ident::from("b")), Var::Global(_)));
+        assert!(matches!(scope.resolve(Ident::from("c")), Var::Global(_)));
+    }
+
+    #[test]
+    fn test_lexical_scope_with_seq_partial() {
+        let env = create_test_env();
+        let binding = create_test_binding(vec![("a", true), ("b", true), ("c", true)]);
+        
+        let scope = Scope::Lexical {
+            bindings: binding,
+            seq: Some(2), // Only first 2 bindings (a, b) are visible
+            parent: Rc::new(Scope::Global(&env)),
+        };
+        
+        // First two variables should be local
+        assert!(matches!(scope.resolve(Ident::from("a")), Var::Local(_)));
+        assert!(matches!(scope.resolve(Ident::from("b")), Var::Local(_)));
+        
+        // Third variable should go to global (not yet bound)
+        assert!(matches!(scope.resolve(Ident::from("c")), Var::Global(_)));
+    }
+
+    #[test]
+    fn test_lexical_scope_with_seq_incremental() {
+        let env = create_test_env();
+        let binding = create_test_binding(vec![("x", true), ("y", true), ("z", true)]);
+        
+        // Test seq = 1 (only first binding visible)
+        let scope1 = Scope::Lexical {
+            bindings: binding.clone(),
+            seq: Some(1),
+            parent: Rc::new(Scope::Global(&env)),
+        };
+        
+        assert!(matches!(scope1.resolve(Ident::from("x")), Var::Local(_)));
+        assert!(matches!(scope1.resolve(Ident::from("y")), Var::Global(_)));
+        assert!(matches!(scope1.resolve(Ident::from("z")), Var::Global(_)));
+        
+        // Test seq = 2 (first two bindings visible)
+        let scope2 = Scope::Lexical {
+            bindings: binding.clone(),
+            seq: Some(2),
+            parent: Rc::new(Scope::Global(&env)),
+        };
+        
+        assert!(matches!(scope2.resolve(Ident::from("x")), Var::Local(_)));
+        assert!(matches!(scope2.resolve(Ident::from("y")), Var::Local(_)));
+        assert!(matches!(scope2.resolve(Ident::from("z")), Var::Global(_)));
+        
+        // Test seq = 3 (all bindings visible)
+        let scope3 = Scope::Lexical {
+            bindings: binding,
+            seq: Some(3),
+            parent: Rc::new(Scope::Global(&env)),
+        };
+        
+        assert!(matches!(scope3.resolve(Ident::from("x")), Var::Local(_)));
+        assert!(matches!(scope3.resolve(Ident::from("y")), Var::Local(_)));
+        assert!(matches!(scope3.resolve(Ident::from("z")), Var::Local(_)));
+    }
+
+    #[test]
+    fn test_lexical_scope_seq_with_captures() {
+        let env = create_test_env();
+        let binding = create_test_binding(vec![("outer", true), ("middle", true)]);
+        let args = create_test_args(vec!["param"], None, None);
+        let captures = Rc::new(RefCell::new(Vec::new()));
+        
+        // Create nested scope: Global -> Lexical -> Function
+        let lexical_scope = Scope::Lexical {
+            bindings: binding,
+            seq: Some(1), // Only "outer" is visible
+            parent: Rc::new(Scope::Global(&env)),
+        };
+        
+        let function_scope = Scope::Function {
+            args,
+            captures: captures.clone(),
+            parent: Rc::new(lexical_scope),
+        };
+        
+        // Resolve "outer" - should be captured from lexical scope
+        let result = function_scope.resolve(Ident::from("outer"));
+        assert!(matches!(result, Var::Captured(_)));
+        
+        // Resolve "middle" - not visible due to seq=1, should go to global
+        let result = function_scope.resolve(Ident::from("middle"));
+        assert!(matches!(result, Var::Global(_)));
+        
+        // Check captures
+        let captures_vec = captures.borrow();
+        assert_eq!(captures_vec.len(), 1);
+        assert!(matches!(captures_vec[0], Var::Local(_)));
+    }
+
+    #[test]
+    fn test_lexical_scope_seq_boundary_conditions() {
+        let env = create_test_env();
+        let binding = create_test_binding(vec![("a", true), ("b", true)]);
+        
+        // Test seq larger than binding length
+        let scope = Scope::Lexical {
+            bindings: binding.clone(),
+            seq: Some(10), // Larger than binding length
+            parent: Rc::new(Scope::Global(&env)),
+        };
+        
+        // Should still work correctly (all bindings visible)
+        assert!(matches!(scope.resolve(Ident::from("a")), Var::Local(_)));
+        assert!(matches!(scope.resolve(Ident::from("b")), Var::Local(_)));
+        
+        // Test empty bindings with seq
+        let empty_binding = create_test_binding(vec![]);
+        let empty_scope = Scope::Lexical {
+            bindings: empty_binding,
+            seq: Some(1),
+            parent: Rc::new(Scope::Global(&env)),
+        };
+        
+        // Should go to global
+        assert!(matches!(empty_scope.resolve(Ident::from("x")), Var::Global(_)));
+    }
+
+    #[test]
+    fn test_let_star_simulation() {
+        let env = create_test_env();
+        
+        // Simulate let* (let* ((x 1) (y x) (z y)) ...)
+        // where each binding can see the previous ones
+        
+        let bindings = create_test_binding(vec![("x", true), ("y", true), ("z", true)]);
+        
+        // When evaluating the value of y, only x should be visible
+        let scope_for_y = Scope::Lexical {
+            bindings: bindings.clone(),
+            seq: Some(1), // Only x is visible
+            parent: Rc::new(Scope::Global(&env)),
+        };
+        
+        assert!(matches!(scope_for_y.resolve(Ident::from("x")), Var::Local(_)));
+        assert!(matches!(scope_for_y.resolve(Ident::from("y")), Var::Global(_))); // Not yet bound
+        assert!(matches!(scope_for_y.resolve(Ident::from("z")), Var::Global(_))); // Not yet bound
+        
+        // When evaluating the value of z, both x and y should be visible
+        let scope_for_z = Scope::Lexical {
+            bindings: bindings.clone(),
+            seq: Some(2), // x and y are visible
+            parent: Rc::new(Scope::Global(&env)),
+        };
+        
+        assert!(matches!(scope_for_z.resolve(Ident::from("x")), Var::Local(_)));
+        assert!(matches!(scope_for_z.resolve(Ident::from("y")), Var::Local(_)));
+        assert!(matches!(scope_for_z.resolve(Ident::from("z")), Var::Global(_))); // Not yet bound
+        
+        // In the body, all bindings should be visible
+        let scope_for_body = Scope::Lexical {
+            bindings,
+            seq: None, // All bindings visible
+            parent: Rc::new(Scope::Global(&env)),
+        };
+        
+        assert!(matches!(scope_for_body.resolve(Ident::from("x")), Var::Local(_)));
+        assert!(matches!(scope_for_body.resolve(Ident::from("y")), Var::Local(_)));
+        assert!(matches!(scope_for_body.resolve(Ident::from("z")), Var::Local(_)));
+    }
 }
