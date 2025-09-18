@@ -1,6 +1,12 @@
 use logos::Logos;
 
-use crate::core::ident::Ident;
+use crate::core::{
+    ident::Ident,
+    number::{LispCharacter, LispFloat, LispInteger},
+    object::LispObject,
+    string::LispStr,
+    symbol::{LispSymbol, Symbol},
+};
 
 #[derive(Logos, Debug, PartialEq, Clone)]
 #[logos(skip r"[ \t\r\n\f]+")] // Skip whitespace
@@ -81,4 +87,59 @@ pub enum Token {
     UnquoteSplice,
 
     Error,
+}
+
+impl From<Token> for LispObject {
+    fn from(token: Token) -> Self {
+        match token {
+            Token::Integer(n) => LispObject::Int(LispInteger::new(n)),
+            Token::Float(f) => LispObject::Float(LispFloat::new(f)),
+            Token::Character(c) => LispObject::Character(LispCharacter::new(c)),
+            Token::Str(s) => LispObject::Str(LispStr::new(s)),
+            Token::Ident(ident) => {
+                let symbol = Symbol::from(ident);
+                LispObject::Symbol(LispSymbol(symbol))
+            }
+            // Special handling for structural tokens - these don't directly convert to objects
+            // but could be used in macro expansion contexts
+            Token::LParen | Token::RParen | Token::LBracket | Token::RBracket => {
+                // Convert structural tokens to symbols for macro processing
+                let symbol_name = match token {
+                    Token::LParen => "(",
+                    Token::RParen => ")",
+                    Token::LBracket => "[",
+                    Token::RBracket => "]",
+                    _ => unreachable!(),
+                };
+                let symbol = Symbol::from(symbol_name);
+                LispObject::Symbol(LispSymbol(symbol))
+            }
+            // Quote-related tokens become symbols
+            Token::Quote => {
+                let symbol = Symbol::from("quote");
+                LispObject::Symbol(LispSymbol(symbol))
+            }
+            Token::Backquote => {
+                let symbol = Symbol::from("backquote");
+                LispObject::Symbol(LispSymbol(symbol))
+            }
+            Token::Unquote => {
+                let symbol = Symbol::from("unquote");
+                LispObject::Symbol(LispSymbol(symbol))
+            }
+            Token::UnquoteSplice => {
+                let symbol = Symbol::from("unquote-splicing");
+                LispObject::Symbol(LispSymbol(symbol))
+            }
+            // Comments and errors don't have meaningful object representations
+            Token::Comment => {
+                let symbol = Symbol::from("comment");
+                LispObject::Symbol(LispSymbol(symbol))
+            }
+            Token::Error => {
+                let symbol = Symbol::from("error");
+                LispObject::Symbol(LispSymbol(symbol))
+            }
+        }
+    }
 }
