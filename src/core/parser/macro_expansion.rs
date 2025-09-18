@@ -15,37 +15,36 @@ use chumsky::{
 };
 
 /// Expand all macros in an expression recursively until no more expansions are possible
-pub fn macro_expand_all(expr: Expr, env: &Environment) -> RuntimeResult<Expr> {
+pub fn macro_expand_all(expr: &Expr, env: &Environment) -> RuntimeResult<()> {
     let scope = Scope::Global(env);
     macro_expand_all_with_scope(expr, &scope, env)
 }
 
 /// Expand macros once (macroexpand-1 equivalent)
-pub fn macro_expand_once(expr: Expr, env: &Environment) -> RuntimeResult<Expr> {
+pub fn macro_expand_once(expr: &Expr, env: &Environment) -> RuntimeResult<bool> {
     let scope = Scope::Global(env);
     macro_expand_once_with_scope(expr, &scope, env)
 }
 
 /// Internal function for recursive macro expansion with scope tracking
-fn macro_expand_all_with_scope(expr: Expr, scope: &Scope, env: &Environment) -> RuntimeResult<Expr> {
-    let mut current_expr = expr;
-    
+fn macro_expand_all_with_scope(expr: &Expr, scope: &Scope, env: &Environment) -> RuntimeResult<()> {
     // Keep expanding until no more changes occur
     loop {
-        let expanded = macro_expand_once_with_scope(current_expr.clone(), scope, env)?;
+        let expanded = macro_expand_once_with_scope(expr, scope, env)?;
         
-        // Check if expansion occurred by comparing the expressions
-        if expressions_equal(&current_expr, &expanded) {
-            // No more expansions possible, now recursively expand subexpressions
-            return expand_subexpressions(expanded, scope, env);
+        // If no expansion occurred, recursively expand subexpressions and break
+        if !expanded {
+            expand_subexpressions(expr, scope, env)?;
+            break;
         }
-        
-        current_expr = expanded;
+        // Continue expanding if changes occurred
     }
+    Ok(())
 }
 
 /// Expand macros once with scope tracking
-fn macro_expand_once_with_scope(expr: Expr, scope: &Scope, env: &Environment) -> RuntimeResult<Expr> {
+/// Returns true if expansion occurred, false otherwise
+fn macro_expand_once_with_scope(expr: &Expr, scope: &Scope, env: &Environment) -> RuntimeResult<bool> {
     let expr_type = expr.ty.borrow();
     
     match &*expr_type {
@@ -54,59 +53,58 @@ fn macro_expand_once_with_scope(expr: Expr, scope: &Scope, env: &Environment) ->
             let resolved_var = scope.resolve(call.symbol.get().into());
             
             // Check if this is a macro call
-            if let Some(expanded) = try_expand_macro_call(call, resolved_var, env)? {
-                Ok(expanded)
-            } else {
-                // Not a macro, return original expression
+            if let Some(expanded_expr_type) = try_expand_macro_call(call, resolved_var, env)? {
                 drop(expr_type);
-                Ok(expr)
+                // Replace the expression content
+                expr.ty.replace(expanded_expr_type);
+                Ok(true)
+            } else {
+                // Not a macro, no expansion
+                Ok(false)
             }
         }
-        ExprType::SpecialForm(special_form) => {
+        ExprType::SpecialForm(_) => {
             // Handle special forms that might contain macro calls
             drop(expr_type);
             expand_special_form_macros(expr, scope, env)
         }
         _ => {
             // Literals, symbols, vectors, etc. - no macro expansion needed
-            drop(expr_type);
-            Ok(expr)
+            Ok(false)
         }
     }
 }
 
 /// Recursively expand subexpressions after top-level expansion is complete
-fn expand_subexpressions(expr: Expr, scope: &Scope, env: &Environment) -> RuntimeResult<Expr> {
+fn expand_subexpressions(expr: &Expr, scope: &Scope, env: &Environment) -> RuntimeResult<()> {
     let mut expr_type = expr.ty.borrow_mut();
     
     match &mut *expr_type {
         ExprType::Vector(exprs) => {
-            for expr in exprs.iter_mut() {
-                let expanded = macro_expand_all_with_scope(expr.clone(), scope, env)?;
-                *expr = expanded;
+            for expr in exprs.iter() {
+                macro_expand_all_with_scope(expr, scope, env)?;
             }
         }
         ExprType::Call(call) => {
             // Expand arguments
-            for arg in call.args.iter_mut() {
-                let expanded = macro_expand_all_with_scope(arg.clone(), scope, env)?;
-                *arg = expanded;
+            for arg in call.args.iter() {
+                macro_expand_all_with_scope(arg, scope, env)?;
             }
         }
         ExprType::SpecialForm(special_form) => {
-            expand_special_form_subexpressions(special_form, scope, env)?;
+            drop(expr_type);
+            expand_special_form_subexpressions(expr, special_form, scope, env)?;
         }
         _ => {
             // No subexpressions to expand
         }
     }
     
-    drop(expr_type);
-    Ok(expr)
+    Ok(())
 }
 
-/// Try to expand a macro call, returning Some(expanded) if it's a macro, None otherwise
-fn try_expand_macro_call(call: &Call, resolved_var: Var, env: &Environment) -> RuntimeResult<Option<Expr>> {
+/// Try to expand a macro call, returning Some(expanded_expr_type) if it's a macro, None otherwise
+fn try_expand_macro_call(call: &Call, resolved_var: Var, env: &Environment) -> RuntimeResult<Option<ExprType>> {
     let symbol = match resolved_var {
         Var::Global(symbol) => symbol,
         _ => return Ok(None), // Only global symbols can be macros
@@ -131,11 +129,11 @@ fn try_expand_macro_call(call: &Call, resolved_var: Var, env: &Environment) -> R
         // Execute the macro
         let result = func.run(&args, env)?;
         
-        // Convert result back to Expr
+        // Convert result back to ExprType
         let tokens = lisp_object_to_tokens(result.untag());
         let expanded_expr = parse_tokens_to_expr(tokens)?;
         
-        Ok(Some(expanded_expr))
+        Ok(Some(expanded_expr.ty.into_inner()))
     });
     
     match result {
@@ -146,40 +144,37 @@ fn try_expand_macro_call(call: &Call, resolved_var: Var, env: &Environment) -> R
 }
 
 /// Handle macro expansion in special forms
-fn expand_special_form_macros(expr: Expr, scope: &Scope, env: &Environment) -> RuntimeResult<Expr> {
+/// Returns true if expansion occurred, false otherwise
+fn expand_special_form_macros(expr: &Expr, scope: &Scope, env: &Environment) -> RuntimeResult<bool> {
     let expr_type = expr.ty.borrow();
     
     match &*expr_type {
         ExprType::SpecialForm(special_form) => {
             match special_form {
-                SpecialForm::Let(let_expr) => {
+                SpecialForm::Let(_) => {
                     drop(expr_type);
                     expand_let_macros(expr, scope, env)
                 }
-                SpecialForm::LetStar(let_star) => {
+                SpecialForm::LetStar(_) => {
                     drop(expr_type);
                     expand_let_star_macros(expr, scope, env)
                 }
-                SpecialForm::Lambda(lambda) => {
+                SpecialForm::Lambda(_) => {
                     drop(expr_type);
                     expand_lambda_macros(expr, scope, env)
                 }
                 _ => {
                     // Other special forms don't introduce new scopes for macro expansion
-                    drop(expr_type);
-                    Ok(expr)
+                    Ok(false)
                 }
             }
         }
-        _ => {
-            drop(expr_type);
-            Ok(expr)
-        }
+        _ => Ok(false)
     }
 }
 
 /// Expand macros in let bindings and body with proper scope
-fn expand_let_macros(expr: Expr, parent_scope: &Scope, env: &Environment) -> RuntimeResult<Expr> {
+fn expand_let_macros(expr: &Expr, parent_scope: &Scope, env: &Environment) -> RuntimeResult<bool> {
     let mut expr_type = expr.ty.borrow_mut();
     
     if let ExprType::SpecialForm(SpecialForm::Let(let_expr)) = &mut *expr_type {
@@ -192,24 +187,21 @@ fn expand_let_macros(expr: Expr, parent_scope: &Scope, env: &Environment) -> Run
         // Expand value expressions in the parent scope (before binding)
         for (_, value) in let_expr.bindings.iter_mut() {
             if let Some(val_expr) = value {
-                let expanded = macro_expand_all_with_scope(val_expr.clone(), parent_scope, env)?;
-                *val_expr = expanded;
+                macro_expand_all_with_scope(val_expr, parent_scope, env)?;
             }
         }
         
         // Expand body in the new scope (after binding)
-        for body_expr in let_expr.body.body.iter_mut() {
-            let expanded = macro_expand_all_with_scope(body_expr.clone(), &new_scope, env)?;
-            *body_expr = expanded;
+        for body_expr in let_expr.body.body.iter() {
+            macro_expand_all_with_scope(body_expr, &new_scope, env)?;
         }
     }
     
-    drop(expr_type);
-    Ok(expr)
+    Ok(false) // Let forms themselves don't expand, only their contents
 }
 
 /// Expand macros in let* bindings and body with incremental scope
-fn expand_let_star_macros(expr: Expr, parent_scope: &Scope, env: &Environment) -> RuntimeResult<Expr> {
+fn expand_let_star_macros(expr: &Expr, parent_scope: &Scope, env: &Environment) -> RuntimeResult<bool> {
     let mut expr_type = expr.ty.borrow_mut();
     
     if let ExprType::SpecialForm(SpecialForm::LetStar(let_star)) = &mut *expr_type {
@@ -218,8 +210,7 @@ fn expand_let_star_macros(expr: Expr, parent_scope: &Scope, env: &Environment) -
         // For let*, each binding sees the previous bindings
         for (i, (_, value)) in let_star.bindings.iter_mut().enumerate() {
             if let Some(val_expr) = value {
-                let expanded = macro_expand_all_with_scope(val_expr.clone(), &current_scope, env)?;
-                *val_expr = expanded;
+                macro_expand_all_with_scope(val_expr, &current_scope, env)?;
             }
             
             // Create new scope that includes this binding for subsequent bindings
@@ -239,18 +230,16 @@ fn expand_let_star_macros(expr: Expr, parent_scope: &Scope, env: &Environment) -
         };
         
         // Expand body in the final scope
-        for body_expr in let_star.body.body.iter_mut() {
-            let expanded = macro_expand_all_with_scope(body_expr.clone(), &final_scope, env)?;
-            *body_expr = expanded;
+        for body_expr in let_star.body.body.iter() {
+            macro_expand_all_with_scope(body_expr, &final_scope, env)?;
         }
     }
     
-    drop(expr_type);
-    Ok(expr)
+    Ok(false) // Let* forms themselves don't expand, only their contents
 }
 
 /// Expand macros in lambda body with function scope
-fn expand_lambda_macros(expr: Expr, parent_scope: &Scope, env: &Environment) -> RuntimeResult<Expr> {
+fn expand_lambda_macros(expr: &Expr, parent_scope: &Scope, env: &Environment) -> RuntimeResult<bool> {
     let mut expr_type = expr.ty.borrow_mut();
     
     if let ExprType::SpecialForm(SpecialForm::Lambda(lambda)) = &mut *expr_type {
@@ -262,39 +251,43 @@ fn expand_lambda_macros(expr: Expr, parent_scope: &Scope, env: &Environment) -> 
         };
         
         // Expand body in function scope
-        for body_expr in lambda.body.body.iter_mut() {
-            let expanded = macro_expand_all_with_scope(body_expr.clone(), &function_scope, env)?;
-            *body_expr = expanded;
+        for body_expr in lambda.body.body.iter() {
+            macro_expand_all_with_scope(body_expr, &function_scope, env)?;
         }
     }
     
-    drop(expr_type);
-    Ok(expr)
+    Ok(false) // Lambda forms themselves don't expand, only their contents
 }
 
 /// Expand subexpressions in special forms
-fn expand_special_form_subexpressions(special_form: &mut SpecialForm, scope: &Scope, env: &Environment) -> RuntimeResult<()> {
+fn expand_special_form_subexpressions(expr: &Expr, special_form: &SpecialForm, scope: &Scope, env: &Environment) -> RuntimeResult<()> {
     match special_form {
         SpecialForm::If(if_expr) => {
-            let expanded_cond = macro_expand_all_with_scope((*if_expr.cond).clone(), scope, env)?;
-            *if_expr.cond = expanded_cond;
+            macro_expand_all_with_scope(&if_expr.cond, scope, env)?;
+            macro_expand_all_with_scope(&if_expr.then, scope, env)?;
             
-            let expanded_then = macro_expand_all_with_scope((*if_expr.then).clone(), scope, env)?;
-            *if_expr.then = expanded_then;
-            
-            for else_expr in if_expr.els.body.iter_mut() {
-                let expanded = macro_expand_all_with_scope(else_expr.clone(), scope, env)?;
-                *else_expr = expanded;
+            for else_expr in if_expr.els.body.iter() {
+                macro_expand_all_with_scope(else_expr, scope, env)?;
             }
         }
         SpecialForm::While(while_expr) => {
-            let expanded_cond = macro_expand_all_with_scope((*while_expr.condition).clone(), scope, env)?;
-            *while_expr.condition = expanded_cond;
+            macro_expand_all_with_scope(&while_expr.condition, scope, env)?;
             
-            for body_expr in while_expr.body.body.iter_mut() {
-                let expanded = macro_expand_all_with_scope(body_expr.clone(), scope, env)?;
-                *body_expr = expanded;
+            for body_expr in while_expr.body.body.iter() {
+                macro_expand_all_with_scope(body_expr, scope, env)?;
             }
+        }
+        SpecialForm::Let(_) => {
+            // Already handled in expand_let_macros
+            expand_let_macros(expr, scope, env)?;
+        }
+        SpecialForm::LetStar(_) => {
+            // Already handled in expand_let_star_macros
+            expand_let_star_macros(expr, scope, env)?;
+        }
+        SpecialForm::Lambda(_) => {
+            // Already handled in expand_lambda_macros
+            expand_lambda_macros(expr, scope, env)?;
         }
         // Add other special forms as needed
         _ => {
@@ -324,11 +317,6 @@ fn parse_tokens_to_expr(tokens: Vec<Token>) -> RuntimeResult<Expr> {
     }
 }
 
-/// Compare two expressions for equality (used to detect when expansion stops)
-fn expressions_equal(expr1: &Expr, expr2: &Expr) -> bool {
-    // Simple comparison - in practice you might want a more sophisticated approach
-    format!("{:?}", expr1.ty.borrow()) == format!("{:?}", expr2.ty.borrow())
-}
 
 /// Legacy function - now redirects to the new macro expansion system
 pub fn macro_expand_call(call: &Call, env: &Environment) -> Option<RuntimeResult<Expr>> {
