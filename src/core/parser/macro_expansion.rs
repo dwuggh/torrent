@@ -293,9 +293,119 @@ fn expand_special_form_subexpressions(expr: &Expr, special_form: &SpecialForm, s
             // Already handled in expand_lambda_macros
             expand_lambda_macros(expr, scope, env)?;
         }
-        // Add other special forms as needed
-        _ => {
-            // For now, handle other special forms generically
+        SpecialForm::And(exprs) => {
+            for expr in exprs.iter() {
+                macro_expand_all_with_scope(expr, scope, env)?;
+            }
+        }
+        SpecialForm::Or(exprs) => {
+            for expr in exprs.iter() {
+                macro_expand_all_with_scope(expr, scope, env)?;
+            }
+        }
+        SpecialForm::Catch(catch_expr) => {
+            macro_expand_all_with_scope(&catch_expr.tag, scope, env)?;
+            
+            for body_expr in catch_expr.body.body.iter() {
+                macro_expand_all_with_scope(body_expr, scope, env)?;
+            }
+        }
+        SpecialForm::Cond(cond_expr) => {
+            for clause in cond_expr.clauses.iter() {
+                macro_expand_all_with_scope(&clause.condition, scope, env)?;
+                
+                for body_expr in clause.body.body.iter() {
+                    macro_expand_all_with_scope(body_expr, scope, env)?;
+                }
+            }
+        }
+        SpecialForm::ConditionCase(condition_case) => {
+            macro_expand_all_with_scope(&condition_case.protected, scope, env)?;
+            
+            for handler in condition_case.handlers.iter() {
+                macro_expand_all_with_scope(&handler.condition, scope, env)?;
+                
+                for body_expr in handler.body.body.iter() {
+                    macro_expand_all_with_scope(body_expr, scope, env)?;
+                }
+            }
+        }
+        SpecialForm::Defvar(defvar) => {
+            if let Some(value) = &defvar.value {
+                macro_expand_all_with_scope(value, scope, env)?;
+            }
+        }
+        SpecialForm::Defconst(defconst) => {
+            macro_expand_all_with_scope(&defconst.value, scope, env)?;
+        }
+        SpecialForm::Prog1(prog1) => {
+            macro_expand_all_with_scope(&prog1.first, scope, env)?;
+            
+            for body_expr in prog1.rest.body.iter() {
+                macro_expand_all_with_scope(body_expr, scope, env)?;
+            }
+        }
+        SpecialForm::Prog2(prog2) => {
+            macro_expand_all_with_scope(&prog2.first, scope, env)?;
+            macro_expand_all_with_scope(&prog2.second, scope, env)?;
+            
+            for body_expr in prog2.rest.body.iter() {
+                macro_expand_all_with_scope(body_expr, scope, env)?;
+            }
+        }
+        SpecialForm::Progn(progn) => {
+            for body_expr in progn.body.iter() {
+                macro_expand_all_with_scope(body_expr, scope, env)?;
+            }
+        }
+        SpecialForm::Set(set) => {
+            macro_expand_all_with_scope(&set.value, scope, env)?;
+        }
+        SpecialForm::Setq(setq) => {
+            for (_, expr) in setq.assignments.iter() {
+                macro_expand_all_with_scope(expr, scope, env)?;
+            }
+        }
+        SpecialForm::SetqDefault(setq_default) => {
+            for (_, expr) in setq_default.assignments.iter() {
+                macro_expand_all_with_scope(expr, scope, env)?;
+            }
+        }
+        SpecialForm::SaveCurrentBuffer(progn) => {
+            for body_expr in progn.body.iter() {
+                macro_expand_all_with_scope(body_expr, scope, env)?;
+            }
+        }
+        SpecialForm::SaveExcursion(progn) => {
+            for body_expr in progn.body.iter() {
+                macro_expand_all_with_scope(body_expr, scope, env)?;
+            }
+        }
+        SpecialForm::SaveRestriction(progn) => {
+            for body_expr in progn.body.iter() {
+                macro_expand_all_with_scope(body_expr, scope, env)?;
+            }
+        }
+        SpecialForm::UnwindProtect(unwind_protect) => {
+            macro_expand_all_with_scope(&unwind_protect.protected, scope, env)?;
+            
+            for cleanup_expr in unwind_protect.cleanup.body.iter() {
+                macro_expand_all_with_scope(cleanup_expr, scope, env)?;
+            }
+        }
+        SpecialForm::Quote(quote) => {
+            // Quote forms contain quoted data, which should not be macro-expanded
+            // The quoted expressions are not evaluated, so no macro expansion needed
+            expand_quoted_data(&quote.expr, scope, env)?;
+        }
+        SpecialForm::Interactive(interactive) => {
+            // Interactive forms may contain expressions in modes
+            if let Some(modes) = &interactive.modes {
+                for mode_var in modes.iter() {
+                    let resolved_var = scope.resolve(mode_var.get().into());
+                    mode_var.set(resolved_var);
+                }
+            }
         }
     }
     
@@ -319,6 +429,39 @@ fn parse_tokens_to_expr(tokens: Vec<Token>) -> RuntimeResult<Expr> {
             message: format!("Failed to parse macro expansion result: {:?}", parse_errors),
         }),
     }
+}
+
+/// Expand macros in quoted data (for backquote/unquote handling)
+fn expand_quoted_data(data: &QuotedData, scope: &Scope, env: &Environment) -> RuntimeResult<()> {
+    match data {
+        QuotedData::Literal(_) => {
+            // Literals don't need expansion
+        }
+        QuotedData::Symbol(var) => {
+            // Resolve symbols in quoted context
+            let resolved_var = scope.resolve(var.get().into());
+            var.set(resolved_var);
+        }
+        QuotedData::List(items) => {
+            for item in items.iter() {
+                expand_quoted_data(item, scope, env)?;
+            }
+        }
+        QuotedData::Vector(items) => {
+            for item in items.iter() {
+                expand_quoted_data(item, scope, env)?;
+            }
+        }
+        QuotedData::Unquote(expr) => {
+            // Unquoted expressions should be macro-expanded
+            macro_expand_all_with_scope(expr, scope, env)?;
+        }
+        QuotedData::UnquoteSplice(expr) => {
+            // Unquote-splice expressions should be macro-expanded
+            macro_expand_all_with_scope(expr, scope, env)?;
+        }
+    }
+    Ok(())
 }
 
 
