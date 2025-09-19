@@ -6,12 +6,11 @@ use cranelift_jit::JITModule;
 use cranelift_module::DataDescription;
 use cranelift_module::FuncId;
 use cranelift_module::Module;
+use rustc_hash::FxHashMap;
 
 use crate::core::compiler::error::{CodegenError, CodegenResult};
-use crate::core::compiler::scope::CompileScope;
-use crate::core::compiler::scope::FrameScope;
-use crate::core::compiler::scope::Val;
 use crate::core::function::LispFunction;
+use crate::core::ident::Ident;
 use crate::core::object::NIL;
 use crate::core::object::TRUE;
 use crate::core::parser::expr::*;
@@ -24,6 +23,9 @@ pub struct Codegen<'a> {
     data_desc: &'a mut DataDescription,
     builder: FunctionBuilder<'a>,
     func: LispFunction,
+    arguments: FxHashMap<Ident, Variable>,
+    locals: FxHashMap<Ident, Variable>,
+    captures: FxHashMap<Ident, Variable>,
     pub func_id: FuncId,
     env: Value,
     builtin_funcs: &'a HashMap<String, FuncId>,
@@ -74,6 +76,10 @@ impl<'a> Codegen<'a> {
             builtin_funcs,
             builder,
             func,
+
+            arguments: FxHashMap::default(),
+            locals: FxHashMap::default(),
+            captures: FxHashMap::default(),
             // closure: closure_val,
             env,
             func_id,
@@ -89,8 +95,8 @@ impl<'a> Codegen<'a> {
         fctx: &'a mut FunctionBuilderContext,
         ctx: &'a mut Context,
         args: &Args,
-        parent_scope: &'s CompileScope,
-    ) -> CodegenResult<(Self, CompileScope<'s>)> {
+        captures: &Vec<Var>,
+    ) -> CodegenResult<Self> {
         tracing::debug!("Creating new codegen with args: {:?}", args);
 
         // make signature
@@ -127,11 +133,12 @@ impl<'a> Codegen<'a> {
         let args_cnt = block_params[1];
         let env = block_params[2];
 
-        let mut variables = HashMap::new();
+        let mut arguments = FxHashMap::default();
+        // TODO properly parse arguments
         for (i, arg) in args.normal.iter().enumerate() {
             let sym = *arg;
             let var = builder.declare_var(types::I64);
-            variables.insert(sym, var);
+            arguments.insert(sym, var);
 
             tracing::debug!("Loading argument {} ({})", i, arg.text());
 
@@ -142,21 +149,28 @@ impl<'a> Codegen<'a> {
             builder.def_var(var, val);
         }
 
-        let new_scope = FrameScope::new(variables, parent_scope, false, true).into();
-
         let func = LispFunction::new_closure(func_id);
+
+        let captures = captures.iter().map(|c| {
+            let var = builder.declare_var(types::I64);
+            let ident = Ident::from(*c);
+            (ident, var)
+        }).collect::<FxHashMap<_, _>>();
 
         let codegen = Self {
             module,
             data_desc,
             builtin_funcs,
             builder,
+            arguments,
+            locals: FxHashMap::default(),
+            captures,
             func,
             env,
             func_id,
         };
 
-        Ok((codegen, new_scope))
+        Ok(codegen)
     }
 
     fn nil(&mut self) -> Value {
@@ -176,20 +190,18 @@ impl<'a> Codegen<'a> {
     pub fn translate_progn<'s>(
         &mut self,
         progn: &Progn,
-        scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
-        self.translate_exprs(&progn.body, scope)
+        self.translate_exprs(&progn.body)
     }
 
     pub fn translate_exprs<'s>(
         &mut self,
         exprs: &[Expr],
-        scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
         // TODO need to drop other values
         exprs
             .iter()
-            .map(|e| self.translate_expr(e, scope, false))
+            .map(|e| self.translate_expr(e))
             .last()
             .unwrap_or(Ok(self.nil()))
     }
@@ -226,7 +238,6 @@ impl<'a> Codegen<'a> {
 
     pub fn load_symbol<'s>(
         &mut self,
-        scope: &CompileScope<'s>,
         symbol: Symbol,
         load_function_cell: bool,
     ) -> CodegenResult<Value> {
@@ -236,7 +247,7 @@ impl<'a> Codegen<'a> {
             load_function_cell
         );
 
-        self.load_symbol_inner(scope, symbol, load_function_cell, true)
+        self.load_symbol_inner(symbol, load_function_cell, true)
             .ok_or(CodegenError::SymbolNotFound(symbol))
             .map(|val| match val {
                 Val::Value(value) => {
@@ -264,48 +275,11 @@ impl<'a> Codegen<'a> {
 
     fn load_symbol_inner<'s>(
         &mut self,
-        scope: &CompileScope<'s>,
         symbol: Symbol,
         load_function_cell: bool,
         same_func_scope: bool,
-    ) -> Option<Val> {
-        match scope {
-            CompileScope::Global => {
-                // let val = Environment::default().load_symbol(symbol, load_function_cell)?;
-                let sym_val = self.translate_lispobj(&LispSymbol::from(symbol));
-                let load_function_cell = self
-                    .builder
-                    .ins()
-                    .iconst(types::I64, if load_function_cell { 1 } else { 0 });
-                let val = self.call_internal(
-                    "load_symbol_value",
-                    &[sym_val, load_function_cell, self.env],
-                )[0];
-                Some(Val::Value(val))
-            }
-            CompileScope::Frame(frame) => match frame.slots.get(symbol.ident()) {
-                Some(var) => {
-                    if same_func_scope {
-                        Some(Val::Value(self.builder.use_var(var)))
-                    } else {
-                        if let Some(lexical_binds) = frame.lexical_binds.as_ref() {
-                            if let Some(captured) =
-                                lexical_binds.borrow_mut().get_mut(&symbol.into())
-                            {
-                                captured.push(self.func.clone());
-                            }
-                        }
-                        Some(Val::Ident(symbol.into()))
-                    }
-                }
-                None => self.load_symbol_inner(
-                    frame.parent,
-                    symbol,
-                    load_function_cell,
-                    same_func_scope && frame.is_func,
-                ),
-            },
-        }
+    ) -> Option<Value> {
+        todo!()
     }
 
     fn translate_lispobj<T: Tagged>(&mut self, obj: &T) -> Value {
@@ -317,31 +291,28 @@ impl<'a> Codegen<'a> {
     fn translate_arg_exprs<'s>(
         &mut self,
         exprs: &[Expr],
-        scope: &CompileScope<'s>,
     ) -> CodegenResult<Vec<Value>> {
         exprs
             .iter()
-            .map(|e| self.translate_expr(e, scope, false))
+            .map(|e| self.translate_expr(e ))
             .collect()
     }
 
     pub fn translate_expr<'s>(
         &mut self,
         expr: &Expr,
-        scope: &CompileScope<'s>,
-        load_function_cell: bool,
     ) -> CodegenResult<Value> {
         match &*expr.ty() {
             ExprType::Nil => Ok(self.nil()),
             ExprType::Symbol(ident) => {
                 let symbol = ident.get().into();
-                let val = self.load_symbol(scope, symbol, load_function_cell)?;
+                let val = self.load_symbol(symbol, false)?;
                 Ok(val)
             }
             ExprType::Literal(literal) => self.translate_literal(literal),
-            ExprType::Vector(exprs) => self.translate_vector(exprs, scope),
-            ExprType::Call(call) => self.translate_call(call, scope),
-            ExprType::SpecialForm(special_form) => self.translate_special_form(special_form, scope),
+            ExprType::Vector(exprs) => self.translate_vector(exprs),
+            ExprType::Call(call) => self.translate_call(call),
+            ExprType::SpecialForm(special_form) => self.translate_special_form(special_form),
         }
     }
 
@@ -357,7 +328,6 @@ impl<'a> Codegen<'a> {
     fn translate_vector<'s>(
         &mut self,
         exprs: &[Expr],
-        scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
         // TODO: implement vector creation
         todo!("Vector creation not yet implemented")
@@ -366,7 +336,6 @@ impl<'a> Codegen<'a> {
     fn translate_call<'s>(
         &mut self,
         call: &Call,
-        scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
         tracing::debug!(
             "Translating function call with {} arguments",
@@ -378,24 +347,24 @@ impl<'a> Codegen<'a> {
         //             "+" => {
         //                 let l = &call.args[0];
         //                 let r = &call.args[1];
-        //                 let l = self.translate_expr(l, scope, false)?;
-        //                 let r = self.translate_expr(r, scope, false)?;
+        //                 let l = self.translate_expr(l, false)?;
+        //                 let r = self.translate_expr(r, false)?;
         //                 let res = self.builder.ins().iadd(l, r);
         //                 return Ok(res);
         //             }
         //             "-" => {
         //                 let l = &call.args[0];
         //                 let r = &call.args[1];
-        //                 let l = self.translate_expr(l, scope, false)?;
-        //                 let r = self.translate_expr(r, scope, false)?;
+        //                 let l = self.translate_expr(l, false)?;
+        //                 let r = self.translate_expr(r, false)?;
         //                 let res = self.builder.ins().isub(l, r);
         //                 return Ok(res);
         //             }
         //             "<" => {
         //                 let l = &call.args[0];
         //                 let r = &call.args[1];
-        //                 let l = self.translate_expr(l, scope, false)?;
-        //                 let r = self.translate_expr(r, scope, false)?;
+        //                 let l = self.translate_expr(l, false)?;
+        //                 let r = self.translate_expr(r, false)?;
         //                 let res = self.builder.ins().icmp(IntCC::SignedLessThan, l, r);
         //                 return Ok(res);
         //             }
@@ -405,9 +374,9 @@ impl<'a> Codegen<'a> {
         //     _ => ()
         // };
 
-        let func = self.load_symbol(scope, call.symbol.get().into(), true)?;
-        // let func = self.translate_expr(call.symbol, scope, true)?;
-        let args = self.translate_arg_exprs(&call.args, scope)?;
+        let func = self.load_symbol(call.symbol.get().into(), true)?;
+        // let func = self.translate_expr(call.symbol, true)?;
+        let args = self.translate_arg_exprs(&call.args)?;
         let argc = args.len();
 
         tracing::debug!("Creating stack slot for {} arguments", args.len());
@@ -447,17 +416,16 @@ impl<'a> Codegen<'a> {
     fn translate_special_form<'s>(
         &mut self,
         special_form: &SpecialForm,
-        scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
         match special_form {
-            SpecialForm::If(if_expr) => self.translate_if_expr(if_expr, scope),
-            SpecialForm::Let(let_expr) => self.translate_let_expr(let_expr, scope),
-            SpecialForm::Lambda(lambda) => self.translate_lambda_expr(lambda, scope),
-            SpecialForm::Quote(quote) => self.translate_quote(quote, scope),
-            SpecialForm::Progn(exprs) => self.translate_progn(exprs, scope),
-            SpecialForm::And(exprs) => self.translate_and(exprs, scope),
-            SpecialForm::Or(exprs) => self.translate_or(exprs, scope),
-            SpecialForm::Defvar(exprs) => self.translate_defvar(exprs, scope),
+            SpecialForm::If(if_expr) => self.translate_if_expr(if_expr),
+            SpecialForm::Let(let_expr) => self.translate_let_expr(let_expr),
+            SpecialForm::Lambda(lambda) => self.translate_lambda_expr(lambda),
+            SpecialForm::Quote(quote) => self.translate_quote(quote),
+            SpecialForm::Progn(exprs) => self.translate_progn(exprs),
+            SpecialForm::And(exprs) => self.translate_and(exprs),
+            SpecialForm::Or(exprs) => self.translate_or(exprs),
+            SpecialForm::Defvar(exprs) => self.translate_defvar(exprs),
             _ => todo!("Special form not yet implemented: {:?}", special_form),
         }
     }
@@ -465,9 +433,8 @@ impl<'a> Codegen<'a> {
     fn translate_if_expr<'s>(
         &mut self,
         if_expr: &If,
-        scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
-        let cond_val = self.translate_expr(&if_expr.cond, scope, false)?;
+        let cond_val = self.translate_expr(&if_expr.cond)?;
         let nil = self.nil();
         let cond = self.builder.ins().icmp(IntCC::NotEqual, cond_val, nil);
         // let cond = cond_val;
@@ -483,12 +450,12 @@ impl<'a> Codegen<'a> {
 
         self.builder.switch_to_block(then_block);
         self.builder.seal_block(then_block);
-        let then_return = self.translate_expr(&if_expr.then, scope, false)?;
+        let then_return = self.translate_expr(&if_expr.then)?;
         self.builder.ins().jump(merge_block, &[then_return.into()]);
 
         self.builder.switch_to_block(else_block);
         self.builder.seal_block(else_block);
-        let else_return = self.translate_progn(&if_expr.els, scope)?;
+        let else_return = self.translate_progn(&if_expr.els)?;
         self.builder.ins().jump(merge_block, &[else_return.into()]);
 
         self.builder.switch_to_block(merge_block);
@@ -500,7 +467,6 @@ impl<'a> Codegen<'a> {
     fn translate_and<'s>(
         &mut self,
         exprs: &[Expr],
-        scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
         if exprs.is_empty() {
             return Ok(self.t()); // true
@@ -520,7 +486,7 @@ impl<'a> Codegen<'a> {
         self.builder.switch_to_block(blocks[0]);
         self.builder.seal_block(blocks[0]);
 
-        let first_val = self.translate_expr(&exprs[0], scope, false)?;
+        let first_val = self.translate_expr(&exprs[0])?;
         let nil = self.nil();
 
         if exprs.len() == 1 {
@@ -542,7 +508,7 @@ impl<'a> Codegen<'a> {
             self.builder.switch_to_block(blocks[i]);
             self.builder.seal_block(blocks[i]);
 
-            let expr_val = self.translate_expr(&exprs[i], scope, false)?;
+            let expr_val = self.translate_expr(&exprs[i])?;
 
             if i == exprs.len() - 1 {
                 // Last expression, jump to end with its value
@@ -566,7 +532,6 @@ impl<'a> Codegen<'a> {
     fn translate_or<'s>(
         &mut self,
         exprs: &[Expr],
-        scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
         if exprs.is_empty() {
             return Ok(self.nil()); // nil
@@ -586,7 +551,7 @@ impl<'a> Codegen<'a> {
         self.builder.switch_to_block(blocks[0]);
         self.builder.seal_block(blocks[0]);
 
-        let first_val = self.translate_expr(&exprs[0], scope, false)?;
+        let first_val = self.translate_expr(&exprs[0])?;
         let nil = self.nil();
 
         if exprs.len() == 1 {
@@ -608,7 +573,7 @@ impl<'a> Codegen<'a> {
             self.builder.switch_to_block(blocks[i]);
             self.builder.seal_block(blocks[i]);
 
-            let expr_val = self.translate_expr(&exprs[i], scope, false)?;
+            let expr_val = self.translate_expr(&exprs[i])?;
 
             if i == exprs.len() - 1 {
                 // Last expression, jump to end with its value (even if nil)
@@ -632,7 +597,6 @@ impl<'a> Codegen<'a> {
     fn translate_quote<'s>(
         &mut self,
         quote: &Quote,
-        _scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
         match quote.kind {
             QuoteKind::Quote => self.translate_quoted_data(&quote.expr),
@@ -667,23 +631,21 @@ impl<'a> Codegen<'a> {
     fn translate_lambda_expr<'s>(
         &mut self,
         lambda: &Lambda,
-        scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
         tracing::info!("Translating lambda with {:?}: {lambda:?}", lambda.args);
         let mut fctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
 
-        let (mut codegen, new_scope) = Codegen::new(
+        let mut codegen = Codegen::new(
             self.module,
             self.data_desc,
             self.builtin_funcs,
             &mut fctx,
             &mut ctx,
             &lambda.args,
-            scope,
         )?;
 
-        let result = codegen.translate_exprs(&lambda.body.body, &new_scope)?;
+        let result = codegen.translate_exprs(&lambda.body.body)?;
 
         let func_id = codegen.func_id;
         // TODO make sure this is still valid after storing func_ptr
@@ -704,54 +666,41 @@ impl<'a> Codegen<'a> {
     fn translate_let_expr<'s>(
         &mut self,
         let_expr: &Let,
-        parent_scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
-        let mut new_vars = HashMap::new();
         let mut binding_values = Vec::new();
 
         for (ident, value_expr) in &*let_expr.bindings {
             let var = self.builder.declare_var(types::I64);
-            new_vars.insert(*ident, var);
+            self.locals.insert(*ident, var);
 
             // The values are evaluated in the *parent* scope.
             let value = if let Some(expr) = value_expr {
-                self.translate_expr(expr, parent_scope, false)?
+                self.translate_expr(expr)?
             } else {
                 self.nil()
             };
             binding_values.push((ident, value));
         }
 
-        let new_scope = FrameScope::new(new_vars, parent_scope, true, false).into();
-
         // Define the variables with their evaluated values
-        if let CompileScope::Frame(frame) = &new_scope {
-            for (sym, value) in binding_values {
-                let var = frame.slots.get(*sym).unwrap();
-                self.builder.def_var(var, value);
-            }
-        } else {
-            unreachable!();
-        }
-
         // translate body
-        let result = self.translate_exprs(&let_expr.body.body, &new_scope)?;
+        let result = self.translate_exprs(&let_expr.body.body)?;
 
-        // resolve bindings for closures capturing let-bound variables
-        if let CompileScope::Frame(frame) = &new_scope {
-            if let Some(binds) = &frame.lexical_binds {
-                for (ident, funcs) in binds.borrow().iter() {
-                    let var = frame.slots.get(*ident).unwrap();
-                    let value = self.builder.use_var(var);
-                    let symbol: Symbol = ident.into();
-                    let sym = self.translate_lispobj(&LispSymbol::from(symbol));
-                    for func in funcs.iter() {
-                        let func_val = self.translate_lispobj(func);
-                        self.call_internal("store_captured", &[sym, value, func_val]);
-                    }
-                }
-            }
-        }
+        // // resolve bindings for closures capturing let-bound variables
+        // if let CompileScope::Frame(frame) = &new_scope {
+        //     if let Some(binds) = &frame.lexical_binds {
+        //         for (ident, funcs) in binds.borrow().iter() {
+        //             let var = frame.slots.get(*ident).unwrap();
+        //             let value = self.builder.use_var(var);
+        //             let symbol: Symbol = ident.into();
+        //             let sym = self.translate_lispobj(&LispSymbol::from(symbol));
+        //             for func in funcs.iter() {
+        //                 let func_val = self.translate_lispobj(func);
+        //                 self.call_internal("store_captured", &[sym, value, func_val]);
+        //             }
+        //         }
+        //     }
+        // }
 
         Ok(result)
     }
@@ -759,7 +708,6 @@ impl<'a> Codegen<'a> {
     fn translate_defvar<'s>(
         &mut self,
         defvar_expr: &Defvar,
-        scope: &CompileScope<'s>,
     ) -> CodegenResult<Value> {
         let text = defvar_expr.symbol.text().as_bytes();
         let text_len = text.len();
@@ -775,7 +723,7 @@ impl<'a> Codegen<'a> {
         let sym = self.builder.ins().stack_addr(types::I64, slot, 0);
         let sym_len = self.builder.ins().iconst(types::I64, text_len as i64);
 
-        let val = self.translate_expr(defvar_expr.value.as_ref().unwrap(), scope, false)?;
+        let val = self.translate_expr(defvar_expr.value.as_ref().unwrap())?;
 
         let val = self.call_internal("defvar", &[sym, sym_len, val, self.env])[0];
 

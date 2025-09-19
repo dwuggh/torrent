@@ -198,8 +198,9 @@ fn expand_let_macros(expr: &Expr, parent_scope: &Scope, env: &Environment) -> Ru
     if let ExprType::SpecialForm(SpecialForm::Let(let_expr)) = &mut *expr_type {
         // Create new lexical scope for the let binding
         let new_scope = Scope::Lexical {
-            binding: let_expr.bindings.clone(),
-            parent: Box::new(parent_scope.clone()),
+            bindings: let_expr.bindings.clone(),
+            seq: None,
+            parent: Rc::new(parent_scope.clone()),
         };
 
         // Expand value expressions in the parent scope (before binding)
@@ -228,6 +229,7 @@ fn expand_let_star_macros(
 
     if let ExprType::SpecialForm(SpecialForm::LetStar(let_star)) = &mut *expr_type {
         let mut current_scope = parent_scope.clone();
+        // TODO optimize
 
         // For let*, each binding sees the previous bindings
         for (i, (_, value)) in let_star.bindings.iter().enumerate() {
@@ -240,16 +242,18 @@ fn expand_let_star_macros(
                 let partial_bindings: Vec<_> =
                     let_star.bindings.iter().take(i + 1).cloned().collect();
                 current_scope = Scope::Lexical {
-                    binding: Rc::new(partial_bindings),
-                    parent: Box::new(current_scope),
+                    bindings: Rc::new(partial_bindings),
+                    seq: None,
+                    parent: Rc::new(current_scope),
                 };
             }
         }
 
         // Create final scope for body
         let final_scope = Scope::Lexical {
-            binding: let_star.bindings.clone(),
-            parent: Box::new(parent_scope.clone()),
+            bindings: let_star.bindings.clone(),
+            seq: None,
+            parent: Rc::new(parent_scope.clone()),
         };
 
         // Expand body in the final scope
@@ -274,7 +278,7 @@ fn expand_lambda_macros(
         let function_scope = Scope::Function {
             args: lambda.args.clone(),
             captures: lambda.captures.clone(),
-            parent: Box::new(parent_scope.clone()),
+            parent: Rc::new(parent_scope.clone()),
         };
 
         // Expand body in function scope
@@ -591,29 +595,185 @@ fn cons_to_tokens(cons: &Cons) -> Vec<Token> {
     tokens
 }
 
-/// Iterator adapter for streaming tokens from a LispObject
-pub struct LispObjectTokenIterator {
-    tokens: std::vec::IntoIter<Token>,
+pub fn expand_and_resolve_everything(expr: &Expr, env: &Environment) -> RuntimeResult<()> {
+    let scope = Scope::Global(env);
+    expand_and_resolve_everything_inner(expr, &scope, env)
 }
 
-impl LispObjectTokenIterator {
-    pub fn new(obj: LispObject) -> Self {
-        Self {
-            tokens: lisp_object_to_tokens(obj).into_iter(),
+pub fn expand_and_resolve_everything_inner(
+    expr: &Expr,
+    scope: &Scope,
+    env: &Environment,
+) -> RuntimeResult<()> {
+    match &*expr.ty() {
+        ExprType::Nil => Ok(()),
+        ExprType::Literal(_literal) => Ok(()),
+        ExprType::Symbol(cell) => {
+            let resolved = scope.resolve(cell.get().into());
+            cell.set(resolved);
+            Ok(())
+        }
+        ExprType::Vector(exprs) => expand_and_resolve_exprs(exprs, scope, env),
+        ExprType::Call(call) => {
+            let resolved = scope.resolve(call.symbol.get().into());
+            call.symbol.set(resolved);
+            let expanded = try_expand_macro_call(call, resolved, env)?;
+            // is a macro, replace inner with new content
+            if let Some(expanded) = expanded {
+                expr.ty.replace(expanded);
+                expand_and_resolve_everything_inner(expr, scope, env)
+            } else {
+                for arg in call.args.iter() {
+                    expand_and_resolve_everything_inner(arg, scope, env)?;
+                }
+                Ok(())
+            }
+        }
+        ExprType::SpecialForm(special_form) => {
+            match special_form {
+                SpecialForm::And(exprs) => expand_and_resolve_exprs(exprs, scope, env),
+                SpecialForm::Or(exprs) => expand_and_resolve_exprs(exprs, scope, env),
+                SpecialForm::If(if_expr) => {
+                    expand_and_resolve_everything_inner(&if_expr.cond, scope, env)?;
+                    expand_and_resolve_everything_inner(&if_expr.then, scope, env)?;
+                    expand_and_resolve_exprs(&if_expr.els.body, scope, env)
+                }
+                SpecialForm::Catch(catch) => {
+                    expand_and_resolve_everything_inner(&catch.tag, scope, env)?;
+                    expand_and_resolve_exprs(&catch.body.body, scope, env)
+                }
+                SpecialForm::Cond(cond) => {
+                    for clause in cond.clauses.iter() {
+                        expand_and_resolve_everything_inner(&clause.condition, scope, env)?;
+                        expand_and_resolve_exprs(&clause.body.body, scope, env)?;
+                    }
+                    Ok(())
+                }
+                SpecialForm::ConditionCase(condition_case) => {
+                    // TODO
+                    expand_and_resolve_everything_inner(&condition_case.protected, scope, env)?;
+                    for handler in condition_case.handlers.iter() {}
+                    todo!()
+                }
+                SpecialForm::Defconst(defconst) => {
+                    expand_and_resolve_everything_inner(&defconst.value, scope, env)
+                }
+                SpecialForm::Defvar(defvar) => {
+                    if let Some(expr) = defvar.value.as_ref() {
+                        expand_and_resolve_everything_inner(&expr, scope, env)?;
+                    }
+                    Ok(())
+                }
+                SpecialForm::Interactive(interactive) => {
+                    interactive.modes.as_ref().map(|modes| {
+                        for mode in modes.iter() {
+                            let resolved = scope.resolve(mode.get().into());
+                            mode.set(resolved);
+                        }
+                    });
+                    Ok(())
+                }
+                SpecialForm::Lambda(lambda) => {
+                    let function_scope = Scope::Function {
+                        args: lambda.args.clone(),
+                        captures: lambda.captures.clone(),
+                        parent: Rc::new(scope.clone()),
+                    };
+
+                    // Expand body in function scope
+                    expand_and_resolve_exprs(&lambda.body.body, &function_scope, env)
+                }
+                SpecialForm::Let(let_expr) => {
+                    let new_scope = Scope::Lexical {
+                        bindings: let_expr.bindings.clone(),
+                        seq: None,
+                        parent: Rc::new(scope.clone()),
+                    };
+                    for (_, value) in let_expr.bindings.iter() {
+                        if let Some(val_expr) = value {
+                            expand_and_resolve_everything_inner(val_expr, scope, env)?;
+                        }
+                    }
+
+                    expand_and_resolve_exprs(&let_expr.body.body, &new_scope, env)
+                }
+                SpecialForm::LetStar(let_star) => {
+                    let parent = Rc::new(scope.clone());
+                    for (i, (_, value)) in let_star.bindings.iter().enumerate() {
+                        let new_scope = Scope::Lexical {
+                            bindings: let_star.bindings.clone(),
+                            seq: Some(i),
+                            parent: parent.clone(),
+                        };
+                        if let Some(val_expr) = value {
+                            expand_and_resolve_everything_inner(val_expr, &new_scope, env)?;
+                        }
+                    }
+                    let new_scope = Scope::Lexical {
+                        bindings: let_star.bindings.clone(),
+                        seq: None,
+                        parent,
+                    };
+
+                    expand_and_resolve_exprs(&let_star.body.body, &new_scope, env)
+                }
+                SpecialForm::Prog1(prog1) => {
+                    expand_and_resolve_everything_inner(&prog1.first, scope, env)?;
+                    expand_and_resolve_exprs(&prog1.rest.body, scope, env)
+                }
+                SpecialForm::Prog2(prog2) => {
+                    expand_and_resolve_everything_inner(&prog2.first, scope, env)?;
+                    expand_and_resolve_everything_inner(&prog2.second, scope, env)?;
+                    expand_and_resolve_exprs(&prog2.rest.body, scope, env)
+                }
+                SpecialForm::Progn(progn) => expand_and_resolve_exprs(&progn.body, scope, env),
+                SpecialForm::Quote(quote) => todo!(),
+                SpecialForm::SaveCurrentBuffer(progn) => {
+                    expand_and_resolve_exprs(&progn.body, scope, env)
+                }
+                SpecialForm::SaveExcursion(progn) => {
+                    expand_and_resolve_exprs(&progn.body, scope, env)
+                }
+                SpecialForm::SaveRestriction(progn) => {
+                    expand_and_resolve_exprs(&progn.body, scope, env)
+                }
+                SpecialForm::Set(set) => {
+                    let resolved = scope.resolve(set.symbol.get().into());
+                    set.symbol.set(resolved);
+                    expand_and_resolve_everything_inner(&set.value, scope, env)
+                }
+                SpecialForm::Setq(setq) => {
+                    for (var, val) in setq.assignments.iter() {
+                        let resolved = scope.resolve(var.get().into());
+                        var.set(resolved);
+                        expand_and_resolve_everything_inner(&val, scope, env)?;
+                    }
+                    Ok(())
+                }
+                SpecialForm::SetqDefault(setq_default) => {
+                    for (var, val) in setq_default.assignments.iter() {
+                        let resolved = scope.resolve(var.get().into());
+                        var.set(resolved);
+                        expand_and_resolve_everything_inner(&val, scope, env)?;
+                    }
+                    Ok(())
+                }
+                SpecialForm::UnwindProtect(unwind_protect) => {
+                    expand_and_resolve_everything_inner(&unwind_protect.protected, scope, env)?;
+                    expand_and_resolve_exprs(&unwind_protect.cleanup.body, scope, env)
+                }
+                SpecialForm::While(while_expr) => {
+                    expand_and_resolve_everything_inner(&while_expr.condition, scope, env)?;
+                    expand_and_resolve_exprs(&while_expr.body.body, scope, env)
+                }
+            }
         }
     }
 }
 
-impl Iterator for LispObjectTokenIterator {
-    type Item = Token;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.tokens.next()
+fn expand_and_resolve_exprs(exprs: &[Expr], scope: &Scope, env: &Environment) -> RuntimeResult<()> {
+    for expr in exprs.iter() {
+        expand_and_resolve_everything_inner(expr, scope, env)?;
     }
-}
-
-impl From<LispObject> for LispObjectTokenIterator {
-    fn from(obj: LispObject) -> Self {
-        Self::new(obj)
-    }
+    Ok(())
 }

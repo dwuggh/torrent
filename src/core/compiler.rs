@@ -42,4 +42,4 @@ pub mod error;
 pub mod jit;
 pub mod macro_item;
 pub mod optimization;
-pub mod scope;
+// pub mod scope;

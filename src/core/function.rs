@@ -4,6 +4,7 @@ use crate::core::error::{RuntimeError, RuntimeResult};
 use crate::core::ident::Ident;
 use cranelift_module::FuncId;
 use proc_macros::Trace;
+use rustc_hash::FxHashMap;
 
 use crate::core::env::Environment;
 use crate::{
@@ -54,7 +55,7 @@ pub unsafe fn cast_func_ptr(ptr: *const u8) -> FuncPtr {
 pub struct LambdaFn {
     // Captured environment as a GC’d map of Value -> Value (key is typically a Symbol tagged as Value).
     #[no_trace]
-    pub captures: HashMap<Ident, Object>,
+    pub captures: FxHashMap<Ident, Object>,
 }
 
 #[allow(unused)]

@@ -77,7 +77,7 @@ impl JIT {
         )?;
         let scope = CompileScope::Global;
 
-        let val = codegen.translate_expr(expr, &scope, false)?;
+        let val = codegen.translate_expr(expr)?;
 
         let func_id = codegen.func_id;
         codegen.finalize(val);
