@@ -7,6 +7,7 @@ use cranelift_module::DataDescription;
 use cranelift_module::FuncId;
 use cranelift_module::Module;
 use rustc_hash::FxHashMap;
+use rustc_hash::FxHashSet;
 
 use crate::core::compiler::error::{CodegenError, CodegenResult};
 use crate::core::function::LispFunction;
@@ -18,14 +19,22 @@ use crate::core::symbol::LispSymbol;
 use crate::core::symbol::Symbol;
 use crate::core::Tagged;
 
+pub struct ToResolve {
+    func: LispFunction,
+    unresolved: FxHashSet<Arg>,
+}
+
+impl ToResolve {
+    fn resolve(self, codegen: &Codegen) -> Self {
+    }
+}
+
 pub struct Codegen<'a> {
     module: &'a mut JITModule,
     data_desc: &'a mut DataDescription,
     builder: FunctionBuilder<'a>,
     func: LispFunction,
-    arguments: FxHashMap<Ident, Variable>,
-    locals: FxHashMap<Ident, Variable>,
-    captures: FxHashMap<Ident, Variable>,
+    locals: FxHashMap<Arg, Variable>,
     pub func_id: FuncId,
     env: Value,
     builtin_funcs: &'a HashMap<String, FuncId>,
@@ -77,9 +86,7 @@ impl<'a> Codegen<'a> {
             builder,
             func,
 
-            arguments: FxHashMap::default(),
             locals: FxHashMap::default(),
-            captures: FxHashMap::default(),
             // closure: closure_val,
             env,
             func_id,
@@ -133,14 +140,14 @@ impl<'a> Codegen<'a> {
         let args_cnt = block_params[1];
         let env = block_params[2];
 
-        let mut arguments = FxHashMap::default();
+        let mut locals = FxHashMap::default();
         // TODO properly parse arguments
         for (i, arg) in args.normal.iter().enumerate() {
-            let sym = *arg;
+            let ident = arg.ident;
             let var = builder.declare_var(types::I64);
-            arguments.insert(sym, var);
+            locals.insert(ident, var);
 
-            tracing::debug!("Loading argument {} ({})", i, arg.text());
+            tracing::debug!("Loading argument {} ({})", i, ident.text());
 
             // Load argument from the arguments array
             let val = builder
@@ -151,20 +158,21 @@ impl<'a> Codegen<'a> {
 
         let func = LispFunction::new_closure(func_id);
 
-        let captures = captures.iter().map(|c| {
-            let var = builder.declare_var(types::I64);
-            let ident = Ident::from(*c);
-            (ident, var)
-        }).collect::<FxHashMap<_, _>>();
+        let captures = captures
+            .iter()
+            .map(|c| {
+                let var = builder.declare_var(types::I64);
+                let ident = Ident::from(*c);
+                (ident, var)
+            })
+            .collect::<FxHashMap<_, _>>();
 
         let codegen = Self {
             module,
             data_desc,
             builtin_funcs,
             builder,
-            arguments,
-            locals: FxHashMap::default(),
-            captures,
+            locals,
             func,
             env,
             func_id,
@@ -187,17 +195,11 @@ impl<'a> Codegen<'a> {
         self.builder.ins().icmp(IntCC::NotEqual, val, nil)
     }
 
-    pub fn translate_progn<'s>(
-        &mut self,
-        progn: &Progn,
-    ) -> CodegenResult<Value> {
+    pub fn translate_progn<'s>(&mut self, progn: &Progn) -> CodegenResult<Value> {
         self.translate_exprs(&progn.body)
     }
 
-    pub fn translate_exprs<'s>(
-        &mut self,
-        exprs: &[Expr],
-    ) -> CodegenResult<Value> {
+    pub fn translate_exprs<'s>(&mut self, exprs: &[Expr]) -> CodegenResult<Value> {
         // TODO need to drop other values
         exprs
             .iter()
@@ -288,20 +290,11 @@ impl<'a> Codegen<'a> {
             .iconst(types::I64, unsafe { obj.to_raw() } as i64)
     }
 
-    fn translate_arg_exprs<'s>(
-        &mut self,
-        exprs: &[Expr],
-    ) -> CodegenResult<Vec<Value>> {
-        exprs
-            .iter()
-            .map(|e| self.translate_expr(e ))
-            .collect()
+    fn translate_arg_exprs<'s>(&mut self, exprs: &[Expr]) -> CodegenResult<Vec<Value>> {
+        exprs.iter().map(|e| self.translate_expr(e)).collect()
     }
 
-    pub fn translate_expr<'s>(
-        &mut self,
-        expr: &Expr,
-    ) -> CodegenResult<Value> {
+    pub fn translate_expr<'s>(&mut self, expr: &Expr) -> CodegenResult<Value> {
         match &*expr.ty() {
             ExprType::Nil => Ok(self.nil()),
             ExprType::Symbol(ident) => {
@@ -325,18 +318,12 @@ impl<'a> Codegen<'a> {
         }
     }
 
-    fn translate_vector<'s>(
-        &mut self,
-        exprs: &[Expr],
-    ) -> CodegenResult<Value> {
+    fn translate_vector<'s>(&mut self, exprs: &[Expr]) -> CodegenResult<Value> {
         // TODO: implement vector creation
         todo!("Vector creation not yet implemented")
     }
 
-    fn translate_call<'s>(
-        &mut self,
-        call: &Call,
-    ) -> CodegenResult<Value> {
+    fn translate_call<'s>(&mut self, call: &Call) -> CodegenResult<Value> {
         tracing::debug!(
             "Translating function call with {} arguments",
             call.args.len()
@@ -413,10 +400,7 @@ impl<'a> Codegen<'a> {
         Ok(res)
     }
 
-    fn translate_special_form<'s>(
-        &mut self,
-        special_form: &SpecialForm,
-    ) -> CodegenResult<Value> {
+    fn translate_special_form<'s>(&mut self, special_form: &SpecialForm) -> CodegenResult<Value> {
         match special_form {
             SpecialForm::If(if_expr) => self.translate_if_expr(if_expr),
             SpecialForm::Let(let_expr) => self.translate_let_expr(let_expr),
@@ -430,10 +414,7 @@ impl<'a> Codegen<'a> {
         }
     }
 
-    fn translate_if_expr<'s>(
-        &mut self,
-        if_expr: &If,
-    ) -> CodegenResult<Value> {
+    fn translate_if_expr<'s>(&mut self, if_expr: &If) -> CodegenResult<Value> {
         let cond_val = self.translate_expr(&if_expr.cond)?;
         let nil = self.nil();
         let cond = self.builder.ins().icmp(IntCC::NotEqual, cond_val, nil);
@@ -464,10 +445,7 @@ impl<'a> Codegen<'a> {
         Ok(phi)
     }
 
-    fn translate_and<'s>(
-        &mut self,
-        exprs: &[Expr],
-    ) -> CodegenResult<Value> {
+    fn translate_and<'s>(&mut self, exprs: &[Expr]) -> CodegenResult<Value> {
         if exprs.is_empty() {
             return Ok(self.t()); // true
         }
@@ -529,10 +507,7 @@ impl<'a> Codegen<'a> {
         Ok(result)
     }
 
-    fn translate_or<'s>(
-        &mut self,
-        exprs: &[Expr],
-    ) -> CodegenResult<Value> {
+    fn translate_or<'s>(&mut self, exprs: &[Expr]) -> CodegenResult<Value> {
         if exprs.is_empty() {
             return Ok(self.nil()); // nil
         }
@@ -594,10 +569,7 @@ impl<'a> Codegen<'a> {
         Ok(result)
     }
 
-    fn translate_quote<'s>(
-        &mut self,
-        quote: &Quote,
-    ) -> CodegenResult<Value> {
+    fn translate_quote<'s>(&mut self, quote: &Quote) -> CodegenResult<Value> {
         match quote.kind {
             QuoteKind::Quote => self.translate_quoted_data(&quote.expr),
             _ => {
@@ -628,10 +600,7 @@ impl<'a> Codegen<'a> {
         }
     }
 
-    fn translate_lambda_expr<'s>(
-        &mut self,
-        lambda: &Lambda,
-    ) -> CodegenResult<Value> {
+    fn translate_lambda_expr<'s>(&mut self, lambda: &Lambda) -> CodegenResult<Value> {
         tracing::info!("Translating lambda with {:?}: {lambda:?}", lambda.args);
         let mut fctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
@@ -663,10 +632,7 @@ impl<'a> Codegen<'a> {
         Ok(func_val)
     }
 
-    fn translate_let_expr<'s>(
-        &mut self,
-        let_expr: &Let,
-    ) -> CodegenResult<Value> {
+    fn translate_let_expr<'s>(&mut self, let_expr: &Let) -> CodegenResult<Value> {
         let mut binding_values = Vec::new();
 
         for (ident, value_expr) in &*let_expr.bindings {
@@ -705,10 +671,7 @@ impl<'a> Codegen<'a> {
         Ok(result)
     }
 
-    fn translate_defvar<'s>(
-        &mut self,
-        defvar_expr: &Defvar,
-    ) -> CodegenResult<Value> {
+    fn translate_defvar<'s>(&mut self, defvar_expr: &Defvar) -> CodegenResult<Value> {
         let text = defvar_expr.symbol.text().as_bytes();
         let text_len = text.len();
         let slot = self.builder.create_sized_stack_slot(StackSlotData {
