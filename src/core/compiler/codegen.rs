@@ -19,14 +19,40 @@ use crate::core::symbol::LispSymbol;
 use crate::core::symbol::Symbol;
 use crate::core::Tagged;
 
-pub struct ToResolve {
+pub struct UnresolvedClosure {
     func: LispFunction,
     unresolved: FxHashSet<Arg>,
 }
 
-impl ToResolve {
-    fn resolve(self, codegen: &Codegen) -> Self {
+impl UnresolvedClosure {
+    fn resolve(self, codegen: &Codegen) -> ResolvedClosure {
+        let mut resolved_vars = FxHashMap::default();
+        let mut still_unresolved = FxHashSet::default();
+        
+        for arg in self.unresolved {
+            // Try to resolve the argument to a Variable in the current codegen context
+            if let Some(variable) = codegen.locals.get(&arg) {
+                // Get the current value of the variable
+                let value = codegen.builder.use_var(*variable);
+                resolved_vars.insert(arg, value);
+            } else {
+                // Still can't resolve this argument, keep it unresolved
+                still_unresolved.insert(arg);
+            }
+        }
+        
+        ResolvedClosure {
+            func: self.func,
+            resolved_vars,
+            unresolved: still_unresolved,
+        }
     }
+}
+
+pub struct ResolvedClosure {
+    func: LispFunction,
+    resolved_vars: FxHashMap<Arg, Value>,
+    unresolved: FxHashSet<Arg>,
 }
 
 pub struct Codegen<'a> {
