@@ -6,7 +6,6 @@ use cranelift_jit::JITModule;
 use cranelift_module::DataDescription;
 use cranelift_module::FuncId;
 use cranelift_module::Module;
-use rustc_hash::FxHashMap;
 use rustc_hash::FxHashSet;
 
 use crate::core::compiler::error::{CodegenError, CodegenResult};
@@ -19,40 +18,60 @@ use crate::core::symbol::LispSymbol;
 use crate::core::symbol::Symbol;
 use crate::core::Tagged;
 
+#[derive(Debug)]
 pub struct UnresolvedClosure {
     func: LispFunction,
     unresolved: FxHashSet<Arg>,
 }
 
-impl UnresolvedClosure {
-    fn resolve(self, codegen: &Codegen) -> ResolvedClosure {
-        let mut resolved_vars = FxHashMap::default();
-        let mut still_unresolved = FxHashSet::default();
-        
-        for arg in self.unresolved {
-            // Try to resolve the argument to a Variable in the current codegen context
-            if let Some(variable) = codegen.locals.get(&arg) {
-                // Get the current value of the variable
-                let value = codegen.builder.use_var(*variable);
-                resolved_vars.insert(arg, value);
-            } else {
-                // Still can't resolve this argument, keep it unresolved
-                still_unresolved.insert(arg);
-            }
-        }
-        
-        ResolvedClosure {
-            func: self.func,
-            resolved_vars,
-            unresolved: still_unresolved,
-        }
-    }
+#[allow(unused)]
+#[derive(Debug)]
+pub enum Closure {
+    Unresolved(UnresolvedClosure),
+    Resolved(LispFunction),
 }
 
-pub struct ResolvedClosure {
-    func: LispFunction,
-    resolved_vars: FxHashMap<Arg, Value>,
-    unresolved: FxHashSet<Arg>,
+fn get_locals(locals: &Vec<(Arg, Variable)>, target: &Arg) -> Option<Variable> {
+    let mut i = locals.len();
+    while i > 0 {
+        i = i - 1;
+        let (arg, var) = &locals[i];
+        if arg == target {
+            return Some(*var);
+        }
+    }
+    None
+}
+
+impl UnresolvedClosure {
+    fn resolve(self, codegen: &mut Codegen) -> Closure {
+        let mut unresolved = FxHashSet::default();
+        // unresolved.into_iter().partition()
+
+        for arg in self.unresolved {
+            // Try to resolve the argument to a Variable in the current codegen context
+            if let Some(variable) = get_locals(&codegen.locals, &arg) {
+                // Get the current value of the variable
+                let value = codegen.builder.use_var(variable);
+                let symbol: Symbol = arg.ident.into();
+                let sym = codegen.translate_lispobj(&LispSymbol::from(symbol));
+                let func_val = codegen.translate_lispobj(&self.func);
+                codegen.call_internal("store_captured", &[sym, value, func_val]);
+            } else {
+                // Still can't resolve this argument, keep it unresolved
+                unresolved.insert(arg);
+            }
+        }
+
+        if unresolved.is_empty() {
+            Closure::Resolved(self.func)
+        } else {
+            Closure::Unresolved(Self {
+                func: self.func,
+                unresolved,
+            })
+        }
+    }
 }
 
 pub struct Codegen<'a> {
@@ -60,10 +79,12 @@ pub struct Codegen<'a> {
     data_desc: &'a mut DataDescription,
     builder: FunctionBuilder<'a>,
     func: LispFunction,
-    locals: FxHashMap<Arg, Variable>,
+    locals: Vec<(Arg, Variable)>,
+    captures: FxHashSet<Arg>,
     pub func_id: FuncId,
     env: Value,
     builtin_funcs: &'a HashMap<String, FuncId>,
+    defined_funcs: Vec<Closure>,
 }
 
 impl<'a> Codegen<'a> {
@@ -112,10 +133,11 @@ impl<'a> Codegen<'a> {
             builder,
             func,
 
-            locals: FxHashMap::default(),
-            // closure: closure_val,
+            locals: Vec::new(),
+            captures: Default::default(),
             env,
             func_id,
+            defined_funcs: Vec::new(),
         };
 
         Ok(codegen)
@@ -127,10 +149,9 @@ impl<'a> Codegen<'a> {
         builtin_funcs: &'a HashMap<String, FuncId>,
         fctx: &'a mut FunctionBuilderContext,
         ctx: &'a mut Context,
-        args: &Args,
-        captures: &Vec<Var>,
+        lambda: &Lambda,
     ) -> CodegenResult<Self> {
-        tracing::debug!("Creating new codegen with args: {:?}", args);
+        tracing::debug!("Creating new codegen with config: {:?}", lambda);
 
         // make signature
         let sig = &mut ctx.func.signature;
@@ -160,40 +181,15 @@ impl<'a> Codegen<'a> {
         // builder.block_params(entry_block);
 
         let block_params = builder.block_params(entry_block);
-        tracing::debug!("Entry block has {} parameters", block_params.len());
 
         let args_ptr = block_params[0];
         let args_cnt = block_params[1];
         let env = block_params[2];
 
-        let mut locals = FxHashMap::default();
-        // TODO properly parse arguments
-        for (i, arg) in args.normal.iter().enumerate() {
-            let ident = arg.ident;
-            let var = builder.declare_var(types::I64);
-            locals.insert(ident, var);
-
-            tracing::debug!("Loading argument {} ({})", i, ident.text());
-
-            // Load argument from the arguments array
-            let val = builder
-                .ins()
-                .load(types::I64, MemFlags::new(), args_ptr, (i * 8) as i32);
-            builder.def_var(var, val);
-        }
-
+        let locals = Vec::new();
         let func = LispFunction::new_closure(func_id);
 
-        let captures = captures
-            .iter()
-            .map(|c| {
-                let var = builder.declare_var(types::I64);
-                let ident = Ident::from(*c);
-                (ident, var)
-            })
-            .collect::<FxHashMap<_, _>>();
-
-        let codegen = Self {
+        let mut codegen = Self {
             module,
             data_desc,
             builtin_funcs,
@@ -202,7 +198,11 @@ impl<'a> Codegen<'a> {
             func,
             env,
             func_id,
+            defined_funcs: Vec::new(),
+            captures: Default::default(),
         };
+
+        codegen.setup_locals(lambda, args_ptr, args_cnt);
 
         Ok(codegen)
     }
@@ -234,10 +234,17 @@ impl<'a> Codegen<'a> {
             .unwrap_or(Ok(self.nil()))
     }
 
-    pub fn finalize(mut self, val: Value) -> LispFunction {
+    pub fn finalize(mut self, val: Value) -> (UnresolvedClosure, Vec<Closure>) {
         self.builder.ins().return_(&[val]);
         self.builder.finalize();
-        self.func
+
+        let collections = self.defined_funcs;
+        let this = UnresolvedClosure {
+            func: self.func,
+            unresolved: self.captures,
+        };
+
+        (this, collections)
     }
 
     fn call_internal(&mut self, func_name: &str, args: &[Value]) -> &[Value] {
@@ -264,6 +271,40 @@ impl<'a> Codegen<'a> {
         results
     }
 
+    pub fn setup_locals(&mut self, lambda: &Lambda, args_ptr: Value, args_cnt: Value) {
+        let captures = lambda.captures.borrow();
+        let args = &lambda.args;
+
+        // TODO setup args correctly
+        for (i, arg) in args.normal.iter().enumerate() {
+            let ident = arg.ident;
+            let var = self.builder.declare_var(types::I64);
+            self.locals.push((arg.clone(), var));
+
+            tracing::debug!("Loading argument {} ({})", i, ident.text());
+
+            // TODO should load Gc<Object> or Object>
+            // Load argument from the arguments array
+            let mut val =
+                self.builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), args_ptr, (i * 8) as i32);
+
+            if arg.is_shared() {
+                val = self.call_internal("create_indirect_object", &[val])[0];
+            }
+
+            self.builder.def_var(var, val);
+        }
+        // actual value of captures are loaded afterwards
+        for capture in captures.iter() {
+            let var = self.builder.declare_var(types::I64);
+            let ident = Ident::from(*capture);
+            let arg = Arg::new_uncap(ident);
+            self.locals.push((arg, var));
+        }
+    }
+
     pub fn load_symbol<'s>(
         &mut self,
         symbol: Symbol,
@@ -275,39 +316,12 @@ impl<'a> Codegen<'a> {
             load_function_cell
         );
 
-        self.load_symbol_inner(symbol, load_function_cell, true)
-            .ok_or(CodegenError::SymbolNotFound(symbol))
-            .map(|val| match val {
-                Val::Value(value) => {
-                    tracing::debug!("Symbol loaded as direct value");
-                    value
-                }
-                Val::Ident(ident) => {
-                    tracing::debug!("Symbol is captured, loading from closure: {}", ident.text());
-                    // this value is captured, we load it from the map for captured values
-                    // through compiler, so it gets loaded at runtime
-                    let ident_val = self
-                        .builder
-                        .ins()
-                        .iconst(types::I64, Into::<i64>::into(ident));
+        let is_function: i64 = if load_function_cell { 1 } else { 0 };
+        let is_function = self.builder.ins().iconst(types::I64, is_function);
+        let sym = self.translate_lispobj(&LispSymbol::from(symbol));
+        let result = self.call_internal("load_symbol_value", &[sym, is_function, self.env])[0];
 
-                    let closure = self
-                        .builder
-                        .ins()
-                        .iconst(types::I64, unsafe { self.func.to_raw() } as i64);
-
-                    self.call_internal("load_captured", &[ident_val, closure])[0]
-                }
-            })
-    }
-
-    fn load_symbol_inner<'s>(
-        &mut self,
-        symbol: Symbol,
-        load_function_cell: bool,
-        same_func_scope: bool,
-    ) -> Option<Value> {
-        todo!()
+        Ok(result)
     }
 
     fn translate_lispobj<T: Tagged>(&mut self, obj: &T) -> Value {
@@ -323,10 +337,24 @@ impl<'a> Codegen<'a> {
     pub fn translate_expr<'s>(&mut self, expr: &Expr) -> CodegenResult<Value> {
         match &*expr.ty() {
             ExprType::Nil => Ok(self.nil()),
-            ExprType::Symbol(ident) => {
-                let symbol = ident.get().into();
-                let val = self.load_symbol(symbol, false)?;
-                Ok(val)
+            ExprType::Symbol(var) => {
+                match var.get() {
+                    Var::Global(symbol) => {
+                        let val = self.load_symbol(symbol, false)?;
+                        Ok(val)
+                    }
+                    Var::Local(ident) | Var::Captured(ident) | Var::Argument(ident) => {
+                        // All local variables (including captured and arguments) are stored in self.locals
+                        let arg = Arg::new_uncap(ident);
+                        if let Some(variable) = get_locals(&self.locals, &arg) {
+                            let value = self.builder.use_var(variable);
+                            Ok(value)
+                        } else {
+                            Err(CodegenError::UndefinedVariable(ident.text().to_string()))
+                        }
+                    }
+                    Var::Unresolved(_) => unreachable!("Unresolved variable should not reach codegen")
+                }
             }
             ExprType::Literal(literal) => self.translate_literal(literal),
             ExprType::Vector(exprs) => self.translate_vector(exprs),
@@ -627,7 +655,6 @@ impl<'a> Codegen<'a> {
     }
 
     fn translate_lambda_expr<'s>(&mut self, lambda: &Lambda) -> CodegenResult<Value> {
-        tracing::info!("Translating lambda with {:?}: {lambda:?}", lambda.args);
         let mut fctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
 
@@ -637,14 +664,14 @@ impl<'a> Codegen<'a> {
             self.builtin_funcs,
             &mut fctx,
             &mut ctx,
-            &lambda.args,
+            &lambda,
         )?;
 
         let result = codegen.translate_exprs(&lambda.body.body)?;
 
         let func_id = codegen.func_id;
         // TODO make sure this is still valid after storing func_ptr
-        let func = codegen.finalize(result);
+        let (result, unresolved) = codegen.finalize(result);
 
         tracing::debug!("Defining lambda function with id: {:?}", func_id);
         self.module.define_function(func_id, &mut ctx)?;
@@ -652,47 +679,57 @@ impl<'a> Codegen<'a> {
 
         self.module.finalize_definitions()?;
         let func_ptr = self.module.get_finalized_function(func_id);
-        func.set_func_ptr(func_ptr);
+        result.func.set_func_ptr(func_ptr);
+        let func_val = self.translate_lispobj(&result.func);
 
-        let func_val = self.translate_lispobj(&func);
+        // resolve closure captures
+        let result = result.resolve(self);
+        self.defined_funcs.push(result);
+
+        for func in unresolved.into_iter() {
+            if let Closure::Unresolved(func) = func {
+                let result = func.resolve(self);
+                self.defined_funcs.push(result);
+            }
+        }
         Ok(func_val)
     }
 
     fn translate_let_expr<'s>(&mut self, let_expr: &Let) -> CodegenResult<Value> {
-        let mut binding_values = Vec::new();
-
-        for (ident, value_expr) in &*let_expr.bindings {
-            let var = self.builder.declare_var(types::I64);
-            self.locals.insert(*ident, var);
-
-            // The values are evaluated in the *parent* scope.
-            let value = if let Some(expr) = value_expr {
+        // Remember the current locals count to restore later
+        let locals_before = self.locals.len();
+        
+        // Evaluate values in parent scope and create new variables
+        let mut new_vars = Vec::new();
+        for (arg, value_expr) in &*let_expr.bindings {
+            // Evaluate the value expression in the *parent* scope (before adding the new variable)
+            let mut value = if let Some(expr) = value_expr {
                 self.translate_expr(expr)?
             } else {
                 self.nil()
             };
-            binding_values.push((ident, value));
-        }
 
-        // Define the variables with their evaluated values
-        // translate body
+            // Create the variable and add to locals
+            let var = self.builder.declare_var(types::I64);
+            
+            // Check value's type, if it is Indirect, then directly load it.
+            // If arg is shared and value is not Indirect, make it indirect.
+            if arg.is_shared() {
+                value = self.call_internal("create_indirect_object", &[value])[0];
+            }
+            
+            self.builder.def_var(var, value);
+            new_vars.push((arg.clone(), var));
+        }
+        
+        // Add all new variables to locals after all values are evaluated
+        self.locals.extend(new_vars);
+
+        // Translate body with new variables in scope
         let result = self.translate_exprs(&let_expr.body.body)?;
 
-        // // resolve bindings for closures capturing let-bound variables
-        // if let CompileScope::Frame(frame) = &new_scope {
-        //     if let Some(binds) = &frame.lexical_binds {
-        //         for (ident, funcs) in binds.borrow().iter() {
-        //             let var = frame.slots.get(*ident).unwrap();
-        //             let value = self.builder.use_var(var);
-        //             let symbol: Symbol = ident.into();
-        //             let sym = self.translate_lispobj(&LispSymbol::from(symbol));
-        //             for func in funcs.iter() {
-        //                 let func_val = self.translate_lispobj(func);
-        //                 self.call_internal("store_captured", &[sym, value, func_val]);
-        //             }
-        //         }
-        //     }
-        // }
+        // Pop the let-bound variables from locals
+        self.locals.truncate(locals_before);
 
         Ok(result)
     }
