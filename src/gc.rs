@@ -261,6 +261,12 @@ impl<T: ?Sized> Gc<T> {
     }
 }
 
+impl<T: Default + Trace> Default for Gc<T> {
+    fn default() -> Self {
+        Self::new(Default::default())
+    }
+}
+
 // impl<T: Sized> Gc<T> {
 
 //     pub fn take(self) -> T {

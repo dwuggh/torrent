@@ -137,18 +137,18 @@ pub enum SpecialForm {
 //     SaveRestriction,
 // }
 
-pub type Binding = Vec<(Ident, Option<Expr>)>;
+pub type Bindings = Vec<(Arg, Option<Expr>)>;
 
 #[derive(Debug, Clone)]
 pub struct Let {
-    pub bindings: Rc<Binding>,
+    pub bindings: Rc<Bindings>,
     pub body: Progn,
     pub id: u32,
 }
 
 #[derive(Debug, Clone)]
 pub struct LetStar {
-    pub bindings: Rc<Binding>,
+    pub bindings: Rc<Bindings>,
     pub body: Progn,
     pub id: u32,
 }
@@ -162,9 +162,9 @@ pub struct If {
 
 #[derive(Debug, Clone)]
 pub struct Args {
-    pub normal: Vec<Ident>,
-    pub optional: Option<Vec<Ident>>,
-    pub rest: Option<Ident>,
+    pub normal: Vec<Arg>,
+    pub optional: Option<Vec<Arg>>,
+    pub rest: Option<Arg>,
 }
 
 pub type Captures = Rc<RefCell<Vec<Var>>>;
@@ -279,17 +279,38 @@ pub struct SetqDefault {
     pub assignments: Vec<(CellVar, Expr)>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Eq)]
 pub struct Arg {
-    pub ty: ArgsType,
     pub ident: Ident,
+    pub captured: Cell<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Copy)]
-pub enum ArgsType {
-    Normal,
-    Optional,
-    Rest,
+impl std::hash::Hash for Arg {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.ident.hash(state);
+    }
+}
+
+impl PartialEq for Arg {
+    fn eq(&self, other: &Self) -> bool {
+        self.ident == other.ident
+    }
+}
+
+impl Arg {
+    pub fn new(ident: Ident, captured: usize) -> Self {
+        Self {
+            ident,
+            captured: Cell::new(captured),
+        }
+    }
+    pub fn new_uncap(ident: Ident) -> Self {
+        Self::new(ident, 0)
+    }
+
+    pub fn is_shared(&self) -> bool {
+        self.captured.get() > 1
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -430,10 +451,11 @@ impl From<Expr> for LispObject {
 
                         // Convert bindings to list of lists
                         let mut bindings_list = nil();
-                        for (ident, value) in let_expr.bindings.iter().rev() {
+                        for (arg, value) in let_expr.bindings.iter().rev() {
                             let binding = if let Some(val) = value {
                                 // (var value)
-                                let var_obj = LispObject::Symbol(LispSymbol(Symbol::from(*ident)));
+                                let var_obj =
+                                    LispObject::Symbol(LispSymbol(Symbol::from(arg.ident)));
                                 let val_obj: LispObject = val.clone().into();
                                 LispCons::new(
                                     var_obj.tag(),
@@ -442,7 +464,7 @@ impl From<Expr> for LispObject {
                                 .tag()
                             } else {
                                 // just var
-                                LispObject::Symbol(LispSymbol(Symbol::from(*ident))).tag()
+                                LispObject::Symbol(LispSymbol(Symbol::from(arg.ident))).tag()
                             };
                             bindings_list = LispCons::new(binding, bindings_list).tag();
                         }
@@ -611,9 +633,9 @@ impl From<Expr> for LispObject {
                         let mut args_list = nil();
 
                         // Add rest argument if present
-                        if let Some(rest) = lambda.args.rest {
+                        if let Some(ref rest) = lambda.args.rest {
                             args_list = LispCons::new(
-                                LispObject::Symbol(LispSymbol(Symbol::from(rest))).tag(),
+                                LispObject::Symbol(LispSymbol(Symbol::from(rest.ident))).tag(),
                                 args_list,
                             )
                             .tag();
@@ -628,7 +650,7 @@ impl From<Expr> for LispObject {
                         if let Some(optional) = &lambda.args.optional {
                             for arg in optional.iter().rev() {
                                 args_list = LispCons::new(
-                                    LispObject::Symbol(LispSymbol(Symbol::from(*arg))).tag(),
+                                    LispObject::Symbol(LispSymbol(Symbol::from(arg.ident))).tag(),
                                     args_list,
                                 )
                                 .tag();
@@ -643,7 +665,7 @@ impl From<Expr> for LispObject {
                         // Add normal arguments
                         for arg in lambda.args.normal.iter().rev() {
                             args_list = LispCons::new(
-                                LispObject::Symbol(LispSymbol(Symbol::from(*arg))).tag(),
+                                LispObject::Symbol(LispSymbol(Symbol::from(arg.ident))).tag(),
                                 args_list,
                             )
                             .tag();
@@ -692,10 +714,11 @@ impl From<Expr> for LispObject {
 
                         // Convert bindings to list of lists
                         let mut bindings_list = nil();
-                        for (ident, value) in let_star.bindings.iter().rev() {
+                        for (arg, value) in let_star.bindings.iter().rev() {
                             let binding = if let Some(val) = value {
                                 // (var value)
-                                let var_obj = LispObject::Symbol(LispSymbol(Symbol::from(*ident)));
+                                let var_obj =
+                                    LispObject::Symbol(LispSymbol(Symbol::from(arg.ident)));
                                 let val_obj: LispObject = val.clone().into();
                                 LispCons::new(
                                     var_obj.tag(),
@@ -704,7 +727,7 @@ impl From<Expr> for LispObject {
                                 .tag()
                             } else {
                                 // just var
-                                LispObject::Symbol(LispSymbol(Symbol::from(*ident))).tag()
+                                LispObject::Symbol(LispSymbol(Symbol::from(arg.ident))).tag()
                             };
                             bindings_list = LispCons::new(binding, bindings_list).tag();
                         }

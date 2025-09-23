@@ -577,6 +577,10 @@ pub fn lisp_object_to_tokens(obj: LispObject) -> Vec<Token> {
             // Hash tables can't be directly converted to tokens for macro expansion
             vec![Token::Ident("#<hash-table>".into())]
         }
+        LispObject::Indirect(indirect) => {
+            let obj = indirect.0.get().clone().untag();
+            lisp_object_to_tokens(obj)
+        }
     }
 }
 
@@ -595,12 +599,13 @@ fn cons_to_tokens(cons: &Cons) -> Vec<Token> {
     tokens
 }
 
+/// the main function
 pub fn expand_and_resolve_everything(expr: &Expr, env: &Environment) -> RuntimeResult<()> {
     let scope = Scope::Global(env);
     expand_and_resolve_everything_inner(expr, &scope, env)
 }
 
-pub fn expand_and_resolve_everything_inner(
+fn expand_and_resolve_everything_inner(
     expr: &Expr,
     scope: &Scope,
     env: &Environment,
@@ -727,6 +732,7 @@ pub fn expand_and_resolve_everything_inner(
                     expand_and_resolve_exprs(&prog2.rest.body, scope, env)
                 }
                 SpecialForm::Progn(progn) => expand_and_resolve_exprs(&progn.body, scope, env),
+                // TODO quotes
                 SpecialForm::Quote(quote) => todo!(),
                 SpecialForm::SaveCurrentBuffer(progn) => {
                     expand_and_resolve_exprs(&progn.body, scope, env)

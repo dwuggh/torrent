@@ -6,8 +6,9 @@ use crate::{
         error::{RuntimeError, RuntimeResult},
         function::{FuncPtr, Function, FunctionType},
         ident::Ident,
+        indirect::Indirect,
         number::LispInteger,
-        object::{nil, tru, Object, ObjectRef},
+        object::{nil, tru, LispObject, LispType, Object, ObjectRef},
         symbol::{LispSymbol, Symbol},
         tagged_ptr::TaggedObj,
     },
@@ -109,15 +110,18 @@ fn defvar(name: i64, len: usize, value: Object, env: &Environment) -> Result<Obj
 }
 
 #[internal_fn]
-fn store_captured(ident: Ident, value: Object, func: &mut Function) {
+fn store_captured(ident: Ident, object: Object, func: &mut Function) {
+    tracing::debug!("calling store_captured");
     let FunctionType::Lambda(func) = func.get_func_type_mut() else {
         return;
     };
-    func.captures.insert(ident, value);
+    // let value = ObjectVal::new(object, shared == 1);
+    func.captures.insert(ident, object);
 }
 
 #[internal_fn]
 fn load_captured(ident: Ident, func: &mut Function) -> Result<Object> {
+    tracing::debug!("calling load_captured");
     let Some(closure) = func.get_func_type_mut().as_closure_mut() else {
         return Err(RuntimeError::internal_error("wrong type of function"));
     };
@@ -144,13 +148,17 @@ fn load_symbol_value(symbol: Symbol, load_function_cell: u64, env: &Environment)
         "loading symbol value: {} {load_function_cell}",
         symbol.name()
     );
-    env.load_symbol_with(symbol, FuncCellType::from_num(load_function_cell), |obj| {
-        Ok(obj.0 as i64)
-    })
+    let load_ptr = |obj: &Object| Ok(obj.0 as i64);
+    if load_function_cell == 1 {
+        env.load_symbol_with(symbol, Some(FuncCellType::Function), load_ptr)
+    } else {
+        env.load_symbol_value_with(symbol, load_ptr)
+    }
 }
 
 #[internal_fn]
 fn get_func_ptr(func: &Object, env: &Environment) -> Result<i64> {
+    tracing::debug!("calling get_func_ptr");
     let func = match func.as_ref() {
         ObjectRef::Symbol(symbol) => {
             env.load_symbol_with(symbol, Some(FuncCellType::Function), |func| {
@@ -164,6 +172,16 @@ fn get_func_ptr(func: &Object, env: &Environment) -> Result<i64> {
         _ => runtime_bail!(WrongType, expected: "function", actual: func.get_tag()),
     }?;
     Ok(func as i64)
+}
+
+#[internal_fn]
+fn create_indirect_object(obj: Object) -> Object {
+    tracing::debug!("calling create_indirect_object");
+    // if obj.get_tag() == LispType::Indirect {
+    //     obj
+    // } else {
+    // }
+    LispObject::Indirect(Indirect::new(obj)).tag()
 }
 
 fn get_func_ptr_from_function(func: &Function, env: &Environment) -> Result<FuncPtr> {

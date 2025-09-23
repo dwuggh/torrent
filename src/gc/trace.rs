@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, mem::ManuallyDrop, ptr::drop_in_place};
+use std::{collections::HashMap, marker::PhantomData, mem::ManuallyDrop, ptr::drop_in_place};
 
 use crate::gc::{Gc, OpaqueGcPtr};
 
@@ -143,4 +143,24 @@ unsafe impl<T> Trace for PhantomData<T> {
     unsafe fn trace(&self, _: Visitor) {}
 
     unsafe fn finalize(&mut self) {}
+}
+
+unsafe impl<K, V> Trace for rustc_hash::FxHashMap<K, V>
+where
+    V: Trace,
+{
+    unsafe fn trace(&self, visitor: Visitor) {
+        for (_, v) in self.iter() {
+            v.trace(visitor);
+        }
+    }
+
+    unsafe fn finalize(&mut self) {
+        for (_, mut v) in std::mem::take(self)
+            .into_iter()
+            .map(|(k, v)| (ManuallyDrop::new(k), ManuallyDrop::new(v)))
+        {
+            v.finalize();
+        }
+    }
 }

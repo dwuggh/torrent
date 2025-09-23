@@ -2,10 +2,10 @@ pub mod core;
 pub mod gc;
 
 use crate::core::{
-    compiler::{jit::JIT, scope::CompileScope},
+    compiler::jit::JIT,
     env::Environment,
     object::Object,
-    parser::parse_src,
+    parser::{macro_expansion::expand_and_resolve_everything, parse_src},
 };
 
 #[tokio::main]
@@ -13,12 +13,10 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     // gc::collector::init_gc();
     let text = include_str!("test.el");
-    let runtime_env = Environment::default();
-    let mut jit = JIT::new(&runtime_env);
-    let ptr = &runtime_env as *const Environment;
-    let ctx = CompileScope::global();
+    let env = Environment::default();
+    let mut jit = JIT::new(&env);
     unsafe {
-        let result = run_code(&mut jit, text, ctx, ptr).unwrap();
+        let result = run_code(&mut jit, text, &env).unwrap();
         println!("result: {result:?}");
     };
 
@@ -32,20 +30,26 @@ async fn main() -> anyhow::Result<()> {
 unsafe fn run_code(
     jit: &mut JIT,
     code: &str,
-    ctx: CompileScope<'_>,
-    env: *const Environment,
+    env: &Environment,
 ) -> anyhow::Result<Vec<anyhow::Result<Object>>> {
     unsafe {
         // Pass the string to the JIT, and it returns a raw pointer to machine code.
         match parse_src(code) {
-            Ok(node) => {
-                let vals = node
+            Ok(exprs) => {
+                let env_ptr = env as *const Environment;
+
+                for expr in exprs.iter() {
+                    expand_and_resolve_everything(expr, env)?;
+                    tracing::debug!("{:?}", expr);
+                }
+
+                let vals = exprs
                     .into_iter()
                     .map(|expr| {
-                        let f = jit.compile_expr(&expr, &ctx).unwrap();
+                        let f = jit.compile_expr(&expr).unwrap();
                         let code_fn = std::mem::transmute::<_, fn(*const Environment) -> Object>(f);
                         // And now we can call it!
-                        let value = code_fn(env as *const Environment);
+                        let value = code_fn(env_ptr);
                         let result = value;
                         println!("result: {result:?}");
                         Ok(result)

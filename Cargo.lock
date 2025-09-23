@@ -384,12 +384,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "either"
-version = "1.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -492,29 +486,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inkwell"
-version = "0.6.0"
-source = "git+https://github.com/TheDan64/inkwell?branch=master#e29a3d068f35918316777508afcbc96b5c80537c"
-dependencies = [
- "either",
- "inkwell_internals",
- "libc",
- "llvm-sys",
- "once_cell",
- "thiserror",
-]
-
-[[package]]
-name = "inkwell_internals"
-version = "0.11.0"
-source = "git+https://github.com/TheDan64/inkwell?branch=master#e29a3d068f35918316777508afcbc96b5c80537c"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "inventory"
 version = "0.3.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -561,20 +532,6 @@ name = "libm"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
-
-[[package]]
-name = "llvm-sys"
-version = "201.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9bb947e8b79254ca10d496d0798a9ba1287dcf68e50a92b016fec1cc45bef447"
-dependencies = [
- "anyhow",
- "cc",
- "lazy_static",
- "libc",
- "regex-lite",
- "semver",
-]
 
 [[package]]
 name = "lock_api"
@@ -673,14 +630,12 @@ dependencies = [
  "cranelift-module",
  "cranelift-native",
  "indexmap",
- "inkwell",
  "inventory",
  "lasso",
  "logos",
  "proc-macros",
  "quote",
  "rand",
- "rapidhash",
  "rustc-hash",
  "scc",
  "string-interner",
@@ -827,15 +782,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rapidhash"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "164772177ee16e3b074e6019c63cd92cb3cecf38e8c40d097675958b86dd8084"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "redox_syscall"
 version = "0.5.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -891,12 +837,6 @@ dependencies = [
  "memchr",
  "regex-syntax 0.8.6",
 ]
-
-[[package]]
-name = "regex-lite"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "943f41321c63ef1c92fd763bfe054d2668f7f225a5c29f0105903dc2fc04ba30"
 
 [[package]]
 name = "regex-syntax"

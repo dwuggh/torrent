@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::core::error::{RuntimeError, RuntimeResult};
 use crate::core::ident::Ident;
 use cranelift_module::FuncId;
@@ -35,7 +33,7 @@ pub struct Function {
 pub enum FunctionType {
     #[no_trace]
     Subr(SubrFn),
-    Lambda(LambdaFn),
+    Lambda(Closure),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -50,11 +48,8 @@ pub unsafe fn cast_func_ptr(ptr: *const u8) -> FuncPtr {
     std::mem::transmute(ptr)
 }
 
-// TODO closures
 #[derive(Debug, Clone, Trace)]
-pub struct LambdaFn {
-    // Captured environment as a GC’d map of Value -> Value (key is typically a Symbol tagged as Value).
-    #[no_trace]
+pub struct Closure {
     pub captures: FxHashMap<Ident, Object>,
 }
 
@@ -70,7 +65,7 @@ pub struct FunctionSignature {
 }
 
 impl FunctionType {
-    pub fn as_closure_mut(&mut self) -> Option<&mut LambdaFn> {
+    pub fn as_closure_mut(&mut self) -> Option<&mut Closure> {
         if let FunctionType::Lambda(func) = self {
             Some(func)
         } else {
@@ -81,8 +76,8 @@ impl FunctionType {
 
 impl LispFunction {
     pub fn new_closure(func_id: FuncId) -> Self {
-        let closure = LambdaFn {
-            captures: HashMap::new(),
+        let closure = Closure {
+            captures: FxHashMap::default(),
         };
         let inner = Gc::new(Function {
             func_id,
@@ -109,6 +104,13 @@ impl LispFunction {
 
     pub fn get_func_type_mut(&self) -> &mut FunctionType {
         &mut self.0.get_mut().func_type
+    }
+
+    pub fn as_closure(&self) -> Option<&mut Closure> {
+        match &mut self.0.get_mut().func_type {
+            FunctionType::Lambda(closure) => Some(closure),
+            _ => None,
+        }
     }
 
     pub fn set_func_ptr(&self, func_ptr: *const u8) {

@@ -7,7 +7,6 @@ use cranelift_module::DataDescription;
 use cranelift_module::FuncId;
 use cranelift_module::Module;
 
-use super::scope::CompileScope;
 use crate::core::compiler::codegen::Codegen;
 use crate::core::compiler::BuiltinFnPlugin;
 use crate::core::env::Environment;
@@ -65,7 +64,7 @@ impl JIT {
         }
     }
 
-    pub fn compile_expr(&mut self, expr: &Expr, scope: &CompileScope) -> Result<*const u8> {
+    pub fn compile_expr(&mut self, expr: &Expr) -> Result<*const u8> {
         let mut fctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
         let mut codegen = Codegen::new_empty(
@@ -75,18 +74,16 @@ impl JIT {
             &mut fctx,
             &mut ctx,
         )?;
-        let scope = CompileScope::Global;
-
         let val = codegen.translate_expr(expr)?;
 
         let func_id = codegen.func_id;
-        codegen.finalize(val);
+        let (_, funcs) = codegen.finalize(val);
 
         self.module.define_function(func_id, &mut ctx)?;
         self.module.finalize_definitions()?;
         let f = self.module.get_finalized_function(func_id);
         self.module.clear_context(&mut ctx);
-        println!("compile done");
+        tracing::info!("compile done: {funcs:?}");
         Ok(f)
     }
 }

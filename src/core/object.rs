@@ -5,8 +5,8 @@ use crate::{
         cons::{Cons, LispCons},
         function::{Function, LispFunction},
         hashtable::{HashTable, LispHashTable},
+        indirect::Indirect,
         number::{Character, Float, Integer, LispCharacter, LispFloat, LispInteger},
-        parser::token::Token,
         string::{LispStr, Str},
         symbol::{LispSymbol, Symbol},
         tagged_ptr::{get_tag, TaggedObj},
@@ -109,6 +109,8 @@ pub enum LispType {
     Cons,
     Function,
     HashTable,
+
+    Indirect,
 }
 
 impl std::fmt::Display for LispType {
@@ -125,6 +127,7 @@ impl std::fmt::Display for LispType {
             LispType::Cons => "cons",
             LispType::Function => "function",
             LispType::HashTable => "hash-table",
+            LispType::Indirect => "Indirect",
         };
         write!(f, "{}", type_name)
     }
@@ -153,6 +156,7 @@ pub enum LispObject {
     Cons(LispCons),
     Function(LispFunction),
     HashTable(LispHashTable),
+    Indirect(Indirect),
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -208,6 +212,7 @@ impl Object {
             LispType::Cons => LispObject::Cons(LispCons::untag(self).unwrap()),
             LispType::Function => LispObject::Function(LispFunction::untag(self).unwrap()),
             LispType::HashTable => LispObject::HashTable(LispHashTable::untag(self).unwrap()),
+            LispType::Indirect => LispObject::Indirect(Indirect::untag(self).unwrap()),
         }
     }
 
@@ -235,6 +240,10 @@ impl Object {
                 }
                 LispType::HashTable => {
                     ObjectRef::HashTable(self.untagged_as_ref_unchecked::<LispHashTable>())
+                }
+                LispType::Indirect => {
+                    let inner_obj = self.untagged_as_ref_unchecked::<Indirect>();
+                    inner_obj.as_ref()
                 }
             }
         }
@@ -265,6 +274,10 @@ impl Object {
                 LispType::HashTable => {
                     ObjectMut::HashTable(self.untagged_as_mut_unchecked::<LispHashTable>())
                 }
+                LispType::Indirect => {
+                    let inner_obj = self.untagged_as_mut_unchecked::<Indirect>();
+                    inner_obj.as_mut()
+                }
             }
         }
     }
@@ -288,27 +301,28 @@ impl LispObject {
             LispObject::Cons(cons) => cons.tag(),
             LispObject::Function(function) => function.tag(),
             LispObject::HashTable(hash_table) => hash_table.tag(),
+            LispObject::Indirect(indirect) => indirect.tag(),
         }
     }
 }
 
-impl<'a> ObjectRef<'a> {
-    pub fn tag(&self) -> LispType {
-        match self {
-            ObjectRef::Nil => LispType::Nil,
-            ObjectRef::True => LispType::True,
-            ObjectRef::Int(_) => LispType::Int,
-            ObjectRef::Float(_) => LispType::Float,
-            ObjectRef::Character(_) => LispType::Character,
-            ObjectRef::Symbol(_) => LispType::Symbol,
-            ObjectRef::Str(_) => LispType::Str,
-            ObjectRef::Vector(_) => LispType::Vector,
-            ObjectRef::Cons(_) => LispType::Cons,
-            ObjectRef::Function(_) => LispType::Function,
-            ObjectRef::HashTable(_) => LispType::HashTable,
-        }
-    }
-}
+// impl<'a> ObjectRef<'a> {
+//     pub fn tag(&self) -> LispType {
+//         match self {
+//             ObjectRef::Nil => LispType::Nil,
+//             ObjectRef::True => LispType::True,
+//             ObjectRef::Int(_) => LispType::Int,
+//             ObjectRef::Float(_) => LispType::Float,
+//             ObjectRef::Character(_) => LispType::Character,
+//             ObjectRef::Symbol(_) => LispType::Symbol,
+//             ObjectRef::Str(_) => LispType::Str,
+//             ObjectRef::Vector(_) => LispType::Vector,
+//             ObjectRef::Cons(_) => LispType::Cons,
+//             ObjectRef::Function(_) => LispType::Function,
+//             ObjectRef::HashTable(_) => LispType::HashTable,
+//         }
+//     }
+// }
 
 macro_rules! impl_try_from_for_object {
     ($name:ident, $lispname:ident) => {
@@ -343,6 +357,7 @@ macro_rules! impl_try_from_for_primitive {
             type Error = &'static str;
 
             fn try_from(object: &Object) -> Result<Self, Self::Error> {
+                tracing::debug!("try from: {:.x}", object.0);
                 match object.untagged_as_ref::<$lispname>() {
                     Some(obj) => Ok(obj),
                     None => Err("wrong type"),

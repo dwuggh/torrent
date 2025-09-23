@@ -28,12 +28,14 @@ where
         let vecref = refexpr.clone().repeated().collect::<Vec<_>>().boxed();
         let boxref = expr.clone().map(new_box);
 
+        let comments = just(Token::Comment).ignored().repeated();
+
         let ident = any::<I, Extra>().try_map(|node, span| match node {
             Token::Ident(ident) => Ok(ident),
             _ => Err(Rich::custom(span, "Expected identifier")),
         });
         let ident_interned = ident.map(|ident| Ident::from(ident));
-
+        let arg = ident_interned.clone().map(Arg::new_uncap);
         let keyword = |kw: &str| just(Token::Ident(kw.into())).ignored();
 
         let nil = keyword("nil")
@@ -85,8 +87,8 @@ where
         // let
         let bindings = sexp(
             choice((
-                sexp(ident_interned.then(refexpr.clone().map(Option::Some))).boxed(),
-                ident_interned.map(|ident| (ident, None)),
+                sexp(arg.then(refexpr.clone().map(Option::Some))).boxed(),
+                arg.map(|ident| (ident, None)),
             ))
             .repeated()
             .collect::<Vec<_>>()
@@ -135,6 +137,7 @@ where
                     Ok(Ident::from(ident))
                 }
             })
+            .map(Arg::new_uncap)
             .boxed();
         let optional_arg = keyword("&optional")
             .ignore_then(normal_arg.clone())
@@ -471,7 +474,7 @@ where
             }),
         ));
 
-        choice((nil, literal_expr, symbol_expr, vector, special_form, call))
+        choice((nil, literal_expr, symbol_expr, vector, special_form, call)).padded_by(comments)
     })
 }
 
@@ -587,8 +590,8 @@ mod tests {
             ExprType::SpecialForm(SpecialForm::Let(let_expr)) => {
                 // Verify bindings
                 assert_eq!(let_expr.bindings.len(), 1);
-                let (ident, value) = &let_expr.bindings[0];
-                assert_eq!(ident.text(), "x");
+                let (arg, value) = &let_expr.bindings[0];
+                assert_eq!(arg.ident.text(), "x");
 
                 match &*value.as_ref().unwrap().ty() {
                     ExprType::Literal(Literal::Number(Number::Integer(LispInteger(42)))) => {}
@@ -618,8 +621,8 @@ mod tests {
             ExprType::SpecialForm(SpecialForm::Let(ref let_expr)) => {
                 // Verify bindings
                 assert_eq!(let_expr.bindings.len(), 1);
-                let (ident, value) = &let_expr.bindings[0];
-                assert_eq!(ident.text(), "x");
+                let (arg, value) = &let_expr.bindings[0];
+                assert_eq!(arg.ident.text(), "x");
                 assert!(value.is_none(), "Expected no initial value");
             }
             _ => panic!("Expected let expression"),
@@ -657,7 +660,7 @@ mod tests {
             ExprType::SpecialForm(SpecialForm::Lambda(lambda)) => {
                 let normal = lambda.args.normal.len();
                 let optional = lambda.args.optional.as_ref().unwrap();
-                let rest = lambda.args.rest;
+                let rest = lambda.args.rest.clone();
                 assert_eq!(normal, 2);
                 assert_eq!(optional.len(), 2);
                 assert!(rest.is_some());

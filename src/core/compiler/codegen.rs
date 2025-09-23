@@ -350,10 +350,12 @@ impl<'a> Codegen<'a> {
                             let value = self.builder.use_var(variable);
                             Ok(value)
                         } else {
-                            Err(CodegenError::UndefinedVariable(ident.text().to_string()))
+                            Err(CodegenError::SymbolNotFound(ident.into()))
                         }
                     }
-                    Var::Unresolved(_) => unreachable!("Unresolved variable should not reach codegen")
+                    Var::Unresolved(_) => {
+                        unreachable!("Unresolved variable should not reach codegen")
+                    }
                 }
             }
             ExprType::Literal(literal) => self.translate_literal(literal),
@@ -670,7 +672,6 @@ impl<'a> Codegen<'a> {
         let result = codegen.translate_exprs(&lambda.body.body)?;
 
         let func_id = codegen.func_id;
-        // TODO make sure this is still valid after storing func_ptr
         let (result, unresolved) = codegen.finalize(result);
 
         tracing::debug!("Defining lambda function with id: {:?}", func_id);
@@ -698,7 +699,7 @@ impl<'a> Codegen<'a> {
     fn translate_let_expr<'s>(&mut self, let_expr: &Let) -> CodegenResult<Value> {
         // Remember the current locals count to restore later
         let locals_before = self.locals.len();
-        
+
         // Evaluate values in parent scope and create new variables
         let mut new_vars = Vec::new();
         for (arg, value_expr) in &*let_expr.bindings {
@@ -711,17 +712,17 @@ impl<'a> Codegen<'a> {
 
             // Create the variable and add to locals
             let var = self.builder.declare_var(types::I64);
-            
+
             // Check value's type, if it is Indirect, then directly load it.
             // If arg is shared and value is not Indirect, make it indirect.
             if arg.is_shared() {
                 value = self.call_internal("create_indirect_object", &[value])[0];
             }
-            
+
             self.builder.def_var(var, value);
             new_vars.push((arg.clone(), var));
         }
-        
+
         // Add all new variables to locals after all values are evaluated
         self.locals.extend(new_vars);
 

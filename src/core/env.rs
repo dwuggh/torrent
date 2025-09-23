@@ -1,17 +1,33 @@
-use rustc_hash::FxBuildHasher;
+use std::sync::{Arc, Mutex};
 
-use crate::core::{
-    error::{RuntimeError, RuntimeResult},
-    ident::{self, Ident},
-    object::{Object, ObjectRef},
-    symbol::{Symbol, SymbolCell, SymbolMap},
+use proc_macros::Trace;
+use rustc_hash::{FxBuildHasher, FxHashMap};
+
+use crate::{
+    core::{
+        error::{RuntimeError, RuntimeResult},
+        ident::Ident,
+        object::{Object, ObjectRef},
+        symbol::{Symbol, SymbolCell, SymbolMap},
+    },
+    gc::Gc,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq, Trace)]
+pub struct Bind {
+    #[no_trace]
+    pub ident: Ident,
+    pub value: Object,
+}
 
 #[derive(Debug, Default)]
 pub struct Environment {
     /// the obarray
     // TODO should this be GC'd? or make SymbolCell GC
     pub symbol_map: SymbolMap,
+
+    pub stack: Gc<Vec<Bind>>,
+
     pub stack_map: StackMap,
 }
 
@@ -40,6 +56,10 @@ impl FuncCellType {
 }
 
 impl Environment {
+    /// load symbol's value from the global symbol table. Neglect the stacked lexical values.
+    /// this can be used to load function cells, as they are always global;
+    /// or as the fallback for dynamic binding symbols, i.e. special symbol that created
+    /// with `defvar` or `defconst`.
     pub fn load_symbol_with<F, T>(
         &self,
         symbol: Symbol,
@@ -90,6 +110,53 @@ impl Environment {
 
     pub fn pop_stackmap(&self, obj: &Object) {
         self.stack_map.pop(obj);
+    }
+
+    pub fn push_stack(&self, var: Bind) {
+        self.stack.get_mut().push(var);
+    }
+
+    pub fn pop_stack(&self) {
+        self.stack.get_mut().pop();
+    }
+
+    pub fn is_special(&self, symbol: Symbol) -> bool {
+        self.symbol_map
+            .get_symbol_cell(symbol)
+            .map(|cell| cell.data().special)
+            .unwrap_or(false)
+    }
+
+    pub fn load_symbol_value_with<T, F: FnOnce(&Object) -> RuntimeResult<T>>(
+        &self,
+        symbol: Symbol,
+        job: F,
+    ) -> RuntimeResult<T> {
+        let is_special = self.is_special(symbol);
+        if is_special {
+            self.find_in_stack_with(symbol, job)
+        } else {
+            self.load_symbol_with(symbol, None, job)
+        }
+    }
+
+    /// find a symbol value in stack
+    fn find_in_stack_with<T, F: FnOnce(&Object) -> RuntimeResult<T>>(
+        &self,
+        symbol: Symbol,
+        job: F,
+    ) -> RuntimeResult<T> {
+        let stack = self.stack.get();
+        let mut i = stack.len();
+        let ident = symbol.ident();
+        while i > 0 {
+            i = i - 1;
+            let val = &stack[i];
+            if val.ident == ident {
+                return job(&val.value);
+            }
+        }
+        self.load_symbol_with(symbol, None, job)
     }
 }
 
