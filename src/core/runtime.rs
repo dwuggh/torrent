@@ -4,11 +4,11 @@ use crate::{
         cons::LispCons,
         env::FuncCellType,
         error::{RuntimeError, RuntimeResult},
-        function::{FuncPtr, Function, FunctionType},
+        function::{Function, FunctionType},
         ident::Ident,
         indirect::Indirect,
         number::LispInteger,
-        object::{nil, tru, LispObject, LispType, Object, ObjectRef},
+        object::{nil, tru, LispObject, Object, ObjectRef},
         symbol::{LispSymbol, Symbol},
         tagged_ptr::TaggedObj,
     },
@@ -18,12 +18,6 @@ type Result<T> = RuntimeResult<T>;
 use proc_macros::{defun, internal_fn};
 
 use crate::runtime_error;
-
-// for runtime functions, we need to pay special attention to its ref counting:
-// 1. in FFI, return is always i64. FFI will never change GC state. all GC resource management happens inside safe rust, and will be managed automatically by rust's rules.
-// 2. in rust functions, ref counting is always automatically managed.
-// 3. one should always use `LispValueRef` and `LispValueMut` for function arguments, as the macro will auto-transform a value to it, so we will not have to worry about ownership.
-// 4. returning a Value is trivial, returning a `LispValueRef` or its inner types is disallowed because there's no way to determine its value for it. instead, one should use `ValueRef`, which contains a backref to the value, for this propose.
 
 #[defun(name = "-")]
 fn minus(left: Object, right: Object) -> Result<Object> {
@@ -74,6 +68,7 @@ fn apply(func: &Function, args: &[Object], env: &Environment) -> Result<Object> 
 #[defun]
 fn funcall(func: &Object, args: &[Object], env: &Environment) -> Result<Object> {
     tracing::debug!("calling funcall: {func:?} {:?}", args);
+
     match func.as_ref() {
         ObjectRef::Symbol(sym) => {
             env.load_symbol_with(sym, Some(FuncCellType::Function), |obj| {
@@ -149,11 +144,8 @@ fn load_symbol_value(symbol: Symbol, load_function_cell: u64, env: &Environment)
         symbol.name()
     );
     let load_ptr = |obj: &Object| Ok(obj.0 as i64);
-    if load_function_cell == 1 {
-        env.load_symbol_with(symbol, Some(FuncCellType::Function), load_ptr)
-    } else {
-        env.load_symbol_value_with(symbol, load_ptr)
-    }
+    let ty = FuncCellType::from_num(load_function_cell);
+    env.load_symbol_with(symbol, ty, load_ptr)
 }
 
 #[internal_fn]
@@ -175,6 +167,45 @@ fn get_func_ptr(func: &Object, env: &Environment) -> Result<i64> {
 }
 
 #[internal_fn]
+fn check_function_args(func: &Function, argc: usize) -> i64 {
+    let (is_valid, _total_args, trampoline) = func.check_args(argc);
+    if !is_valid {
+        return -1;
+    }
+
+    if trampoline {
+        0xffff
+    } else {
+        argc as i64
+    }
+}
+
+#[internal_fn]
+fn signal_wrong_number_of_args(func: &Function, argc: usize) -> Result<Object> {
+    // Get the function signature to determine expected argument count
+    let signature = &func.signature;
+    let min_args = signature.normal as usize;
+    let max_args = if signature.rest {
+        usize::MAX
+    } else {
+        (signature.normal + signature.optional) as usize
+    };
+
+    let expected_msg = if signature.rest {
+        min_args
+    } else if signature.optional > 0 {
+        max_args
+    } else {
+        min_args
+    };
+
+    runtime_bail!(WrongNumberOfArgs,
+        expected: expected_msg,
+        actual: argc
+    );
+}
+
+#[internal_fn]
 fn create_indirect_object(obj: Object) -> Object {
     tracing::debug!("calling create_indirect_object");
     // if obj.get_tag() == LispType::Indirect {
@@ -184,7 +215,41 @@ fn create_indirect_object(obj: Object) -> Object {
     LispObject::Indirect(Indirect::new(obj)).tag()
 }
 
-fn get_func_ptr_from_function(func: &Function, env: &Environment) -> Result<FuncPtr> {
-    func.func_ptr
+#[internal_fn]
+fn bind_special(symbol: Symbol, value: Object, env: &Environment) -> Result<()> {
+    if env.is_special(symbol) {
+        env.push_special_symbol(symbol, value)?;
+    }
+    Ok(())
+}
+
+#[internal_fn]
+fn mark_bind(env: &Environment) {
+    // println!("mark bind");
+    env.push_spec_stack(super::env::SpecStackItem::LexicalMark);
+}
+
+#[internal_fn]
+fn unbind_special(env: &Environment) -> Result<()> {
+    env.pop_lexical()
+}
+
+#[internal_fn]
+fn collect_rest_args(arg_ptr: i64, argc: i64) -> Object {
+    let argc: usize = argc as usize;
+    let arg_ptr = arg_ptr as *const i64;
+    let args = unsafe { std::slice::from_raw_parts(arg_ptr, argc) };
+    let iter = args.into_iter().map(|val| Object(*val as u64));
+    let cons = LispCons::from_iter(iter).unwrap().tag();
+    cons
+}
+
+#[internal_fn]
+fn is_special(symbol: Symbol, env: &Environment) -> i64 {
+    env.is_special(symbol) as i64
+}
+
+fn get_func_ptr_from_function(func: &Function, env: &Environment) -> Result<*const u8> {
+    func.get_func_ptr()
         .ok_or_else(|| RuntimeError::internal_error("failed to get function pointer"))
 }

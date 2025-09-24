@@ -11,24 +11,43 @@ unsafe impl Sync for FPtr {}
 pub(crate) struct BuiltinFnPlugin {
     decl_subr: DeclSubr,
     decl_jit_sym: DeclJITSym,
-    pub lisp_subr: bool,
     pub ptr: FPtr,
-    // pub signature: FunctionSignature,
+    pub signature: crate::core::function::FunctionSignature,
+}
+
+pub(crate) struct InternalFnPlugin {
+    decl_subr: DeclSubr,
+    decl_jit_sym: DeclJITSym,
+    pub ptr: FPtr,
 }
 
 inventory::collect!(BuiltinFnPlugin);
+inventory::collect!(InternalFnPlugin);
 
 impl BuiltinFnPlugin {
     pub(crate) const fn new(
         decl_subr: DeclSubr,
         decl_jit_sym: DeclJITSym,
-        lisp_subr: bool,
         ptr: *const u8,
+        signature: crate::core::function::FunctionSignature,
     ) -> Self {
         Self {
             decl_subr,
             decl_jit_sym,
-            lisp_subr,
+            ptr: FPtr(ptr),
+            signature,
+        }
+    }
+    pub fn ptr(&self) -> *const u8 {
+        self.ptr.0
+    }
+}
+
+impl InternalFnPlugin {
+    pub(crate) const fn new(decl_subr: DeclSubr, decl_jit_sym: DeclJITSym, ptr: *const u8) -> Self {
+        Self {
+            decl_subr,
+            decl_jit_sym,
             ptr: FPtr(ptr),
         }
     }
@@ -41,5 +60,5 @@ mod codegen;
 pub mod error;
 pub mod jit;
 pub mod macro_item;
-pub mod optimization;
+// pub mod optimization;
 // pub mod scope;

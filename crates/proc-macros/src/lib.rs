@@ -10,7 +10,6 @@ use syn::{
 mod defun;
 mod defun_internal;
 mod function;
-mod variantly;
 
 #[proc_macro_attribute]
 pub fn defun(attr_ts: TokenStream, fn_ts: TokenStream) -> TokenStream {

@@ -1,10 +1,13 @@
 #![allow(clippy::manual_unwrap_or_default)]
+use std::panic;
+
 use darling::FromMeta;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::function::{
-    Arg, ArgKind, Function, RetKind, construct_objectref, construct_return, construct_return_nodrop,
+    Arg, ArgKind, Function, RetKind, calculate_signature, construct_return,
+    construct_return_nodrop,
 };
 
 pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
@@ -16,22 +19,26 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let rust_wrapper_name = format_ident!("__rust_wrapper_{}", &subr_name);
 
     let args = function.args;
-    // let arg_conversion = get_arg_conversion(&args);
-    let (arg_conversion, arg_finish) = get_args(&args);
 
-    let is_lisp_subr = spec.is_lisp_subr && function.is_lisp_subr;
+    let (use_trampoline, arg_conversion, arg_finish) = get_args(&args);
 
     // Generate the extern "C" function signature
-    let c_params = vec![
-        quote! { args_ptr: i64 },
-        quote! { args_cnt: i64 },
-        quote! { env: i64 },
-    ];
-    let c_param_idents = vec![
-        format_ident!("args_ptr"),
-        format_ident!("args_cnt"),
-        format_ident!("env"),
-    ];
+    let (c_params, c_param_idents) = if !use_trampoline {
+        get_direct_c_signature(&args)
+    } else {
+        (
+            vec![
+                quote! { args_ptr: i64 },
+                quote! { args_cnt: i64 },
+                quote! { env: i64 },
+            ],
+            vec![
+                format_ident!("args_ptr"),
+                format_ident!("args_cnt"),
+                format_ident!("env"),
+            ],
+        )
+    };
 
     // Generate the actual function call
     let call_args = args.iter().map(|arg| {
@@ -122,19 +129,23 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         }
     };
 
-    let signatures = vec![
-        quote! {
-            sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // args_ptr
-        },
-        quote! {
-            sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // args_cnt
-        },
-        quote! {
-            sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // env
-        },
-    ];
+    let signatures = if !use_trampoline {
+        get_direct_signatures(&args)
+    } else {
+        vec![
+            quote! {
+                sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // args_ptr
+            },
+            quote! {
+                sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // args_cnt
+            },
+            quote! {
+                sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // env
+            },
+        ]
+    };
 
-    let inventory = inventory_submit(&subr_name, &lisp_name, is_lisp_subr, signatures);
+    let inventory = inventory_submit(&subr_name, &lisp_name, signatures, &args);
 
     quote! {
 
@@ -149,7 +160,6 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
             if cfg!(debug_assertions) {
                 tracing::trace!("[DEBUG] Calling defun function: {}", #lisp_name);
             }
-            let args_cnt_u: usize = args_cnt as usize;
             #(#arg_conversion)*
             let result = #subr(#(#call_args),*);
             if cfg!(debug_assertions) {
@@ -167,26 +177,77 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     }
 }
 
-fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
-    let mut required_args: usize = 0;
-    let mut _option_args: usize = 0;
-    let mut has_slice = false;
+fn get_direct_c_signature(args: &[Arg]) -> (Vec<TokenStream>, Vec<proc_macro2::Ident>) {
+    let mut c_params: Vec<TokenStream> = Vec::new();
+    let mut c_param_idents: Vec<proc_macro2::Ident> = Vec::new();
 
-    for (_i, arg) in args.iter().enumerate() {
-        match &arg.info.kind {
-            ArgKind::Slice(_) => {
-                has_slice = true;
-                break; // Slice must be last
+    for arg in args.iter() {
+        let arg_info = &arg.info;
+        let ident = &arg.ident;
+        match &arg_info.kind {
+            ArgKind::Env => {
+                // Skip - will be added at the end
             }
-            ArgKind::Option(_) => {
-                _option_args += 1;
-                // Optional arguments don't count toward required
+            ArgKind::Slice(_) => {
+                let ptr_ident = format_ident!("{}_ptr", ident);
+                let argc_ident = format_ident!("{}_argc", ident);
+                c_params.push(quote! { #ptr_ident: i64 });
+                c_params.push(quote! { #argc_ident: i64 });
+                c_param_idents.push(ptr_ident);
+                c_param_idents.push(argc_ident);
             }
             _ => {
-                required_args += 1;
+                c_params.push(quote! { #ident: i64 });
+                c_param_idents.push(ident.clone());
             }
         }
     }
+
+    // Always add env at the end
+    c_params.push(quote! { env: i64 });
+    c_param_idents.push(format_ident!("env"));
+
+    (c_params, c_param_idents)
+}
+
+fn get_direct_signatures(args: &[Arg]) -> Vec<TokenStream> {
+    let mut signatures: Vec<TokenStream> = Vec::new();
+
+    for arg in args.iter() {
+        match &arg.info.kind {
+            ArgKind::Env => {
+                // Skip - will be added at the end
+            }
+            ArgKind::Slice(_) => {
+                signatures.push(quote! {
+                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // slice_ptr
+                });
+                signatures.push(quote! {
+                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // slice_argc
+                });
+                // panic!("rest args must be trampolined")
+            }
+            _ => {
+                signatures.push(quote! {
+                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // param
+                });
+            }
+        }
+    }
+
+    // Always add env at the end
+    signatures.push(quote! {
+        sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // env
+    });
+
+    signatures
+}
+
+fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
+    let (normal, optional, rest) = calculate_signature(args);
+
+    // TODO can &rest also not use trampoline somehow?
+    let use_trampoline = rest || { normal + optional + (rest as u8 * 2) > 8 };
 
     let object = quote! { crate::core::object::Object };
     let nil = quote! {
@@ -196,36 +257,35 @@ fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
     let mut init_args: Vec<TokenStream> = Vec::new();
     let mut finish_args: Vec<TokenStream> = Vec::new();
 
-    // Add argument count validation
-    if has_slice {
+    if use_trampoline {
         init_args.push(quote! {
-            if args_cnt_u < #required_args {
-                return Err("insufficient number of arguments");
-            }
-        });
-    } else {
-        let max_args = args.len();
-        init_args.push(quote! {
-            if args_cnt_u < #required_args || args_cnt_u > #max_args {
-                return Err("incorrect number of arguments");
-            }
+            let args_cnt: usize = args_cnt as usize;
         });
     }
-    let init = quote! {
+
+    let env_init = quote! {
         let env = env as *const crate::core::env::Environment;
         let env = env.as_ref().ok_or("failed to convert env")?;
     };
-    init_args.push(init);
+    init_args.push(env_init);
 
     for (i, arg) in args.iter().enumerate() {
         let ident = &arg.ident;
         let arg_info = &arg.info;
-        let load_arg = quote! {
-            let arg_val = unsafe {
-                let ptr = args_ptr as *const i64;
-                ptr.add(#i).read()
-            };
+
+        let load_arg = if use_trampoline {
+            quote! {
+                let arg_val = unsafe {
+                    let ptr = args_ptr as *const i64;
+                    ptr.add(#i).read()
+                };
+            }
+        } else {
+            quote! {
+                    let arg_val = #ident;
+            }
         };
+
         let tmp = format_ident!("__arg_val_{}", i);
         match &arg_info.kind {
             ArgKind::Object => {
@@ -255,11 +315,16 @@ fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
                 init_args.push(init);
             }
             ArgKind::ObjectRef(ty) => {
-                let prog = construct_objectref(arg.info.is_mut, i, ident, ty);
+                let mut_val = if arg.info.is_mut {
+                    quote! {mut}
+                } else {
+                    quote! {}
+                };
                 let init = quote! {
                     #load_arg
-                    #prog
+                    let #tmp = #object(arg_val as u64);
                     env.stack_map.push(&#tmp);
+                    let #ident: &#mut_val #ty = (#tmp).try_into()?;
                 };
                 init_args.push(init);
                 let post = quote! {
@@ -311,51 +376,81 @@ fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
                 // Optional arguments - check if we have enough arguments
                 let option_conversion = match inner_kind.as_ref() {
                     ArgKind::Object => {
+                        let inner = quote! {
+                            #load_arg
+                            let #tmp = #object(arg_val as u64);
+                            env.stack_map.push(&#tmp);
+                            #tmp
+                        };
                         if arg_info.is_ref {
-                            quote! {
-                                let (#tmp, #ident) = if args_cnt_u > #i {
-                                    #load_arg
-                                    let val = #object(arg_val as u64);
-                                    env.stack_map.push(&val);
-                                    (val, Some(&#tmp))
-                                } else {
-                                    (#object(#nil as u64), None)
-                                };
+                            if use_trampoline {
+                                quote! {
+                                    let #tmp = (args_cnt > i).then(|| {
+                                        #inner
+                                    });
+                                    let #ident = #tmp.as_ref();
+                                }
+                            } else {
+                                quote! {
+                                    let #tmp = #object(#ident as u64);
+                                    env.stack_map.push(&#tmp);
+                                    let #ident = Some(&#tmp);
+                                }
                             }
                         } else {
-                            quote! {
-                                let #ident = if args_cnt_u > #i {
-                                    let val = #object(arg_val as u64);
-                                    env.stack_map.push(&val);
-                                    Some(val)
-                                } else {
-                                    None
-                                };
+                            if use_trampoline {
+                                quote! {
+                                    let #ident = (args_cnt > i).then(|| {
+                                        #inner
+                                    });
+                                }
+                            } else {
+                                quote! {
+                                    let #tmp = #object(#ident as u64);
+                                    env.stack_map.push(&#tmp);
+                                    let #ident = Some(#tmp);
+                                }
                             }
                         }
                     }
                     ArgKind::ObjectRef(ty) => {
-                        let tmp_cast = format_ident!("__arg_cast_{}", i);
-                        let ref_tok = if arg_info.is_mut {
-                            quote! { &mut #tmp_cast }
+                        let mut_val = if arg.info.is_mut {
+                            quote! {mut}
                         } else {
-                            quote! { &#tmp_cast }
+                            quote! {}
                         };
-                        let prog = construct_objectref(
-                            arg.info.is_mut,
-                            i,
-                            &format_ident!("converted"),
-                            ty,
-                        );
-                        quote! {
-                            let (#tmp_cast, #ident) = if args_cnt_u > #i {
-                                #load_arg
-                                #prog
-                                env.stack_map.push(&#tmp);
-                                (converted, Some(#ref_tok))
-                            } else {
-                                (Default::default(), None)
-                            };
+
+                        let inner = quote! {
+                            #load_arg
+                            let #tmp = #object(arg_val as u64);
+                            env.stack_map.push(&#tmp);
+                            #tmp
+                        };
+
+                        if use_trampoline {
+                            quote! {
+                                let #tmp = (args_cnt > i).then(|| {
+                                    #inner
+                                });
+                                let #ident = #tmp.as_ref().map(|val| {
+                                    let res: &#mut_val #ty = val.try_into();
+                                    res
+                                }).transpose()?;
+                            }
+                        } else {
+                            quote! {
+                                let #tmp = if #ident == #nil {
+                                    None
+                                } else {
+                                    let #tmp = #object(#ident as u64);
+                                    env.stack_map.push(&#tmp);
+                                    #tmp
+                                };
+                                let #ident = #tmp.as_ref().map(|val| {
+                                    let res: &#mut_val #ty = val.try_into();
+                                    res
+                                }).transpose()?;
+                            }
                         }
                     }
                     _ => {
@@ -367,13 +462,26 @@ fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
             }
             ArgKind::Slice(inner_kind) => {
                 // Slice arguments consume all remaining arguments
+                let ptr_ident = format_ident!("{}_ptr", ident);
+                let argc_ident = format_ident!("{}_argc", ident);
+                let prog = if use_trampoline {
+                    quote! {
+                        let ptr = args_ptr as *const #object;
+                        let slice_ptr = ptr.add(#i);
+                        let slice_len = args_cnt - #i;
+                        let slice_len = slice_len as usize;
+                    }
+                } else {
+                    quote! {
+                        let slice_ptr = #ptr_ident as *const #object;
+                        let silce_len = #argc_ident as usize;
+                    }
+                };
                 let slice_conversion = match inner_kind.as_ref() {
                     ArgKind::Object => {
                         quote! {
-                            let slice_len = args_cnt_u - #i;
                             let #ident = unsafe {
-                                let ptr = args_ptr as *const i64;
-                                let slice_ptr = ptr.add(#i);
+                                #prog
                                 std::slice::from_raw_parts(slice_ptr as *const #object, slice_len)
                             };
                             for arg in #ident.iter() {
@@ -382,7 +490,7 @@ fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
                         }
                     }
                     _ => {
-                        panic!("cannot convert: wrong arg type")
+                        panic!("cannot convert slice: wrong arg type")
                     }
                 };
                 init_args.push(slice_conversion);
@@ -400,7 +508,7 @@ fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
             }
         };
     }
-    (init_args, finish_args)
+    (use_trampoline, init_args, finish_args)
 }
 
 #[derive(Default, PartialEq, Debug, FromMeta)]
@@ -409,12 +517,6 @@ pub(crate) struct Spec {
     name: Option<String>,
     #[darling(default)]
     required: Option<u16>,
-    #[darling(default = "tru")]
-    is_lisp_subr: bool,
-}
-
-fn tru() -> bool {
-    true
 }
 
 fn map_function_name(name: &str) -> String {
@@ -424,14 +526,17 @@ fn map_function_name(name: &str) -> String {
 pub fn inventory_submit(
     subr_name: &str,
     lisp_name: &str,
-    is_lisp_subr: bool,
     signatures: Vec<TokenStream>,
+    args: &[crate::function::Arg],
 ) -> TokenStream {
     let subr_name = subr_name.to_string();
     let lisp_name = lisp_name.to_string();
     let func_name = format_ident!("__wrapper_fn_{}", &subr_name);
     let def_func_name = format_ident!("__def_{}", &subr_name);
     let register_func_name = format_ident!("__register_{}", &subr_name);
+
+    // Calculate signature
+    let (normal, optional, rest) = crate::function::calculate_signature(args);
 
     let mut return_sigs: Vec<TokenStream> = Vec::new();
     return_sigs.push(quote! {
@@ -459,7 +564,16 @@ pub fn inventory_submit(
 
         }
 
-        inventory::submit!(crate::core::compiler::BuiltinFnPlugin::new(#def_func_name, #register_func_name, #is_lisp_subr, #func_name as *const u8));
+        inventory::submit!(crate::core::compiler::BuiltinFnPlugin::new(
+            #def_func_name,
+            #register_func_name,
+            #func_name as *const u8,
+            crate::core::function::FunctionSignature {
+                normal: #normal,
+                optional: #optional,
+                rest: #rest,
+            }
+        ));
 
     }
 }

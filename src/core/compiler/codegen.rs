@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use cranelift::codegen::ir::{BlockCall, JumpTableData, TrapCode};
 use cranelift::codegen::Context;
 use cranelift::prelude::*;
 use cranelift_jit::JITModule;
@@ -9,6 +10,7 @@ use cranelift_module::Module;
 use rustc_hash::FxHashSet;
 
 use crate::core::compiler::error::{CodegenError, CodegenResult};
+use crate::core::function::FunctionSignature;
 use crate::core::function::LispFunction;
 use crate::core::ident::Ident;
 use crate::core::object::NIL;
@@ -29,6 +31,11 @@ pub struct UnresolvedClosure {
 pub enum Closure {
     Unresolved(UnresolvedClosure),
     Resolved(LispFunction),
+}
+
+enum IncomingArgs<'a> {
+    Trampoline { args_ptr: Value, args_cnt: Value },
+    Direct { args: &'a [Value] },
 }
 
 fn get_locals(locals: &Vec<(Arg, Variable)>, target: &Arg) -> Option<Variable> {
@@ -123,7 +130,7 @@ impl<'a> Codegen<'a> {
 
         let env = block_params[0];
 
-        let func = LispFunction::new_closure(func_id);
+        let func = LispFunction::new_closure(func_id, FunctionSignature::default());
         // let closure_val = translate_value(&mut builder, func_runtime_val);
 
         let codegen = Self {
@@ -153,18 +160,34 @@ impl<'a> Codegen<'a> {
     ) -> CodegenResult<Self> {
         tracing::debug!("Creating new codegen with config: {:?}", lambda);
 
+        let argc = lambda.args.total();
+        let use_trampoline = lambda.args.use_trampoline();
+
         // make signature
         let sig = &mut ctx.func.signature;
-        // args_ptr: pointer to arguments array
-        sig.params.push(AbiParam::new(types::I64));
-        // args_cnt: number of arguments
-        sig.params.push(AbiParam::new(types::I64));
-        // env arg
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
+
+        // TODO move this as function for FunctionSignature
+
+        if lambda.args.use_trampoline() {
+            // args_ptr: pointer to arguments array
+            sig.params.push(AbiParam::new(types::I64));
+            // args_cnt: number of arguments
+            sig.params.push(AbiParam::new(types::I64));
+            // env arg
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+        } else {
+            for _ in 0..argc {
+                sig.params.push(AbiParam::new(types::I64));
+            }
+
+            // env arg
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+        }
 
         tracing::debug!(
-            "Function signature created with {} params, {} returns",
+            "Function signature created with {} params, {} returns(use trampoline: {use_trampoline})",
             sig.params.len(),
             sig.returns.len()
         );
@@ -180,14 +203,23 @@ impl<'a> Codegen<'a> {
         builder.seal_block(entry_block);
         // builder.block_params(entry_block);
 
-        let block_params = builder.block_params(entry_block);
+        let params = builder.block_params(entry_block).to_vec();
 
-        let args_ptr = block_params[0];
-        let args_cnt = block_params[1];
-        let env = block_params[2];
+        let env = if use_trampoline {
+            params
+                .get(2)
+                .copied()
+                .unwrap_or_else(|| panic!("expected env parameter for trampoline"))
+        } else {
+            params
+                .last()
+                .copied()
+                .unwrap_or_else(|| panic!("expected env parameter for direct call"))
+        };
 
         let locals = Vec::new();
-        let func = LispFunction::new_closure(func_id);
+        let signature = FunctionSignature::from_args(&lambda.args);
+        let func = LispFunction::new_closure(func_id, signature);
 
         let mut codegen = Self {
             module,
@@ -202,7 +234,15 @@ impl<'a> Codegen<'a> {
             captures: Default::default(),
         };
 
-        codegen.setup_locals(lambda, args_ptr, args_cnt);
+        if use_trampoline {
+            let args_ptr = params[0];
+            let args_cnt = params[1];
+            codegen.setup_locals(lambda, IncomingArgs::Trampoline { args_ptr, args_cnt })?;
+        } else {
+            let env_index = params.len().saturating_sub(1);
+            let direct_args = &params[..env_index];
+            codegen.setup_locals(lambda, IncomingArgs::Direct { args: direct_args })?;
+        }
 
         Ok(codegen)
     }
@@ -271,31 +311,143 @@ impl<'a> Codegen<'a> {
         results
     }
 
-    pub fn setup_locals(&mut self, lambda: &Lambda, args_ptr: Value, args_cnt: Value) {
+    fn bind_argument(&mut self, arg: &Arg, initial: Value) -> Value {
+        let var = self.builder.declare_var(types::I64);
+        self.locals.push((arg.clone(), var));
+
+        let value = if arg.is_shared() {
+            self.call_internal("create_indirect_object", &[initial])[0]
+        } else {
+            initial
+        };
+
+        self.builder.def_var(var, value);
+
+        let sym = Symbol::from(arg.ident);
+        let sym = self.translate_lispobj(&LispSymbol::from(sym));
+        self.call_internal("bind_special", &[sym, value, self.env]);
+
+        value
+    }
+
+    fn load_arg_from_ptr(&mut self, base: Value, index: usize) -> Value {
+        self.builder
+            .ins()
+            .load(types::I64, MemFlags::new(), base, (index * 8) as i32)
+    }
+
+    fn setup_locals(&mut self, lambda: &Lambda, incoming: IncomingArgs<'_>) -> CodegenResult<()> {
         let captures = lambda.captures.borrow();
         let args = &lambda.args;
 
-        // TODO setup args correctly
-        for (i, arg) in args.normal.iter().enumerate() {
-            let ident = arg.ident;
-            let var = self.builder.declare_var(types::I64);
-            self.locals.push((arg.clone(), var));
+        self.call_internal("mark_bind", &[self.env]);
 
-            tracing::debug!("Loading argument {} ({})", i, ident.text());
+        let optional_args = args
+            .optional
+            .as_ref()
+            .map(|vec| vec.as_slice())
+            .unwrap_or(&[]);
+        let normal_count = args.normal.len();
 
-            // TODO should load Gc<Object> or Object>
-            // Load argument from the arguments array
-            let mut val =
-                self.builder
-                    .ins()
-                    .load(types::I64, MemFlags::new(), args_ptr, (i * 8) as i32);
+        match incoming {
+            IncomingArgs::Trampoline { args_ptr, args_cnt } => {
+                for (i, arg) in args.normal.iter().enumerate() {
+                    let val = self.load_arg_from_ptr(args_ptr, i);
+                    self.bind_argument(arg, val);
+                }
 
-            if arg.is_shared() {
-                val = self.call_internal("create_indirect_object", &[val])[0];
+                for (offset, arg) in optional_args.iter().enumerate() {
+                    let idx = normal_count + offset;
+                    let idx_val = self.builder.ins().iconst(types::I64, idx as i64);
+                    let cond = self
+                        .builder
+                        .ins()
+                        .icmp(IntCC::SignedLessThan, idx_val, args_cnt);
+
+                    let present_block = self.builder.create_block();
+                    let absent_block = self.builder.create_block();
+                    let merge_block = self.builder.create_block();
+                    self.builder.append_block_param(merge_block, types::I64);
+
+                    self.builder
+                        .ins()
+                        .brif(cond, present_block, &[], absent_block, &[]);
+
+                    self.builder.switch_to_block(present_block);
+                    self.builder.seal_block(present_block);
+                    let val = self.load_arg_from_ptr(args_ptr, idx);
+                    self.builder.ins().jump(merge_block, &[val.into()]);
+
+                    self.builder.switch_to_block(absent_block);
+                    self.builder.seal_block(absent_block);
+                    let nil_val = self.nil();
+                    self.builder.ins().jump(merge_block, &[nil_val.into()]);
+
+                    self.builder.switch_to_block(merge_block);
+                    self.builder.seal_block(merge_block);
+                    let opt_val = self.builder.block_params(merge_block)[0];
+                    self.bind_argument(arg, opt_val);
+                }
+
+                if let Some(rest_arg) = args.rest.as_ref() {
+                    let rest_start = normal_count + optional_args.len();
+                    let start_val = self.builder.ins().iconst(types::I64, rest_start as i64);
+                    let cond = self
+                        .builder
+                        .ins()
+                        .icmp(IntCC::SignedLessThan, start_val, args_cnt);
+
+                    let present_block = self.builder.create_block();
+                    let absent_block = self.builder.create_block();
+                    let merge_block = self.builder.create_block();
+                    self.builder.append_block_param(merge_block, types::I64);
+
+                    self.builder
+                        .ins()
+                        .brif(cond, present_block, &[], absent_block, &[]);
+
+                    self.builder.switch_to_block(present_block);
+                    self.builder.seal_block(present_block);
+
+                    let rest_ptr = self.builder.ins().iadd(args_ptr, start_val);
+                    let rest_cnt = self.builder.ins().isub(args_cnt, start_val);
+                    let rest_val =
+                        self.call_internal("collect_rest_args", &[rest_ptr, rest_cnt])[0];
+                    self.builder.ins().jump(merge_block, &[rest_val.into()]);
+
+                    self.builder.switch_to_block(absent_block);
+                    self.builder.seal_block(absent_block);
+                    let nil_val = self.nil();
+                    self.builder.ins().jump(merge_block, &[nil_val.into()]);
+
+                    self.builder.switch_to_block(merge_block);
+                    self.builder.seal_block(merge_block);
+                    let rest_value = self.builder.block_params(merge_block)[0];
+                    self.bind_argument(rest_arg, rest_value);
+                }
             }
+            IncomingArgs::Direct { args: values } => {
+                for (i, arg) in args.normal.iter().enumerate() {
+                    let val = values
+                        .get(i)
+                        .copied()
+                        .ok_or(CodegenError::InvalidArgFormat)?;
+                    self.bind_argument(arg, val);
+                }
 
-            self.builder.def_var(var, val);
+                for (offset, arg) in optional_args.iter().enumerate() {
+                    let idx = normal_count + offset;
+                    let val = values.get(idx).copied().unwrap_or_else(|| self.nil());
+                    self.bind_argument(arg, val);
+                }
+
+                if let Some(_) = args.rest.as_ref() {
+                    // TODO should return CodegenError here?
+                    self.builder.ins().trap(TrapCode::user(2).unwrap());
+                }
+            }
         }
+
         // actual value of captures are loaded afterwards
         for capture in captures.iter() {
             let var = self.builder.declare_var(types::I64);
@@ -303,6 +455,8 @@ impl<'a> Codegen<'a> {
             let arg = Arg::new_uncap(ident);
             self.locals.push((arg, var));
         }
+
+        Ok(())
     }
 
     pub fn load_symbol<'s>(
@@ -384,52 +538,193 @@ impl<'a> Codegen<'a> {
             "Translating function call with {} arguments",
             call.args.len()
         );
-        // match *call.func {
-        //     Expr::Symbol(ident) => {
-        //         match ident.text() {
-        //             "+" => {
-        //                 let l = &call.args[0];
-        //                 let r = &call.args[1];
-        //                 let l = self.translate_expr(l, false)?;
-        //                 let r = self.translate_expr(r, false)?;
-        //                 let res = self.builder.ins().iadd(l, r);
-        //                 return Ok(res);
-        //             }
-        //             "-" => {
-        //                 let l = &call.args[0];
-        //                 let r = &call.args[1];
-        //                 let l = self.translate_expr(l, false)?;
-        //                 let r = self.translate_expr(r, false)?;
-        //                 let res = self.builder.ins().isub(l, r);
-        //                 return Ok(res);
-        //             }
-        //             "<" => {
-        //                 let l = &call.args[0];
-        //                 let r = &call.args[1];
-        //                 let l = self.translate_expr(l, false)?;
-        //                 let r = self.translate_expr(r, false)?;
-        //                 let res = self.builder.ins().icmp(IntCC::SignedLessThan, l, r);
-        //                 return Ok(res);
-        //             }
-        //             _ => ()
-        //         }
-        //     }
-        //     _ => ()
-        // };
 
         let func = self.load_symbol(call.symbol.get().into(), true)?;
-        // let func = self.translate_expr(call.symbol, true)?;
         let args = self.translate_arg_exprs(&call.args)?;
         let argc = args.len();
+        let argc_val = self.builder.ins().iconst(types::I64, argc as i64);
 
-        tracing::debug!("Creating stack slot for {} arguments", args.len());
+        // Check function arguments and get dispatch info
+        let dispatch_info = self.call_internal("check_function_args", &[func, argc_val])[0];
+
+        // Create blocks for different dispatch paths
+        let error_block = self.builder.create_block();
+        let call_block = self.builder.create_block();
+        let merge_block = self.builder.create_block();
+        self.builder.append_block_param(merge_block, types::I64);
+
+        // Check for error (-1)
+        let minus_one = self.builder.ins().iconst(types::I64, -1);
+        let is_error = self
+            .builder
+            .ins()
+            .icmp(IntCC::Equal, dispatch_info, minus_one);
+
+        self.builder
+            .ins()
+            .brif(is_error, error_block, &[], call_block, &[]);
+
+        // Error block - invalid argument count
+        self.builder.switch_to_block(error_block);
+        self.builder.seal_block(error_block);
+        let error_result = self.call_internal("signal_wrong_number_of_args", &[func, argc_val])[0];
+        self.builder.ins().jump(merge_block, &[error_result.into()]);
+
+        // Call block - determine call type and execute
+        self.builder.switch_to_block(call_block);
+        self.builder.seal_block(call_block);
+
+        // Check if we should use trampoline (0xffff) or direct call
+        let trampoline_marker = self.builder.ins().iconst(types::I64, 0xffff);
+        let is_trampoline = self
+            .builder
+            .ins()
+            .icmp(IntCC::Equal, dispatch_info, trampoline_marker);
+
+        let trampoline_block = self.builder.create_block();
+        let direct_block = self.builder.create_block();
+
+        self.builder
+            .ins()
+            .brif(is_trampoline, trampoline_block, &[], direct_block, &[]);
+
+        // Trampoline call block
+        self.builder.switch_to_block(trampoline_block);
+        self.builder.seal_block(trampoline_block);
+        let trampoline_result = self.generate_trampoline_call(&args, func)?;
+        self.builder
+            .ins()
+            .jump(merge_block, &[trampoline_result.into()]);
+
+        // Direct call block
+        self.builder.switch_to_block(direct_block);
+        self.builder.seal_block(direct_block);
+        let direct_result = self.generate_direct_call(&args, func, dispatch_info)?;
+        self.builder
+            .ins()
+            .jump(merge_block, &[direct_result.into()]);
+
+        // Merge block
+        self.builder.switch_to_block(merge_block);
+        self.builder.seal_block(merge_block);
+        let result = self.builder.block_params(merge_block)[0];
+
+        tracing::debug!("Function call completed successfully");
+        Ok(result)
+    }
+
+    fn generate_direct_call(
+        &mut self,
+        args: &[Value],
+        func: Value,
+        dispatch_info: Value,
+    ) -> CodegenResult<Value> {
+        tracing::debug!(
+            "Generating direct call with {} provided arguments",
+            args.len()
+        );
+
+        // Resolve the function pointer once and reuse via an SSA var.
+        let func_ptr = self.call_internal("get_func_ptr", &[func, self.env])[0];
+        let func_ptr_var = self.builder.declare_var(types::I64);
+        self.builder.def_var(func_ptr_var, func_ptr);
+
+        // Prepare jump-table targets for argument counts 0..=8.
+        let mut blocks = Vec::with_capacity(9);
+        let mut block_calls = Vec::with_capacity(9);
+        for _ in 0..=8 {
+            let block = self.builder.create_block();
+            let block_call = BlockCall::new(block, [], &mut self.builder.func.dfg.value_lists);
+            block_calls.push(block_call);
+
+            blocks.push(block);
+        }
+
+        let merge_block = self.builder.create_block();
+        self.builder.append_block_param(merge_block, types::I64);
+
+        let default_block = self.builder.create_block();
+        let default_block_call =
+            BlockCall::new(default_block, [], &mut self.builder.func.dfg.value_lists);
+        let jump_table_data = JumpTableData::new(default_block_call, &block_calls);
+
+        // Jump-table indices are limited to i32 in Cranelift.
+        let dispatch_index = self.builder.ins().ireduce(types::I32, dispatch_info);
+        let jump_table = self.builder.create_jump_table(jump_table_data);
+        self.builder.ins().br_table(dispatch_index, jump_table);
+
+        // Macro to generate call blocks with specific argument counts
+        macro_rules! generate_call_block {
+            ($block:expr, $argc:expr) => {{
+                self.builder.switch_to_block($block);
+                self.builder.seal_block($block);
+
+                let mut sig = self.module.make_signature();
+                for _ in 0..$argc {
+                    sig.params.push(AbiParam::new(types::I64));
+                }
+                sig.params.push(AbiParam::new(types::I64)); // env
+                sig.returns.push(AbiParam::new(types::I64));
+
+                let sig_ref = self.builder.import_signature(sig);
+                let func_ptr = self.builder.use_var(func_ptr_var);
+
+                let mut call_args = Vec::with_capacity($argc + 1);
+                let actual_len = args.len();
+                for idx in 0..$argc {
+                    let val = if idx < actual_len {
+                        args[idx]
+                    } else {
+                        self.nil()
+                    };
+                    call_args.push(val);
+                }
+                call_args.push(self.env);
+
+                let inst = self
+                    .builder
+                    .ins()
+                    .call_indirect(sig_ref, func_ptr, &call_args);
+                let result = self.builder.inst_results(inst)[0];
+
+                self.builder.ins().jump(merge_block, &[result.into()]);
+            }};
+        }
+
+        generate_call_block!(blocks[0], 0);
+        generate_call_block!(blocks[1], 1);
+        generate_call_block!(blocks[2], 2);
+        generate_call_block!(blocks[3], 3);
+        generate_call_block!(blocks[4], 4);
+        generate_call_block!(blocks[5], 5);
+        generate_call_block!(blocks[6], 6);
+        generate_call_block!(blocks[7], 7);
+        generate_call_block!(blocks[8], 8);
+
+        self.builder.switch_to_block(default_block);
+        self.builder.seal_block(default_block);
+        self.builder.ins().trap(TrapCode::user(1).unwrap());
+
+        self.builder.switch_to_block(merge_block);
+        self.builder.seal_block(merge_block);
+        let result = self.builder.block_params(merge_block)[0];
+
+        Ok(result)
+    }
+
+    fn generate_trampoline_call(&mut self, args: &[Value], func: Value) -> CodegenResult<Value> {
+        tracing::debug!("Generating trampoline call with {} arguments", args.len());
+
+        let argc = args.len();
+
+        // Create stack slot for arguments
         let slot = self.builder.create_sized_stack_slot(StackSlotData {
             kind: StackSlotKind::ExplicitSlot,
             size: 8 * argc as u32,
             align_shift: 0,
         });
 
-        // self.builder.ins().stack_store(func, slot, 0);
+        // Store arguments to stack
         for (i, val) in args.iter().enumerate() {
             tracing::debug!("Storing argument {} to stack", i);
             self.builder.ins().stack_store(*val, slot, i as i32 * 8);
@@ -438,22 +733,23 @@ impl<'a> Codegen<'a> {
         let args_ptr = self.builder.ins().stack_addr(types::I64, slot, 0);
         let args_cnt = self.builder.ins().iconst(types::I64, argc as i64);
 
-        // tracing::debug!("Calling apply function");
-        // let res = self.call_internal("apply", &[func, args_ptr, args_cnt, self.env])[0];
+        // Create trampoline signature (args_ptr, args_cnt, env)
         let mut sig = self.module.make_signature();
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64)); // args_ptr
+        sig.params.push(AbiParam::new(types::I64)); // args_cnt
+        sig.params.push(AbiParam::new(types::I64)); // env
         sig.returns.push(AbiParam::new(types::I64));
+
         let sig_ref = self.builder.import_signature(sig);
         let func_ptr = self.call_internal("get_func_ptr", &[func, self.env])[0];
+
         let inst =
             self.builder
                 .ins()
                 .call_indirect(sig_ref, func_ptr, &[args_ptr, args_cnt, self.env]);
-        let res = self.builder.inst_results(inst)[0];
-        tracing::debug!("Apply function returned successfully");
-        Ok(res)
+        let result = self.builder.inst_results(inst)[0];
+
+        Ok(result)
     }
 
     fn translate_special_form<'s>(&mut self, special_form: &SpecialForm) -> CodegenResult<Value> {
@@ -670,6 +966,7 @@ impl<'a> Codegen<'a> {
         )?;
 
         let result = codegen.translate_exprs(&lambda.body.body)?;
+        codegen.call_internal("unbind_special", &[codegen.env]);
 
         let func_id = codegen.func_id;
         let (result, unresolved) = codegen.finalize(result);
@@ -702,6 +999,7 @@ impl<'a> Codegen<'a> {
 
         // Evaluate values in parent scope and create new variables
         let mut new_vars = Vec::new();
+        self.call_internal("mark_bind", &[self.env]);
         for (arg, value_expr) in &*let_expr.bindings {
             // Evaluate the value expression in the *parent* scope (before adding the new variable)
             let mut value = if let Some(expr) = value_expr {
@@ -721,6 +1019,16 @@ impl<'a> Codegen<'a> {
 
             self.builder.def_var(var, value);
             new_vars.push((arg.clone(), var));
+
+            let sym = Symbol::from(arg.ident);
+            let sym = self.translate_lispobj(&LispSymbol::from(sym));
+
+            // let is_special = self.call_internal("is_special", &[sym, self.env])[0];
+            // let fals = self.builder.ins().iconst(types::I64, 0);
+            // let is_special = self.builder.ins().icmp(IntCC::Equal, is_special, fals);
+            // let special_block = self.builder.create_block();
+
+            self.call_internal("bind_special", &[sym, value, self.env]);
         }
 
         // Add all new variables to locals after all values are evaluated
@@ -731,6 +1039,7 @@ impl<'a> Codegen<'a> {
 
         // Pop the let-bound variables from locals
         self.locals.truncate(locals_before);
+        self.call_internal("unbind_special", &[self.env]);
 
         Ok(result)
     }

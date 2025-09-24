@@ -167,6 +167,18 @@ pub struct Args {
     pub rest: Option<Arg>,
 }
 
+impl Args {
+    pub fn total(&self) -> usize {
+        let rest = self.rest.is_some() as usize;
+        let optional = self.optional.as_ref().map_or(0, |args| args.len());
+        self.normal.len() + optional + rest * 2
+    }
+
+    pub fn use_trampoline(&self) -> bool {
+        self.rest.is_some() || self.total() > 8
+    }
+}
+
 pub type Captures = Rc<RefCell<Vec<Var>>>;
 
 #[derive(Debug, Clone)]

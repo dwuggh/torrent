@@ -12,11 +12,12 @@ use crate::core::{
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     // gc::collector::init_gc();
-    let text = include_str!("test.el");
+    let text = std::fs::read_to_string("src/test.el")?;
+    // let text = include_str!("test.el");
     let env = Environment::default();
     let mut jit = JIT::new(&env);
     unsafe {
-        let result = run_code(&mut jit, text, &env).unwrap();
+        let result = run_code(&mut jit, &text, &env).unwrap();
         println!("result: {result:?}");
     };
 

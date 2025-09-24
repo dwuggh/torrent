@@ -1,4 +1,4 @@
-use std::{collections::HashMap, marker::PhantomData, mem::ManuallyDrop, ptr::drop_in_place};
+use std::{marker::PhantomData, mem::ManuallyDrop, ptr::drop_in_place};
 
 use crate::gc::{Gc, OpaqueGcPtr};
 

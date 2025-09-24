@@ -1,7 +1,5 @@
-use std::sync::{Arc, Mutex};
-
 use proc_macros::Trace;
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use rustc_hash::FxBuildHasher;
 
 use crate::{
     core::{
@@ -16,8 +14,16 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq, Trace)]
 pub struct Bind {
     #[no_trace]
-    pub ident: Ident,
-    pub value: Object,
+    pub symbol: Symbol,
+    pub old: Object,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Trace)]
+pub enum SpecStackItem {
+    Bind(Bind),
+    /// mark for start of a lexical envrionment
+    LexicalMark,
+    Unwind,
 }
 
 #[derive(Debug, Default)]
@@ -26,7 +32,7 @@ pub struct Environment {
     // TODO should this be GC'd? or make SymbolCell GC
     pub symbol_map: SymbolMap,
 
-    pub stack: Gc<Vec<Bind>>,
+    pub spec_stack: Gc<Vec<SpecStackItem>>,
 
     pub stack_map: StackMap,
 }
@@ -112,12 +118,49 @@ impl Environment {
         self.stack_map.pop(obj);
     }
 
-    pub fn push_stack(&self, var: Bind) {
-        self.stack.get_mut().push(var);
+    pub fn push_spec_stack(&self, item: SpecStackItem) {
+        self.spec_stack.get_mut().push(item)
     }
 
-    pub fn pop_stack(&self) {
-        self.stack.get_mut().pop();
+    pub fn push_special_symbol(&self, symbol: Symbol, mut value: Object) -> RuntimeResult<()> {
+        let old = self.symbol_map.get_symbol_cell_with(symbol, |cell| {
+            let data = cell.data();
+            let old = &mut value;
+            std::mem::swap(&mut data.value, old);
+            Ok(value)
+        })?;
+        self.push_spec_stack(SpecStackItem::Bind(Bind { symbol, old }));
+        Ok(())
+    }
+
+    pub fn pop_spec_stack(&self) -> RuntimeResult<SpecStackItem> {
+        let item = self.spec_stack.get_mut().pop();
+        match item {
+            Some(SpecStackItem::Bind(Bind { symbol, mut old })) => {
+                old = self.symbol_map.get_symbol_cell_with(symbol, |cell| {
+                    let data = cell.data();
+                    let val = &mut old;
+                    std::mem::swap(&mut data.value, val);
+                    Ok(old)
+                })?;
+                Ok(SpecStackItem::Bind(Bind { symbol, old }))
+            }
+            Some(v) => Ok(v),
+            None => Err(RuntimeError::InternalError {
+                message: "cannot pop spec stack".to_string(),
+            }),
+        }
+    }
+
+    pub fn pop_lexical(&self) -> RuntimeResult<()> {
+        while let item = self.pop_spec_stack()? {
+            if matches!(item, SpecStackItem::LexicalMark) {
+                return Ok(());
+            }
+        }
+        return Err(RuntimeError::InternalError {
+            message: "wrong structure for spec stack".to_string(),
+        });
     }
 
     pub fn is_special(&self, symbol: Symbol) -> bool {
@@ -127,36 +170,9 @@ impl Environment {
             .unwrap_or(false)
     }
 
-    pub fn load_symbol_value_with<T, F: FnOnce(&Object) -> RuntimeResult<T>>(
-        &self,
-        symbol: Symbol,
-        job: F,
-    ) -> RuntimeResult<T> {
-        let is_special = self.is_special(symbol);
-        if is_special {
-            self.find_in_stack_with(symbol, job)
-        } else {
-            self.load_symbol_with(symbol, None, job)
-        }
-    }
-
-    /// find a symbol value in stack
-    fn find_in_stack_with<T, F: FnOnce(&Object) -> RuntimeResult<T>>(
-        &self,
-        symbol: Symbol,
-        job: F,
-    ) -> RuntimeResult<T> {
-        let stack = self.stack.get();
-        let mut i = stack.len();
-        let ident = symbol.ident();
-        while i > 0 {
-            i = i - 1;
-            let val = &stack[i];
-            if val.ident == ident {
-                return job(&val.value);
-            }
-        }
-        self.load_symbol_with(symbol, None, job)
+    /// declare a `defvar` or `defconst`
+    fn declare_var(&self, ident: Ident) -> Symbol {
+        self.symbol_map.intern(ident, true).0
     }
 }
 

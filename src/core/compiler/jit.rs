@@ -8,7 +8,7 @@ use cranelift_module::FuncId;
 use cranelift_module::Module;
 
 use crate::core::compiler::codegen::Codegen;
-use crate::core::compiler::BuiltinFnPlugin;
+use crate::core::compiler::{BuiltinFnPlugin, InternalFnPlugin};
 use crate::core::env::Environment;
 use crate::core::function::LispFunction;
 use crate::core::parser::expr::Expr;
@@ -43,19 +43,27 @@ impl JIT {
         for func in inventory::iter::<BuiltinFnPlugin> {
             (func.decl_jit_sym)(&mut builder);
         }
+        for func in inventory::iter::<InternalFnPlugin> {
+            (func.decl_jit_sym)(&mut builder);
+        }
 
         let mut module = JITModule::new(builder);
         let mut builtin_funcs = HashMap::new();
+
+        // Load builtin functions (lisp subrs)
         for func in inventory::iter::<BuiltinFnPlugin> {
             let (name, id) = (func.decl_subr)(&mut module).unwrap();
-            tracing::debug!("loading function {name:?}...");
-            if func.lisp_subr {
-                let func = LispFunction::new_subr(id, &name, func.ptr());
-                let symbol = Symbol::from(name);
-                store_symbol_function(symbol, func.tag(), env);
-            } else {
-                builtin_funcs.insert(name, id);
-            }
+            tracing::debug!("loading builtin function {name:?}...");
+            let func = LispFunction::new_subr(id, &name, func.ptr(), func.signature);
+            let symbol = Symbol::from(name);
+            store_symbol_function(symbol, func.tag(), env);
+        }
+
+        // Load internal functions
+        for func in inventory::iter::<InternalFnPlugin> {
+            let (name, id) = (func.decl_subr)(&mut module).unwrap();
+            tracing::debug!("loading internal function {name:?}...");
+            builtin_funcs.insert(name, id);
         }
         Self {
             data_desc: DataDescription::new(),

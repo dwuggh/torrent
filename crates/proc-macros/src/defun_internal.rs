@@ -1,14 +1,10 @@
 #![allow(clippy::manual_unwrap_or_default)]
 use darling::FromMeta;
-use proc_macro2::{Ident, TokenStream};
+use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-use crate::{
-    defun::inventory_submit,
-    function::{
-        Arg, ArgKind, Function, RetKind, construct_objectref, construct_return,
-        construct_return_nodrop,
-    },
+use crate::function::{
+    Arg, ArgKind, Function, RetKind, construct_objectref, construct_return, construct_return_nodrop,
 };
 
 pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
@@ -20,34 +16,10 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let rust_wrapper_name = format_ident!("__rust_wrapper_{}", &subr_name);
 
     let args = function.args;
-    let arg_conversion = get_arg_conversion(&args);
+    let (arg_conversion, arg_finish) = get_args(&args);
 
-    // Generate the extern "C" function signature
-    let mut c_params: Vec<TokenStream> = Vec::new();
-    let mut c_param_idents: Vec<Ident> = Vec::new();
-
-    for arg in args.iter() {
-        let arg_info = &arg.info;
-        let ident = &arg.ident;
-        match &arg_info.kind {
-            ArgKind::Env => {
-                c_params.push(quote! { env: i64 });
-                c_param_idents.push(format_ident!("env"));
-            }
-            ArgKind::Slice(_) => {
-                let ptr_ident = format_ident!("{}_ptr", ident);
-                let argc_ident = format_ident!("{}_argc", ident);
-                c_params.push(quote! { #ptr_ident: i64 });
-                c_params.push(quote! { #argc_ident: i64 });
-                c_param_idents.push(ptr_ident);
-                c_param_idents.push(argc_ident);
-            }
-            _ => {
-                c_params.push(quote! { #ident: i64 });
-                c_param_idents.push(ident.clone());
-            }
-        }
-    }
+    // Generate the extern "C" function signature and parameters
+    let (c_params, c_param_idents) = get_c_signature(&args);
 
     // Generate the actual function call
     let call_args = args.iter().map(|arg| {
@@ -55,14 +27,12 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         quote! { #ident }
     });
 
-    // let ret_is_unit = matches!(function.ret_kind, RetKind::Unit);
-    let wrapper_ret_ty = quote! { ::std::result::Result<i64, &'static str> };
-
     let nil = quote! {
         crate::core::object::NIL
     };
 
-    let forget_args = forget_args(&args);
+    // let ret_is_unit = matches!(function.ret_kind, RetKind::Unit);
+    let wrapper_ret_ty = quote! { ::std::result::Result<i64, &'static str> };
 
     let wrapper_result = match &function.ret_kind {
         RetKind::Unit => construct_return(
@@ -143,7 +113,6 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
                 }
             };
             let val = val_fn(format_ident!("val"));
-            let res = val_fn(format_ident!("res"));
             if function.fallible {
                 quote! {
                     match result {
@@ -155,7 +124,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
                     }
                 }
             } else {
-                quote! { Ok(#res) }
+                quote! { Ok(#val) }
             }
         }
     };
@@ -174,31 +143,8 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         }
     };
 
-    let mut signatures: Vec<TokenStream> = Vec::new();
-    for arg in args.iter() {
-        match &arg.info.kind {
-            ArgKind::Env => {
-                signatures.push(quote! {
-                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // env
-                });
-            }
-            ArgKind::Slice(_) => {
-                signatures.push(quote! {
-                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // slice_ptr
-                });
-                signatures.push(quote! {
-                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // slice_argc
-                });
-            }
-            _ => {
-                signatures.push(quote! {
-                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // param
-                });
-            }
-        }
-    }
-
-    let inventory = inventory_submit(&subr_name, &lisp_name, false, signatures);
+    let signatures = get_signatures(&args);
+    let inventory = inventory_submit(&subr_name, &lisp_name, signatures);
 
     quote! {
 
@@ -219,7 +165,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
                 tracing::trace!("[DEBUG] Internal Rust function {} returned", stringify!(#subr));
             }
 
-            #(#forget_args)*
+            #(#arg_finish)*
             #wrapper_result
         }
 
@@ -229,14 +175,46 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     }
 }
 
-fn get_arg_conversion(args: &[Arg]) -> Vec<TokenStream> {
-    let mut conversions = Vec::new();
+fn get_c_signature(args: &[Arg]) -> (Vec<TokenStream>, Vec<proc_macro2::Ident>) {
+    let mut c_params: Vec<TokenStream> = Vec::new();
+    let mut c_param_idents: Vec<proc_macro2::Ident> = Vec::new();
+
+    for arg in args.iter() {
+        let arg_info = &arg.info;
+        let ident = &arg.ident;
+        match &arg_info.kind {
+            ArgKind::Env => {
+                c_params.push(quote! { env: i64 });
+                c_param_idents.push(format_ident!("env"));
+            }
+            ArgKind::Slice(_) => {
+                let ptr_ident = format_ident!("{}_ptr", ident);
+                let argc_ident = format_ident!("{}_argc", ident);
+                c_params.push(quote! { #ptr_ident: i64 });
+                c_params.push(quote! { #argc_ident: i64 });
+                c_param_idents.push(ptr_ident);
+                c_param_idents.push(argc_ident);
+            }
+            _ => {
+                c_params.push(quote! { #ident: i64 });
+                c_param_idents.push(ident.clone());
+            }
+        }
+    }
+
+    (c_params, c_param_idents)
+}
+
+fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
+    let mut init_args: Vec<TokenStream> = Vec::new();
+    let mut finish_args: Vec<TokenStream> = Vec::new();
 
     let object = quote! { crate::core::object::Object };
 
     // Convert each argument directly from i64 parameter
     for (i, arg) in args.iter().enumerate() {
         let ident = &arg.ident;
+        let tmp = format_ident!("__arg_val_{}", i);
         let conversion = match &arg.info.kind {
             ArgKind::Env => {
                 quote! {
@@ -273,7 +251,6 @@ fn get_arg_conversion(args: &[Arg]) -> Vec<TokenStream> {
             }
             ArgKind::Object => {
                 if arg.info.is_ref {
-                    let tmp = format_ident!("__arg_val_{}", i);
                     quote! {
                         let #tmp = #object(#ident as u64);
                         let #ident = &#tmp;
@@ -281,7 +258,7 @@ fn get_arg_conversion(args: &[Arg]) -> Vec<TokenStream> {
                 } else {
                     quote! {
                         if cfg!(debug_assertions) {
-                            eprintln!("[DEBUG] Converting internal arg {} from i64: 0x{:x}", stringify!(#ident), #ident as u64);
+                            tracing::trace!("[DEBUG] Converting internal arg {} from i64: 0x{:x}", stringify!(#ident), #ident as u64);
                         }
                         let #ident = #object(#ident as u64);
                     }
@@ -290,7 +267,6 @@ fn get_arg_conversion(args: &[Arg]) -> Vec<TokenStream> {
             ArgKind::ObjectRef(ty) => construct_objectref(arg.info.is_mut, i, ident, ty),
             ArgKind::Primitive(ty) => {
                 if ty.to_string() == "Symbol" {
-                    let tmp = format_ident!("__arg_val_{}", i);
                     quote! {
                         let #tmp = #object(#ident as u64);
                         let #ident: #ty = (&#tmp).try_into()?;
@@ -308,10 +284,66 @@ fn get_arg_conversion(args: &[Arg]) -> Vec<TokenStream> {
             }
         };
 
-        conversions.push(conversion);
+        init_args.push(conversion);
+
+        // Add cleanup for objects that need it
+        let cleanup = match &arg.info.kind {
+            ArgKind::Object => {
+                if arg.info.is_ref {
+                    quote! {
+                        std::mem::forget(#tmp);
+                    }
+                } else {
+                    quote! {}
+                }
+            }
+            ArgKind::ObjectRef(_) => {
+                if arg.info.is_ref {
+                    quote! {
+                        std::mem::forget(#tmp);
+                    }
+                } else {
+                    quote! {}
+                }
+            }
+            ArgKind::Primitive(ty) if ty.to_string() == "Symbol" => {
+                quote! {
+                    std::mem::forget(#tmp);
+                }
+            }
+            _ => quote! {},
+        };
+        finish_args.push(cleanup);
     }
 
-    conversions
+    (init_args, finish_args)
+}
+
+fn get_signatures(args: &[Arg]) -> Vec<TokenStream> {
+    let mut signatures: Vec<TokenStream> = Vec::new();
+    for arg in args.iter() {
+        match &arg.info.kind {
+            ArgKind::Env => {
+                signatures.push(quote! {
+                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // env
+                });
+            }
+            ArgKind::Slice(_) => {
+                signatures.push(quote! {
+                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // slice_ptr
+                });
+                signatures.push(quote! {
+                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // slice_argc
+                });
+            }
+            _ => {
+                signatures.push(quote! {
+                    sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // param
+                });
+            }
+        }
+    }
+    signatures
 }
 
 #[derive(Default, PartialEq, Debug, FromMeta)]
@@ -320,34 +352,45 @@ pub(crate) struct Spec {
     name: Option<String>,
 }
 
-fn forget_args(args: &[Arg]) -> Vec<TokenStream> {
-    args.iter()
-        .enumerate()
-        .map(|(i, arg)| {
-            let ident = &arg.ident;
-            match &arg.info.kind {
-                ArgKind::Object => {
-                    if arg.info.is_ref {
-                        let tmp = format_ident!("__arg_val_{}", i);
-                        quote! {
-                            std::mem::forget(#tmp);
-                        }
-                    } else {
-                        quote! {}
-                    }
-                }
-                ArgKind::ObjectRef(ident) => {
-                    let tmp = format_ident!("__arg_val_{}", i);
-                    if arg.info.is_ref {
-                        quote! {
-                            std::mem::forget(#tmp);
-                        }
-                    } else {
-                        quote! {}
-                    }
-                }
-                _ => quote! {},
-            }
-        })
-        .collect::<Vec<_>>()
+pub fn inventory_submit(
+    subr_name: &str,
+    lisp_name: &str,
+    signatures: Vec<TokenStream>,
+) -> TokenStream {
+    let subr_name = subr_name.to_string();
+    let lisp_name = lisp_name.to_string();
+    let func_name = format_ident!("__wrapper_fn_{}", &subr_name);
+    let def_func_name = format_ident!("__def_{}", &subr_name);
+    let register_func_name = format_ident!("__register_{}", &subr_name);
+
+    let mut return_sigs: Vec<TokenStream> = Vec::new();
+    return_sigs.push(quote! {
+        sig.returns.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64));
+    });
+
+    quote! {
+        #[automatically_derived]
+        #[doc(hidden)]
+        fn #def_func_name<T: cranelift_module::Module>(module: &mut T) -> anyhow::Result<(String, cranelift_module::FuncId)> {
+            let mut sig = module.make_signature();
+            #(#signatures)*
+            #(#return_sigs)*
+
+            let func_id = module.declare_function(#lisp_name, cranelift_module::Linkage::Import, &sig)?;
+            let func_name = #lisp_name.to_string();
+            Ok((func_name, func_id))
+        }
+
+        #[automatically_derived]
+        #[doc(hidden)]
+        fn #register_func_name(jit_builder: &mut cranelift_jit::JITBuilder) {
+            jit_builder.symbol(#lisp_name, #func_name as *const u8);
+        }
+
+        inventory::submit!(crate::core::compiler::InternalFnPlugin::new(
+            #def_func_name,
+            #register_func_name,
+            #func_name as *const u8
+        ));
+    }
 }

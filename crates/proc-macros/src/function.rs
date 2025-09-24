@@ -28,20 +28,11 @@ pub(crate) enum ArgKind {
     ObjectRef(Ident),
     /// &optional equivalent.
     Option(Box<ArgKind>),
-    /// &rest equivallent.
     Slice(Box<ArgKind>),
+
+    // Rest(Ident),
     /// internal_fn used only.
     Other(syn::Type),
-}
-
-impl ArgKind {
-    fn is_other(&self) -> bool {
-        match self {
-            ArgKind::Other(_) => true,
-            ArgKind::Slice(inner) => inner.is_other(),
-            _ => false,
-        }
-    }
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -58,7 +49,6 @@ pub(crate) struct Function {
     pub(crate) body: syn::Item,
     pub(crate) args: Vec<Arg>,
     pub(crate) fallible: bool,
-    pub(crate) is_lisp_subr: bool,
     pub(crate) ret_kind: RetKind,
 }
 
@@ -76,14 +66,12 @@ fn parse_fn(item: syn::Item) -> Result<Function, Error> {
                 Err(Error::new_spanned(sig, "lisp functions cannot be `unsafe`"))
             } else {
                 let args = parse_signature(sig)?;
-                let is_lisp_subr = args.iter().all(|arg| !arg.info.kind.is_other());
                 let (fallible, ret_kind) = return_type_info(&sig.output);
                 Ok(Function {
                     name: sig.ident.clone(),
                     body: item,
                     args,
                     fallible,
-                    is_lisp_subr,
                     ret_kind,
                 })
             }
@@ -226,10 +214,6 @@ fn is_object_ref_name(ident: &str) -> bool {
     }
 }
 
-fn is_lisp_object_name(ident: &str) -> bool {
-    ident.strip_prefix("Lisp").is_some_and(is_object_ref_name)
-}
-
 fn is_primitive_name(ident: &str) -> bool {
     match ident {
         "Symbol" | "i64" | "u64" | "usize" | "u32" => true,
@@ -312,4 +296,33 @@ pub fn construct_return_nodrop(val: &str) -> TokenStream {
         std::mem::forget(#val);
         result
     }
+}
+
+pub fn calculate_signature(args: &[Arg]) -> (u8, u8, bool) {
+    let mut normal = 0u8;
+    let mut optional = 0u8;
+    let mut rest = false;
+
+    for arg in args {
+        match &arg.info.kind {
+            ArgKind::Env => {
+                break; // Slice must be last
+            }
+            ArgKind::Object | ArgKind::ObjectRef(_) | ArgKind::Primitive(_) => {
+                normal += 1;
+            }
+            ArgKind::Option(_) => {
+                optional += 1;
+            }
+            ArgKind::Slice(_) => {
+                rest = true;
+                break;
+            }
+            _ => {
+                panic!("unknown arg type in defun!")
+            }
+        }
+    }
+
+    (normal, optional, rest)
 }

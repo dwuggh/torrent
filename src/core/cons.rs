@@ -25,6 +25,14 @@ impl LispCons {
         Self(Gc::new(Cons { car, cdr }))
     }
 
+    pub fn from_iter(mut values: impl Iterator<Item = Object>) -> Option<LispCons> {
+        let car = values.next()?;
+        let cdr = Self::from_iter(values)
+            .map(|cons| cons.tag())
+            .unwrap_or(nil());
+        Some(LispCons::new(car, cdr))
+    }
+
     /// Get the car (first element) of the cons cell
     pub fn car(&self) -> &Object {
         &self.0.get().car
@@ -182,5 +190,11 @@ impl Cons {
         let mut reversed = values;
         reversed.reverse();
         Self::from_vec(reversed)
+    }
+}
+
+impl From<Cons> for Object {
+    fn from(value: Cons) -> Self {
+        LispCons(Gc::new(value)).tag()
     }
 }

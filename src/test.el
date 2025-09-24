@@ -5,4 +5,4 @@
                   (funcall ff (- x 2))
                   )
                )))
-(funcall ff 35)
+(funcall ff 30)
