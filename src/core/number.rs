@@ -1,7 +1,7 @@
 use crate::core::{
+    Tagged,
     object::LispType,
     tagged_ptr::{shifting_tag, shifting_untag},
-    Tagged,
 };
 
 // pub(crate) const MAX_FIXNUM: i64 = i64::MAX >> 8;
@@ -55,16 +55,16 @@ impl Tagged for LispCharacter {
     type Data<'a> = Character;
     type DataMut<'a> = Character;
     unsafe fn to_raw(&self) -> u64 {
-        shifting_tag(self.0 .0, Self::TAG)
+        shifting_tag(self.0.0, Self::TAG)
     }
     unsafe fn from_raw(raw: u64) -> Self {
-        std::mem::transmute(shifting_untag(raw))
+        unsafe { std::mem::transmute(shifting_untag(raw)) }
     }
     unsafe fn cast<'a>(val: u64) -> Self::Data<'a> {
-        Self::from_raw(val).0
+        unsafe { Self::from_raw(val).0 }
     }
     unsafe fn cast_mut<'a>(val: u64) -> Self::DataMut<'a> {
-        Self::from_raw(val).0
+        unsafe { Self::from_raw(val).0 }
     }
 }
 

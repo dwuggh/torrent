@@ -7,8 +7,8 @@ use rustc_hash::FxHashMap;
 
 use crate::core::env::Environment;
 use crate::{
-    core::object::{LispType, Object},
     core::Tagged,
+    core::object::{LispType, Object},
     gc::Gc,
 };
 

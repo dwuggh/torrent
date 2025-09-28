@@ -7,9 +7,9 @@ pub mod token;
 
 pub use chumsky::prelude::SimpleSpan;
 use chumsky::{
+    Parser,
     error::Rich,
     input::{Input, Stream},
-    Parser,
 };
 use logos::Logos;
 

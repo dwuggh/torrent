@@ -91,17 +91,21 @@ macro_rules! impl_tagged_for_gc {
             }
 
             unsafe fn cast<'a>(val: u64) -> <$name as Tagged>::Data<'a> {
-                let val = crate::core::tagged_ptr::shifting_untag(val);
-                let ptr = val as *mut crate::gc::GcInner<$inner>;
-                let data_ref = ptr.as_ref().map(AsRef::as_ref).unwrap();
-                std::mem::transmute(data_ref)
+                unsafe {
+                    let val = crate::core::tagged_ptr::shifting_untag(val);
+                    let ptr = val as *mut crate::gc::GcInner<$inner>;
+                    let data_ref = ptr.as_ref().map(AsRef::as_ref).unwrap();
+                    std::mem::transmute(data_ref)
+                }
             }
 
             unsafe fn cast_mut<'a>(val: u64) -> <$name as Tagged>::DataMut<'a> {
-                let val = crate::core::tagged_ptr::shifting_untag(val);
-                let ptr = val as *mut crate::gc::GcInner<$inner>;
-                let data_ref = ptr.as_mut().map(AsMut::as_mut).unwrap();
-                std::mem::transmute(data_ref)
+                unsafe {
+                    let val = crate::core::tagged_ptr::shifting_untag(val);
+                    let ptr = val as *mut crate::gc::GcInner<$inner>;
+                    let data_ref = ptr.as_mut().map(AsMut::as_mut).unwrap();
+                    std::mem::transmute(data_ref)
+                }
             }
         }
     };
@@ -119,16 +123,18 @@ macro_rules! impl_tagged_for_prim {
             }
 
             unsafe fn from_raw(raw: u64) -> Self {
-                let val = shifting_untag(raw);
-                std::mem::transmute(val)
+                unsafe {
+                    let val = shifting_untag(raw);
+                    std::mem::transmute(val)
+                }
             }
 
             unsafe fn cast<'a>(val: u64) -> Self::Data<'a> {
-                Self::from_raw(val).0
+                unsafe { Self::from_raw(val).0 }
             }
 
             unsafe fn cast_mut<'a>(val: u64) -> Self::DataMut<'a> {
-                Self::from_raw(val).0
+                unsafe { Self::from_raw(val).0 }
             }
         }
     };
@@ -150,10 +156,10 @@ impl Object {
         }
     }
     pub unsafe fn untagged_as_ref_unchecked<T: Tagged>(&self) -> T::Data<'_> {
-        T::cast(self.0)
+        unsafe { T::cast(self.0) }
     }
     pub unsafe fn untagged_as_mut_unchecked<T: Tagged>(&self) -> T::DataMut<'_> {
-        T::cast_mut(self.0)
+        unsafe { T::cast_mut(self.0) }
     }
 }
 

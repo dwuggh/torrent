@@ -11,8 +11,8 @@ use crate::core::{
     },
 };
 use chumsky::{
-    input::{Input, Stream},
     Parser,
+    input::{Input, Stream},
 };
 
 /// Expand all macros in an expression recursively until no more expansions are possible
@@ -59,14 +59,17 @@ fn macro_expand_once_with_scope(
             call.symbol.set(resolved_var);
 
             // Check if this is a macro call
-            if let Some(expanded_expr_type) = try_expand_macro_call(call, resolved_var, env)? {
-                drop(expr_type);
-                // Replace the expression content
-                expr.ty.replace(expanded_expr_type);
-                Ok(true)
-            } else {
-                // Not a macro, no expansion
-                Ok(false)
+            match try_expand_macro_call(call, resolved_var, env)? {
+                Some(expanded_expr_type) => {
+                    drop(expr_type);
+                    // Replace the expression content
+                    expr.ty.replace(expanded_expr_type);
+                    Ok(true)
+                }
+                _ => {
+                    // Not a macro, no expansion
+                    Ok(false)
+                }
             }
         }
         ExprType::SpecialForm(_) => {

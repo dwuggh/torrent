@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use proc_macros::Trace;
 
 use crate::{
-    core::object::{LispType, Object},
     core::Tagged,
+    core::object::{LispType, Object},
     gc::Gc,
 };
 

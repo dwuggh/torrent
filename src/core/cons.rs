@@ -3,7 +3,7 @@ use proc_macros::Trace;
 use crate::{
     core::Tagged,
     core::{
-        object::{nil, LispType, Object, ObjectRef},
+        object::{LispType, Object, ObjectRef, nil},
         tagged_ptr::TaggedObj,
     },
     gc::Gc,

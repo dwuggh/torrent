@@ -9,7 +9,7 @@ use crate::{
         number::{Character, Float, Integer, LispCharacter, LispFloat, LispInteger},
         string::{LispStr, Str},
         symbol::{LispSymbol, Symbol},
-        tagged_ptr::{get_tag, TaggedObj},
+        tagged_ptr::{TaggedObj, get_tag},
         vector::{LispVector, Vector},
     },
     gc::Trace,
@@ -60,15 +60,17 @@ impl Object {
 
 unsafe impl Trace for Object {
     unsafe fn trace(&self, visitor: crate::gc::Visitor) {
-        match self.as_ref() {
-            ObjectRef::Str(str) => str.trace(visitor),
-            ObjectRef::Vector(vector) => vector.trace(visitor),
-            ObjectRef::Cons(cons) => cons.trace(visitor),
-            ObjectRef::Function(function) => function.trace(visitor),
-            ObjectRef::HashTable(hash_table) => hash_table.trace(visitor),
-            _ => {}
+        unsafe {
+            match self.as_ref() {
+                ObjectRef::Str(str) => str.trace(visitor),
+                ObjectRef::Vector(vector) => vector.trace(visitor),
+                ObjectRef::Cons(cons) => cons.trace(visitor),
+                ObjectRef::Function(function) => function.trace(visitor),
+                ObjectRef::HashTable(hash_table) => hash_table.trace(visitor),
+                _ => {}
+            }
+            // self.untag_ref().trace(visitor);
         }
-        // self.untag_ref().trace(visitor);
     }
 
     unsafe fn finalize(&mut self) {

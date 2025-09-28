@@ -6,8 +6,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::function::{
-    Arg, ArgKind, Function, RetKind, calculate_signature, construct_return,
-    construct_return_nodrop,
+    Arg, ArgKind, Function, RetKind, calculate_signature, construct_return, construct_return_nodrop,
 };
 
 pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {

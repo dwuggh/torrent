@@ -8,7 +8,7 @@ use crate::{
         ident::Ident,
         indirect::Indirect,
         number::LispInteger,
-        object::{nil, tru, LispObject, Object, ObjectRef},
+        object::{LispObject, Object, ObjectRef, nil, tru},
         symbol::{LispSymbol, Symbol},
         tagged_ptr::TaggedObj,
     },
@@ -33,11 +33,7 @@ fn minus(left: Object, right: Object) -> Result<Object> {
 
 #[defun(name = "<")]
 fn smaller_than(l: i64, r: i64) -> Object {
-    if l < r {
-        tru()
-    } else {
-        nil()
-    }
+    if l < r { tru() } else { nil() }
 }
 
 #[defun(name = "-1")]
@@ -173,11 +169,7 @@ fn check_function_args(func: &Function, argc: usize) -> i64 {
         return -1;
     }
 
-    if trampoline {
-        0xffff
-    } else {
-        argc as i64
-    }
+    if trampoline { 0xffff } else { argc as i64 }
 }
 
 #[internal_fn]

@@ -12,8 +12,8 @@ use crate::core::{
     },
 };
 use chumsky::{
-    input::{Input, Stream},
     Parser,
+    input::{Input, Stream},
 };
 
 /// the main function

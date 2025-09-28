@@ -194,11 +194,14 @@ impl StackMap {
         if obj.is_primitive() {
             return;
         }
-        if let Some(mut entry) = self.roots.get_sync(obj) {
-            let count = entry.get_mut();
-            *count = *count + 1;
-        } else {
-            self.roots.insert_sync(obj.clone(), 1).unwrap();
+        match self.roots.get_sync(obj) {
+            Some(mut entry) => {
+                let count = entry.get_mut();
+                *count = *count + 1;
+            }
+            _ => {
+                self.roots.insert_sync(obj.clone(), 1).unwrap();
+            }
         }
     }
 

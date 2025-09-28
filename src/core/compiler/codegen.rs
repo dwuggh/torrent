@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use cranelift::codegen::ir::{BlockCall, JumpTableData, TrapCode};
 use cranelift::codegen::Context;
+use cranelift::codegen::ir::{BlockCall, JumpTableData, TrapCode};
 use cranelift::prelude::*;
 use cranelift_jit::JITModule;
 use cranelift_module::DataDescription;
@@ -9,6 +9,7 @@ use cranelift_module::FuncId;
 use cranelift_module::Module;
 use rustc_hash::FxHashSet;
 
+use crate::core::Tagged;
 use crate::core::compiler::error::{CodegenError, CodegenResult};
 use crate::core::function::FunctionSignature;
 use crate::core::function::LispFunction;
@@ -18,7 +19,6 @@ use crate::core::object::TRUE;
 use crate::core::parser::expr::*;
 use crate::core::symbol::LispSymbol;
 use crate::core::symbol::Symbol;
-use crate::core::Tagged;
 
 #[derive(Debug)]
 pub struct UnresolvedClosure {

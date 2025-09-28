@@ -11,8 +11,8 @@ use proc_macros::Trace;
 
 use crate::core::error::{RuntimeError, RuntimeResult};
 use crate::core::ident::Ident;
-use crate::core::object::{nil, LispType, Object};
-use crate::core::tagged_ptr::{shifting_tag, shifting_untag, Tagged, TaggedObj};
+use crate::core::object::{LispType, Object, nil};
+use crate::core::tagged_ptr::{Tagged, TaggedObj, shifting_tag, shifting_untag};
 use crate::gc::{Gc, Trace};
 
 // =============================================================================
@@ -432,33 +432,39 @@ impl Tagged for LispSymbol {
     type DataMut<'a> = Symbol;
 
     unsafe fn to_raw(&self) -> u64 {
-        shifting_tag(self.0 .0 as u64, Self::TAG)
+        shifting_tag(self.0.0 as u64, Self::TAG)
     }
 
     unsafe fn from_raw(raw: u64) -> Self {
-        let val = shifting_untag(raw);
-        std::mem::transmute(val)
+        unsafe {
+            let val = shifting_untag(raw);
+            std::mem::transmute(val)
+        }
     }
 
     unsafe fn cast<'a>(val: u64) -> Self::Data<'a> {
-        Self::from_raw(val).0
+        unsafe { Self::from_raw(val).0 }
     }
 
     unsafe fn cast_mut<'a>(val: u64) -> Self::DataMut<'a> {
-        Self::from_raw(val).0
+        unsafe { Self::from_raw(val).0 }
     }
 }
 
 unsafe impl Trace for SymbolMapInner {
     unsafe fn trace(&self, visitor: crate::gc::Visitor) {
-        for (_, cell) in self.0.iter() {
-            cell.trace(visitor);
+        unsafe {
+            for (_, cell) in self.0.iter() {
+                cell.trace(visitor);
+            }
         }
     }
 
     unsafe fn finalize(&mut self) {
-        for (_, cell) in self.0.iter_mut() {
-            cell.finalize();
+        unsafe {
+            for (_, cell) in self.0.iter_mut() {
+                cell.finalize();
+            }
         }
     }
 }

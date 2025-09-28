@@ -2,7 +2,7 @@ use crate::core::{
     cons::LispCons,
     ident::Ident,
     number::{LispCharacter, LispFloat, LispInteger},
-    object::{nil, LispObject},
+    object::{LispObject, nil},
     parser::Span,
     string::LispStr,
     symbol::{LispSymbol, Symbol},

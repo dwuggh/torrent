@@ -7,7 +7,9 @@ pub type Visitor = unsafe fn(OpaqueGcPtr);
 pub unsafe trait Trace {
     unsafe fn trace(&self, visitor: Visitor);
     unsafe fn finalize(&mut self) {
-        drop_in_place(self as *mut Self);
+        unsafe {
+            drop_in_place(self as *mut Self);
+        }
     }
 }
 
@@ -71,7 +73,9 @@ where
 
 unsafe impl<T: ?Sized + 'static> Trace for Gc<T> {
     unsafe fn trace(&self, visitor: Visitor) {
-        visitor(self.as_opaque());
+        unsafe {
+            visitor(self.as_opaque());
+        }
     }
 
     unsafe fn finalize(&mut self) {}
@@ -122,19 +126,23 @@ where
     V: Trace,
 {
     unsafe fn trace(&self, visitor: Visitor) {
-        for (k, v) in self.iter() {
-            k.trace(visitor);
-            v.trace(visitor);
+        unsafe {
+            for (k, v) in self.iter() {
+                k.trace(visitor);
+                v.trace(visitor);
+            }
         }
     }
 
     unsafe fn finalize(&mut self) {
-        for (mut k, mut v) in std::mem::take(self)
-            .into_iter()
-            .map(|(k, v)| (ManuallyDrop::new(k), ManuallyDrop::new(v)))
-        {
-            k.finalize();
-            v.finalize();
+        unsafe {
+            for (mut k, mut v) in std::mem::take(self)
+                .into_iter()
+                .map(|(k, v)| (ManuallyDrop::new(k), ManuallyDrop::new(v)))
+            {
+                k.finalize();
+                v.finalize();
+            }
         }
     }
 }
@@ -150,17 +158,21 @@ where
     V: Trace,
 {
     unsafe fn trace(&self, visitor: Visitor) {
-        for (_, v) in self.iter() {
-            v.trace(visitor);
+        unsafe {
+            for (_, v) in self.iter() {
+                v.trace(visitor);
+            }
         }
     }
 
     unsafe fn finalize(&mut self) {
-        for (_, mut v) in std::mem::take(self)
-            .into_iter()
-            .map(|(k, v)| (ManuallyDrop::new(k), ManuallyDrop::new(v)))
-        {
-            v.finalize();
+        unsafe {
+            for (_, mut v) in std::mem::take(self)
+                .into_iter()
+                .map(|(k, v)| (ManuallyDrop::new(k), ManuallyDrop::new(v)))
+            {
+                v.finalize();
+            }
         }
     }
 }

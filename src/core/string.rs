@@ -1,7 +1,7 @@
 use proc_macros::Trace;
 
-use crate::core::object::LispType;
 use crate::core::Tagged;
+use crate::core::object::LispType;
 use crate::gc::Gc;
 
 #[repr(align(16))]

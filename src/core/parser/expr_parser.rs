@@ -7,7 +7,7 @@ use chumsky::prelude::*;
 use crate::core::ident::Ident;
 use crate::core::number::*;
 use crate::core::parser::token::Token;
-use crate::core::parser::{expr::*, Span};
+use crate::core::parser::{Span, expr::*};
 use crate::core::string::LispStr;
 
 type Extra<'s> = extra::Full<Rich<'s, Token, Span>, (), ()>;
@@ -491,8 +491,8 @@ mod tests {
     use crate::core::number::LispInteger;
 
     use super::*;
-    use chumsky::input::Stream;
     use chumsky::Parser;
+    use chumsky::input::Stream;
     use logos::Logos;
 
     fn parse_src<'s>(src: &'s str) -> Result<Expr, Vec<Rich<'s, Token, Span>>> {
