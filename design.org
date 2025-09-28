@@ -1,3 +1,5 @@
+#+title: Torrent: A Rust-based Emacs Lisp Compiler/Runtime
+#+author: dwuggh
 
 Firstly I want to say I'm not a professional computer science researcher nor a programmer, and I didn't take CS as my major, so I might get fundamental, conceptual errors because of my ignorance, please feel free to correct me when I'm wrong.
 
@@ -23,7 +25,7 @@ Emacs lisp uses a stack VM, and Rune has a rust implementation for that. In torr
 
 However in emacs lisp I think this is a good approach, nowadays most codes are native compiled anyway, and everyone seems to be pretty happy about it. Technically speaking, most emacs code will not change once ran, only a small subset of them would change, for example when some modes advicing functions, or us users debugging elisp, writing our configs, inventing new packages, etc. Still, most time we are likely to use emacs as an editor -- because emacs is acidentally an editor, and editor, by definition, is a **tool** for editing files, not the editor itself. Anyway, we probably won't care much about compile speeds here.
 
-In addition to the discussion above, I use [[cranelift.dev][cranelift]] for the codegen backend instead of LLVM. Cranelift provides great compile speeds due to its single IR architecture, and also provides fast enough execution speed(around 15% slower than LLVM). So I won't worry about compile speed at all.
+In addition to the discussion above, I use [[https://cranelift.dev][cranelift]] for the codegen backend instead of LLVM. Cranelift provides great compile speeds due to its single IR architecture, and also provides fast enough execution speed(around 15% slower than LLVM). So I won't worry about compile speed at all.
 
 Instead of bytecodes, I use a high-level IR to represent the elisp codes, that hardcode all special forms into syntax, and perform simple lexical binding analysis and closure analysis. I'll adopt more optimizations following [cite:@serranoJavaScriptAOTCompilation2018].
 
@@ -50,11 +52,11 @@ The first problem is solved in [cite:@baconConcurrentCycleCollection2001](more c
 
 Recently the bacon-rajan algorithm is refined, by using a BFS instead of DFS[cite:@giallorenzoBreadthfirstCycleCollection2025]. The implementation is in rust. I haven't read this paper thoroughly though.
 
-The [[mmtk.io][MMTK]] is a growing GC SDK written in rust. LXR[cite:@zhaoLowLatencyHighThroughputGarbage2022] implements their work in a separate branch in MMTK, however their are thousands divergent commits, so it will take time to merge. MMTK looks promising now and already provides a solid GC platform, my ultimate goal is to integrate with MMTK some day.
+The [[https://mmtk.io][MMTK]] is a growing GC SDK written in rust. LXR[cite:@zhaoLowLatencyHighThroughputGarbage2022] implements their work in a separate branch in MMTK, however their are thousands divergent commits, so it will take time to merge. MMTK looks promising now and already provides a solid GC platform, my ultimate goal is to integrate with MMTK some day.
 
 * Lisp Object Representation
 ** objects are tagged pointer
-I took rune's approach here, a shifting tagged pointer. Since most objects in elisp are pointers, and we probably won't do scientific computations in elisp, so tagging method is really irrelevent to performance. Currently floating numbers implementation is wrong, I'm still thinking whether f32 is enough. [[src/core/tagged_ptr.rs][tagged_ptr.rs]] provides interfaces for tagged pointer, I think its abstraction is good. 
+I took rune's approach here, a shifting tagged pointer. Since most objects in elisp are pointers, and we probably won't do scientific computations in elisp, so tagging method is really irrelevent to performance. Currently floating numbers implementation is wrong, I'm still thinking whether f32 is enough. [[file:./src/core/tagged_ptr.rs][tagged_ptr.rs]] provides interfaces for tagged pointer, I think its abstraction is good. 
 
 ** ergomics
 In rune, to deal with moving GC, the author gives a innovative solution that ulitizes rust's lifetime system[cite:@ImplementingSafeGarbage2022]. If I don't get it wrong(I hope), This system pins objects on stack to not move during GC, and provide static checks(the lifetime system) to prevent errors from happening. In the JIT context, this method no longer works? and we have to use the stack map. in Torrent I use a fake stackmap for now, as I'm investigating cranelift's API.
@@ -65,7 +67,7 @@ For moving GCs, I believe a forwarding pointer with types like Object::Indirect 
 the [[https://docs.rs/inventory/latest/inventory/][inventory]] crate is used to collect the rust subroutes, i.e. those /#[defun]/ marked functions. In Rune, this is done by utilizing build.rs, which is limited and harder to maintain. This idea is also stealed from scheme-rs.
 
 * concurrency
-Rune's design is described in this [[https://coredumped.dev/2022/05/19/a-vision-of-a-multi-threaded-emacs/] blog post]. I must admit I know basically nothing about concurrent for now, so I cannot give valuable opinions. Rune aim to be compatible with emacs, then I shall discover new approaches in Torrent, by not compatible with emacs(lol). 
+Rune's design is described in this [[https://coredumped.dev/2022/05/19/a-vision-of-a-multi-threaded-emacs/][blog post]]. I must admit I know basically nothing about concurrent for now, so I cannot give valuable opinions. Rune aim to be compatible with emacs, then I shall discover new approaches in Torrent, by not compatible with emacs(lol). 
 
 * misceallous
 ** String representation
@@ -75,3 +77,5 @@ Torrent uses lasso as the string interner. To do AOT compilation, we may need to
 
 The symbol representation is messy. There are 2 types, Ident and Symbol: Ident are just a lasso's tag, and Symbol is the combination of symbol table's index and a tag for fallback. This design is somewhat redundant, and I need more thorough design of symbol and ident.
 
+* references
+#+print_bibliography:
