@@ -1,4 +1,4 @@
 
 * Torrent -- a emacs lisp runtime heavily inspired by Rune
 
-see [[./design.org][design.org]]
+see [[./design.org][design.org]]. There's also a PDF version in this repo.

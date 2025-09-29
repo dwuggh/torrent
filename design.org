@@ -1,81 +1,89 @@
 #+title: Torrent: A Rust-based Emacs Lisp Compiler/Runtime
 #+author: dwuggh
+#+LATEX_CLASS: koma-article
+#+LATEX_CLASS_OPTIONS: [11pt,final]
 
-Firstly I want to say I'm not a professional computer science researcher nor a programmer, and I didn't take CS as my major, so I might get fundamental, conceptual errors because of my ignorance, please feel free to correct me when I'm wrong.
 
-Secondly, as heavily inspired by [[https://github.com/CeleritasCelery/rune][rune]], a fantastic project, I consider Torrent is the "anaphoric counterpart" for rune, that is, intentionally to adopt all the technologies that rune don't use. I don't want the design to be similar, it would be no point doing so. I want this project to explore more possibilities of a rust-based emacs lisp compiler, until we have a usable one; or at least I can use lisp to write configs for other systems, for example, niri.
+First, I want to say I am not a professional computer science researcher or programmer, and I did not major in CS. I may make fundamental, conceptual mistakes because of ignorance—please feel free to correct me when I am wrong.
+
+Second, heavily inspired by [[https://github.com/CeleritasCelery/rune][Rune]], a fantastic project, I consider *Torrent* the "anaphoric counterpart" to Rune—that is, it intentionally adopts technologies that Rune does not use. I do not want the design to be similar; that would defeat the purpose. This project aims to explore other possibilities for a Rust‑based Emacs Lisp compiler until we have a usable one—or at least until I can use Lisp to write configs for other systems (for example, niri).
 
 * Compiler Architecture
-** background
-Most dynamic languages compile to bytecodes, then intepretes them in a bytecode VM. The most famous of this kind is java and its JVM. Bytecodes provide excellent cross-platform compatibility, as well as great startup time. Sometimes it is not fast enough, and we want the ability to compile the code into native machine codes. Mostly this is done by translating the bytecodes to platform-specific ISAs. However, chanllenges arrives for dynamic languages:
-- symbols, functions and variables may subject to change at runtime, thus we cannot program a stable function call during codegen;
-- we can not know the types of our variables in advance, this will prevent most instruction-level optimizations.
+** Background
+  Many dynamic languages compile to bytecode and interpret it in a bytecode VM. The most famous example is Java and the JVM. Bytecode provides excellent cross‑platform compatibility and fast startup. Sometimes that is not fast enough, and we want the ability to compile code to native machine instructions, usually by translating bytecode to platform‑specific ISAs. However, dynamic languages face challenges:
+
+- symbols, functions, and variables may change at runtime, so we cannot always generate stable calls;
+- variable types are often unknown in advance, which blocks many instruction‑level optimizations;
 - ...
 
-We can see that this problem arises because of language flexiblity. If we can "pin" the runtime, then we can provide type informations to the compiler, and generate fast code. This is the idea of Just-In-Time compilation, a.k.a JIT compilation. Fast JIT compilations offen do type specializations, function inlining, and many other techniques to make one routine as fast as possible. We also need a way to invalidate this routine when runtime envrionment is perturbed, this can be done by some guard checks. In terminaligy, we call it "optimization and de-optimization".
+These problems arise from language flexibility. If we can "pin" aspects of the runtime, we can provide type information to the compiler and generate faster code. This is the idea of *Just‑In‑Time* (JIT) compilation. Fast JITs often perform type specialization, function inlining, and other techniques to make hot paths fast. We also need a way to invalidate compiled code when assumptions no longer hold; guard checks support this *optimization and de‑optimization* cycle.
 
-Highly optimized runtimes can also add another level of JIT, the most-optimized one, which can have significant increased compile time. This is called **Tier JIT**, google's v8 and mozilla's spidermonkey both adopt this approach.
+Highly optimized runtimes often add an extra tier—a more aggressive JIT that spends more time compiling to get higher throughput. This *tiered JIT* approach is used by Google’s V8 and Mozilla’s SpiderMonkey.
 
-There's also attempts to make AOT compilation fast[cite:@serranoJavaScriptAOTCompilation2018]. It would require many advanced static analysis.
+There are also attempts to make AOT compilation fast [cite:@serranoJavaScriptAOTCompilation2018], but they require substantial static analysis.
 
 ** Bytecode VM
-there are 2 common VM type: **register VM** and **stack VM**. The stack VM is most common, JVM use a stack VM, as well as CPython and many others. Stack VM models operations to retrieve its arguments in a runtime stack. Register VM is like the physical CPU, it has a bunch of virtual registers, and operations can load&store from it instead of on stack. Still, it also use a stack for function callings. Lua 5.0 switched from stack VM to register VM[cite:@ierusalimschyImplementationLua50] [[https://github.com/MoarVM/MoarVM][MoarVM]]. The 2 types of VM's opcode are inherently different, but can also easily translated from one to another. Researches[cite:@shiVirtualMachineShowdown] also shows that although stack VM has a more dense bytecodes, register VM has fewer instructions, and generally runs faster.
+There are two common VM styles: **register VMs** and **stack VMs**. Stack VMs are most common; the JVM and CPython are examples. A stack VM retrieves operands from a runtime stack. A register VM, like a physical CPU, exposes a set of virtual registers and operates on them (but still uses a stack for calls). Lua 5.0 switched from a stack VM to a register VM [cite:@ierusalimschyImplementationLua50] [[https://github.com/MoarVM/MoarVM][MoarVM]]. The opcode sets differ, but translation between them is feasible. Research indicates that although stack VMs have denser bytecode, register VMs often execute fewer instructions and run faster [cite:@shiVirtualMachineShowdown].
 
-Emacs lisp uses a stack VM, and Rune has a rust implementation for that. In torrent, I might add a register VM in the future. Right now, it plans to use a baseline JIT or AOT compiler to replace the bytecode compiler. There's an old yet interesting blog post[cite:@UsingBytecodeWont] that argues this. However, there aren't much languages take this approach. As far as I know, Julia does not have a bytecode intepreter; Julia only dumps LLVM's bitcode. From my short experience(writing a surface code simulator), its compile time is almost unbearable. And at that time Julia lacked many language features, lacked support for enum types, buggy reloading, etc. That's why I eventually turned to rust and re-write the whole simulation program.
+Emacs Lisp uses a stack VM, and Rune provides a Rust implementation. In Torrent, I might add a register VM later. For now, the plan is to use a baseline JIT or AOT compiler instead of a bytecode interpreter. There is an old but interesting blog post arguing for this direction [cite:@UsingBytecodeWont]. However, few languages take this approach. As far as I know, Julia does not have a bytecode interpreter; it emits LLVM bitcode. In my brief experience (writing a surface‑code simulator), Julia’s compilation time was nearly unbearable, and at the time it lacked several language features (e.g., enums) and had buggy reloading. I eventually rewrote the project in Rust.
 
-However in emacs lisp I think this is a good approach, nowadays most codes are native compiled anyway, and everyone seems to be pretty happy about it. Technically speaking, most emacs code will not change once ran, only a small subset of them would change, for example when some modes advicing functions, or us users debugging elisp, writing our configs, inventing new packages, etc. Still, most time we are likely to use emacs as an editor -- because emacs is acidentally an editor, and editor, by definition, is a **tool** for editing files, not the editor itself. Anyway, we probably won't care much about compile speeds here.
+For Emacs Lisp, this approach still seems promising. Today most code ends up native‑compiled and users appear happy with that. Technically, most Emacs code does not change once loaded; only a small subset changes—for example, when modes advise functions, or when users debug Elisp, write configs, or develop packages. Most of the time, Emacs is used as an editor—a **tool** for editing files—so compile speed is less critical here.
 
-In addition to the discussion above, I use [[https://cranelift.dev][cranelift]] for the codegen backend instead of LLVM. Cranelift provides great compile speeds due to its single IR architecture, and also provides fast enough execution speed(around 15% slower than LLVM). So I won't worry about compile speed at all.
+For code generation I use [[https://cranelift.dev][Cranelift]] instead of LLVM. Cranelift’s single‑IR architecture yields excellent compile speed and sufficiently fast execution (around 15% slower than LLVM). I am therefore not concerned about compile time.
 
-Instead of bytecodes, I use a high-level IR to represent the elisp codes, that hardcode all special forms into syntax, and perform simple lexical binding analysis and closure analysis. I'll adopt more optimizations following [cite:@serranoJavaScriptAOTCompilation2018].
+Rather than bytecode, I use a high‑level IR (HIR) to represent Elisp. It encodes special forms directly and performs simple lexical‑binding and closure analyses. I plan to adopt further optimizations following [cite:@serranoJavaScriptAOTCompilation2018].
 
-One interesting things can do is that we can actually serialize this HIR in form of lisp itself, so perhaps we can use elisp itself as the IR for elisp. I don't have much thoughts now: maybe this is useful, maybe its not. [[https://github.com/cisco/ChezScheme][ChezScheme]] might use a similar idea: it does many optimizations using scheme itself, it is basically a scheme compiler written in scheme and achieves great performance. I didn't investigate more about it, maybe sometimes later, but this is definitely one great project worth to learn form
+An intriguing option is to serialize HIR as Lisp itself—i.e., use Elisp as the IR. This might or might not be useful. [[https://github.com/cisco/ChezScheme][ChezScheme]] may follow a similar idea: it performs many optimizations in Scheme; essentially a Scheme compiler written in Scheme that achieves great performance. I have not investigated this deeply yet, but it is certainly a project worth learning from.
 
-To summarize, we have the big picture for now:
+To summarize, the current big picture is:
 
-Emacs lisp Source Code -> HIR -> Baseline JIT -> Optimizing JIT
+Emacs Lisp Source → HIR → Baseline JIT → Optimizing JIT
 
-only baseline JIT is naively implemented now.
+Only the baseline JIT has a naive implementation today.
 
-* GC design
-GC theory is a huge topic for me, so I can only pick up what I read about. The main reference is the good GC handbook[cite:@jonesGarbageCollectionHandbook2023].
+* GC Design
+  GC theory is vast; I can only summarize what I have read. My main reference is the GC handbook [cite:@jonesGarbageCollectionHandbook2023].
 
 ** Tracing GC vs Reference Counting GC
-In rune's design doc, the author said that reference counting is slow, this is actually not true. Theoicitally speaking, these 2 GC paradigm can be unified[cite:@baconUnifiedTheoryGarbage]. Simply speaking, tracing GC traces the live objects while RC GC traces the dead objects. In practical RC GC has many caveats if implemented naively, but all of them can be overcomed[cite:@jonesGarbageCollectionHandbook2023]. There mainly exists 2 problems:
-1. loop detection is hard, especially to do it concurrently;
-2. write barrier can cause mutator to have much overhead.
+Rune’s design document claims reference counting is slow; that is not necessarily true. The two paradigms can be unified in theory [cite:@baconUnifiedTheoryGarbage]. In short, tracing GC finds *live* objects, while RC identifies *dead* ones. In practice, naive RC has pitfalls, but they can be addressed [cite:@jonesGarbageCollectionHandbook2023]. The main challenges are:
 
-The first problem is solved in [cite:@baconConcurrentCycleCollection2001](more citations needed) and several follow ups, described in [cite:@jonesGarbageCollectionHandbook2023]. The second problem can be solved by using technique called **deferred reference counting** and **Coalesced reference counting**, especially the latter is super powerful. We also have LXR[cite:@zhaoLowLatencyHighThroughputGarbage2022], the most recent high performance RC GC.
+1. cycle detection, especially in concurrent settings;
+2. write‑barrier overhead on the mutator.
 
-** rust implementations
-[[https://github.com/maplant/scheme-rs][scheme-rs]] implements the bacon-rajan alorithm, where I directly copied its implementation in my repo. However, it does not adopt coalesced reference counting, and it uses tokio's channel to send mutation buffers immediately, which adds significant overhead. In test of Fibonacci sequence calculations, scheme-rs performs badly. For some reasons I cannot run flamegraph or perf when tokio is enabled, so I failed to gather perf data for now, but I believe the major factor is GC.
+Cycle collection is addressed by [cite:@baconConcurrentCycleCollection2001] and follow‑ups (see [cite:@jonesGarbageCollectionHandbook2023]). Barrier costs can be mitigated through **deferred reference counting** and **coalesced reference counting**; the latter is particularly powerful. We also have LXR [cite:@zhaoLowLatencyHighThroughputGarbage2022], a recent high‑performance RC GC.
 
-Recently the bacon-rajan algorithm is refined, by using a BFS instead of DFS[cite:@giallorenzoBreadthfirstCycleCollection2025]. The implementation is in rust. I haven't read this paper thoroughly though.
+** Rust implementations
+[[https://github.com/maplant/scheme-rs][scheme-rs]] implements the Bacon–Rajan algorithm, which I initially copied. However, it does not adopt coalesced RC and uses Tokio channels to send mutation buffers immediately, adding overhead. On Fibonacci benchmarks, scheme‑rs performs poorly. I could not run flamegraph or perf with Tokio enabled, so I lack data, but I suspect the GC is the major factor.
 
-The [[https://mmtk.io][MMTK]] is a growing GC SDK written in rust. LXR[cite:@zhaoLowLatencyHighThroughputGarbage2022] implements their work in a separate branch in MMTK, however their are thousands divergent commits, so it will take time to merge. MMTK looks promising now and already provides a solid GC platform, my ultimate goal is to integrate with MMTK some day.
+Recently, a BFS‑based refinement of Bacon–Rajan was proposed [cite:@giallorenzoBreadthfirstCycleCollection2025], with a Rust implementation. I have not read the paper thoroughly yet.
+
+[[[https://mmtk.io][MMTK](https://mmtk.io][MMTK)]] is a growing GC SDK in Rust. LXR [cite:@zhaoLowLatencyHighThroughputGarbage2022] is implemented on a separate MMTK branch; there are many divergent commits, so merging will take time. MMTK already provides a solid platform; my long‑term goal is to integrate with it.
 
 * Lisp Object Representation
-** objects are tagged pointer
-I took rune's approach here, a shifting tagged pointer. Since most objects in elisp are pointers, and we probably won't do scientific computations in elisp, so tagging method is really irrelevent to performance. Currently floating numbers implementation is wrong, I'm still thinking whether f32 is enough. [[file:./src/core/tagged_ptr.rs][tagged_ptr.rs]] provides interfaces for tagged pointer, I think its abstraction is good. 
+** Objects are tagged pointers
+  I follow Rune’s approach: a shifting tagged pointer. Since most Elisp values are pointers and we are unlikely to do numeric‑heavy work, the tagging scheme is not performance‑critical. The current floating point implementation is incorrect; I am still deciding whether ~f32~ is sufficient. [[file:./src/core/tagged_ptr.rs][tagged_ptr.rs]] provides the tagged‑pointer interfaces; the abstraction seems sound.
 
-** ergomics
-In rune, to deal with moving GC, the author gives a innovative solution that ulitizes rust's lifetime system[cite:@ImplementingSafeGarbage2022]. If I don't get it wrong(I hope), This system pins objects on stack to not move during GC, and provide static checks(the lifetime system) to prevent errors from happening. In the JIT context, this method no longer works? and we have to use the stack map. in Torrent I use a fake stackmap for now, as I'm investigating cranelift's API.
-[[https://bytecodealliance.zulipchat.com/#narrow/channel/217117-cranelift/topic/how.20to.20use.20stack.20map.20for.20GC/with/539611462][a question I ask]] and [[https://bytecodealliance.zulipchat.com/#narrow/channel/217117-cranelift/topic/Guidelines.20on.20marking.20stack.20map.20entries/with/540311697][another discussion]] provides good guideline for retrieving stack maps in cranelift.
+** Ergonomics
+Rune handles moving GC with a clever technique using Rust lifetimes [cite:@ImplementingSafeGarbage2022]. If I understand correctly, it pins objects on the stack during GC and relies on lifetime checks to prevent errors. In a JIT setting this no longer suffices; we need stack maps. Torrent uses a placeholder stack map for now while I investigate Cranelift’s API. [[https://bytecodealliance.zulipchat.com/#narrow/channel/217117-cranelift/topic/how.20to.20use.20stack.20map.20for.20GC/with/539611462][a question I asked]] and [[https://bytecodealliance.zulipchat.com/#narrow/channel/217117-cranelift/topic/Guidelines.20on.20marking.20stack.20map.20entries/with/540311697][another discussion]] provide guidance on retrieving stack maps in Cranelift.
 
-For moving GCs, I believe a forwarding pointer with types like Object::Indirect will do the trick. I think I need to look more papers to decide what to do, a poor knowledge base only lead to poor designs.
+For moving collectors, a forwarding pointer (e.g., ~Object::Indirect~) should suffice. I need to read more papers before committing; poor knowledge leads to poor design.
 
-the [[https://docs.rs/inventory/latest/inventory/][inventory]] crate is used to collect the rust subroutes, i.e. those /#[defun]/ marked functions. In Rune, this is done by utilizing build.rs, which is limited and harder to maintain. This idea is also stealed from scheme-rs.
+The [[https://docs.rs/inventory/latest/inventory/][inventory]] crate collects Rust subroutines, i.e., ~#[defun]~-marked functions. Rune uses ~build.rs~ for this, which is more limited and harder to maintain. This idea is also borrowed from scheme‑rs.
 
-* concurrency
-Rune's design is described in this [[https://coredumped.dev/2022/05/19/a-vision-of-a-multi-threaded-emacs/][blog post]]. I must admit I know basically nothing about concurrent for now, so I cannot give valuable opinions. Rune aim to be compatible with emacs, then I shall discover new approaches in Torrent, by not compatible with emacs(lol). 
+* Concurrency
+Rune’s concurrency vision is described in this [[https://coredumped.dev/2022/05/19/a-vision-of-a-multi-threaded-emacs/][blog post]]. I currently know very little about concurrency, so I cannot offer strong opinions. Rune aims for Emacs compatibility; Torrent will feel free to diverge.
 
-* misceallous
+* UI
+In my vision, the new emacs UI should not be limited to 2D scenes and text buffers. But there aren't much choice for rust's GUI toolkit. [[https://github.com/linebender/vello][vello]] and [[https://github.com/linebender/xilem][xilem]] is good and can be used, but vello uses compute shader pipeline, could be hard to integrate with other wgpu ecosystems. The viewmodel is proposed in [[https://github.com/CeleritasCelery/rune/pull/120][this pull request]], it obviously needs more careful considerations.
+
+* Miscellaneous
 ** String representation
-Rune has a great analysis on emacs string representation. However my only use cases are utf-8 strings, the only usage of unibyte-string is to pass binary data through FFI, but why not design a new type then. Naively I recon a Arc<String> with Arc::make_mut might do the job, we don't need to manage strings with our GC smart pointer; they can be managed by rust directly.
-** symbol representation and string interner
-Torrent uses lasso as the string interner. To do AOT compilation, we may need to serialize/deserialize its data.
+  Rune has a great analysis of Emacs strings. My use cases are UTF‑8 strings; the only reason for unibyte strings is passing binary data through FFI—better served by a dedicated type. An ~Arc<String>~ with ~Arc::make_mut~ should be adequate. We do not need to manage strings with the GC; Rust can manage them directly.
 
-The symbol representation is messy. There are 2 types, Ident and Symbol: Ident are just a lasso's tag, and Symbol is the combination of symbol table's index and a tag for fallback. This design is somewhat redundant, and I need more thorough design of symbol and ident.
+** Symbols and interning
+Torrent uses ~lasso~ as the string interner. For AOT compilation, we may need to serialize/deserialize its state.
 
-* references
+The current symbol representation is messy. There are two types: ~Ident~ (a ~lasso~ tag) and ~Symbol~ (a symbol‑table index plus a fallback tag). This is somewhat redundant; a more coherent design is needed.
+
+* References
 #+print_bibliography:
