@@ -22,7 +22,7 @@ Highly optimized runtimes often add an extra tier—a more aggressive JIT that s
 
 There are also attempts to make AOT compilation fast [cite:@serranoJavaScriptAOTCompilation2018], but they require substantial static analysis.
 
-** Bytecode VM
+** Bytecode VM and JIT compilation
 There are two common VM styles: **register VMs** and **stack VMs**. Stack VMs are most common; the JVM and CPython are examples. A stack VM retrieves operands from a runtime stack. A register VM, like a physical CPU, exposes a set of virtual registers and operates on them (but still uses a stack for calls). Lua 5.0 switched from a stack VM to a register VM [cite:@ierusalimschyImplementationLua50] [[https://github.com/MoarVM/MoarVM][MoarVM]]. The opcode sets differ, but translation between them is feasible. Research indicates that although stack VMs have denser bytecode, register VMs often execute fewer instructions and run faster [cite:@shiVirtualMachineShowdown].
 
 Emacs Lisp uses a stack VM, and Rune provides a Rust implementation. In Torrent, I might add a register VM later. For now, the plan is to use a baseline JIT or AOT compiler instead of a bytecode interpreter. There is an old but interesting blog post arguing for this direction [cite:@UsingBytecodeWont]. However, few languages take this approach. As far as I know, Julia does not have a bytecode interpreter; it emits LLVM bitcode. In my brief experience (writing a surface‑code simulator), Julia’s compilation time was nearly unbearable, and at the time it lacked several language features (e.g., enums) and had buggy reloading. I eventually rewrote the project in Rust.
@@ -58,6 +58,11 @@ Cycle collection is addressed by [cite:@baconConcurrentCycleCollection2001] and 
 Recently, a BFS‑based refinement of Bacon–Rajan was proposed [cite:@giallorenzoBreadthfirstCycleCollection2025], with a Rust implementation. I have not read the paper thoroughly yet.
 
 [[[https://mmtk.io][MMTK](https://mmtk.io][MMTK)]] is a growing GC SDK in Rust. LXR [cite:@zhaoLowLatencyHighThroughputGarbage2022] is implemented on a separate MMTK branch; there are many divergent commits, so merging will take time. MMTK already provides a solid platform; my long‑term goal is to integrate with it.
+
+** aside: GC and QEC
+I feel like there could be some connections between (cocurrent) Garbage Collection and Quantum Error Correction. Only that GC must be determinsitic, while QEC can be probablistic.
+
+One big chanllenge in QEC is that errors can generate during measurement, making the measurement result unreliable. This is similar to a concurrent mutator, maybe theres some paradigms we can learn about. Someone(citation needed) already maps surface code to a mine-sweeping game; there's another paper even adopts AdS/CFT paradigm(probably irrelevant here). I wonder if there's some hidden connection between these things.
 
 * Lisp Object Representation
 ** Objects are tagged pointers
