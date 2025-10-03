@@ -212,37 +212,33 @@ pub fn try_expand_macro_call(
         _ => return Ok(None), // Only global symbols can be macros
     };
 
-    // Try to load as a macro
-    let result = env.load_symbol_with(symbol, Some(FuncCellType::Macro), |val| {
-        let ObjectRef::Function(func) = val.as_ref() else {
-            return Ok(None);
-        };
+    // Try to load as a macro using guard API
+    let guard = match env.load_symbol_guard(symbol, Some(FuncCellType::Macro)) {
+        Ok(g) => g,
+        Err(_) => return Ok(None), // Symbol not found
+    };
+    let val = guard.as_ref();
+    let ObjectRef::Function(func) = val.as_ref() else {
+        return Ok(None);
+    };
 
-        // Convert arguments to LispObjects (unevaluated for macros)
-        let args = call
-            .args
-            .iter()
-            .map(|arg| {
-                let obj: LispObject = arg.clone().into();
-                obj.tag()
-            })
-            .collect::<Vec<_>>();
+    // Convert arguments to LispObjects (unevaluated for macros)
+    let args = call
+        .args
+        .iter()
+        .map(|arg| {
+            let obj: LispObject = arg.clone().into();
+            obj.tag()
+        })
+        .collect::<Vec<_>>();
 
-        // Execute the macro
-        let result = func.run(&args, env)?;
+    // Execute the macro
+    let result = func.run(&args, env)?;
 
-        // Convert result back to ExprType
-        let tokens = lisp_object_to_tokens(result.untag());
-        let expanded_expr = parse_tokens_to_expr(tokens)?;
-
-        Ok(Some(expanded_expr.ty.into_inner()))
-    });
-
-    match result {
-        Ok(Some(expanded)) => Ok(Some(expanded)),
-        Ok(None) => Ok(None),
-        Err(_) => Ok(None), // Symbol not found or not a macro
-    }
+    // Convert result back to ExprType
+    let tokens = lisp_object_to_tokens(result.untag());
+    let expanded_expr = parse_tokens_to_expr(tokens)?;
+    Ok(Some(expanded_expr.ty.into_inner()))
 }
 
 /// Parse tokens back into an expression

@@ -28,6 +28,8 @@ pub enum SpecStackItem {
 }
 
 use std::cell::RefCell;
+use std::marker::PhantomData;
+use std::mem::ManuallyDrop;
 
 #[derive(Debug, Default)]
 pub struct Environment {
@@ -120,6 +122,22 @@ fn tls_unbind_to_mark(env: &Environment) {
     });
 }
 
+// A fake guard that mimics a lock-free map read guard, returning a value
+// view without cloning or affecting refcounts. The inner Object is placed
+// in ManuallyDrop so dropping the guard won't decrement RC. The PhantomData
+// ties the guard lifetime to the environment/map access even though no
+// actual borrow is held.
+#[derive(Debug)]
+pub struct EnvValueGuard<'a> {
+    value: ManuallyDrop<Object>,
+    _marker: PhantomData<&'a Object>,
+}
+
+impl<'a> EnvValueGuard<'a> {
+    pub fn as_ref(&self) -> &Object { &self.value }
+    pub fn raw_i64(&self) -> i64 { self.value.0 as i64 }
+}
+
 impl Environment {
     /// load symbol's value from the global symbol table. Neglect the stacked lexical values.
     /// this can be used to load function cells, as they are always global;
@@ -165,6 +183,49 @@ impl Environment {
                 }
             }
         })
+    }
+
+    /// Load a symbol's binding and return a guard that views the value without
+    /// inc/dec of refcounts. When `load_function_cell` is Some, returns the
+    /// function cell's payload (cdr) after verifying marker.
+    pub fn load_symbol_guard<'a>(
+        &'a self,
+        symbol: Symbol,
+        load_function_cell: Option<FuncCellType>,
+    ) -> RuntimeResult<EnvValueGuard<'a>> {
+        // Fast-path: thread-local dynamic binding lookup for values
+        if load_function_cell.is_none() {
+            if let Some(idx) = DYN_TOP.with(|top| top.borrow().get(&symbol).copied()) {
+                if let Some(raw) = DYN_STACK.with(|stack| stack.borrow().get(idx).map(|n| n.value.0)) {
+                    return Ok(EnvValueGuard { value: ManuallyDrop::new(Object(raw)), _marker: PhantomData });
+                }
+            }
+        }
+
+        let cell_ref = match self.symbol_map.get().get_symbol_cell_ref(symbol) {
+            Some(cell) => cell,
+            None => return Err(RuntimeError::unbound_symbol(symbol)),
+        };
+
+        match load_function_cell {
+            Some(ty) => {
+                let ObjectRef::Cons(cons) = cell_ref.func.as_ref() else {
+                    return Err(RuntimeError::wrong_type("cons", cell_ref.func.get_tag()));
+                };
+                let ObjectRef::Symbol(marker) = cons.car().as_ref() else {
+                    return Err(RuntimeError::wrong_type("symbol", cons.car().get_tag()));
+                };
+                if marker.ident() != ty.ident() {
+                    return Err(RuntimeError::internal_error("not a function"));
+                }
+                let val = cons.cdr();
+                Ok(EnvValueGuard { value: ManuallyDrop::new(Object(val.0)), _marker: PhantomData })
+            }
+            None => {
+                tracing::debug!("loaded value from global(ref): {:?}", cell_ref.value);
+                Ok(EnvValueGuard { value: ManuallyDrop::new(Object(cell_ref.value.0)), _marker: PhantomData })
+            }
+        }
     }
 
     pub fn get_symbol_cell(&self, symbol: Symbol) -> Option<SymbolCell> {

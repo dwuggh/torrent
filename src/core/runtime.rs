@@ -67,12 +67,12 @@ fn funcall(func: &Object, args: &[Object], env: &Environment) -> Result<Object> 
 
     match func.as_ref() {
         ObjectRef::Symbol(sym) => {
-            env.load_symbol_with(sym, Some(FuncCellType::Function), |obj| {
-                let ObjectRef::Function(func) = obj.as_ref() else {
-                    runtime_bail!(WrongType, expected: "function", actual: obj.get_tag());
-                };
-                func.run(args, env)
-            })
+            let guard = env.load_symbol_guard(sym, Some(FuncCellType::Function))?;
+            let obj = guard.as_ref();
+            let ObjectRef::Function(func) = obj.as_ref() else {
+                runtime_bail!(WrongType, expected: "function", actual: obj.get_tag());
+            };
+            func.run(args, env)
             // val is dropped here. its refcount increased in load_symbol, so its fine.
         }
         ObjectRef::Function(func) => func.run(args, env),
@@ -137,9 +137,9 @@ fn load_symbol_value(symbol: Symbol, load_function_cell: u64, env: &Environment)
         "loading symbol value: {} {load_function_cell}",
         symbol.name()
     );
-    let load_ptr = |obj: &Object| Ok(obj.0 as i64);
     let ty = FuncCellType::from_num(load_function_cell);
-    env.load_symbol_with(symbol, ty, load_ptr)
+    let guard = env.load_symbol_guard(symbol, ty)?;
+    Ok(guard.raw_i64())
 }
 
 #[internal_fn]
@@ -147,12 +147,12 @@ fn get_func_ptr(func: &Object, env: &Environment) -> Result<i64> {
     tracing::debug!("calling get_func_ptr");
     let func = match func.as_ref() {
         ObjectRef::Symbol(symbol) => {
-            env.load_symbol_with(symbol, Some(FuncCellType::Function), |func| {
-                let ObjectRef::Function(func) = func.as_ref() else {
-                    runtime_bail!(WrongType, expected: "function", actual: func.get_tag());
-                };
-                get_func_ptr_from_function(func, env)
-            })
+            let guard = env.load_symbol_guard(symbol, Some(FuncCellType::Function))?;
+            let obj = guard.as_ref();
+            let ObjectRef::Function(func) = obj.as_ref() else {
+                runtime_bail!(WrongType, expected: "function", actual: obj.get_tag());
+            };
+            get_func_ptr_from_function(func, env)
         }
         ObjectRef::Function(func) => get_func_ptr_from_function(func, env),
         _ => runtime_bail!(WrongType, expected: "function", actual: func.get_tag()),

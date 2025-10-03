@@ -316,6 +316,14 @@ impl SymbolMap {
         job(&cell)
     }
 
+    /// Borrow the symbol cell by reference without cloning.
+    pub fn get_symbol_cell_ref(&self, symbol: Symbol) -> Option<&SymbolCell> {
+        match symbol.index() {
+            Some(index) => self.map.get_index(index).map(|(_, cell)| cell),
+            None => self.map.get(&symbol.ident()),
+        }
+    }
+
     /// Get the symbol cell for a given symbol.
     ///
     /// # Arguments

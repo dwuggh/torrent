@@ -440,50 +440,47 @@ fn expand_quoted_data(data: &QuotedData, scope: &Scope, env: &Environment) -> Ru
 /// Legacy function - now redirects to the new macro expansion system
 pub fn macro_expand_call(call: &Call, env: &Environment) -> Option<RuntimeResult<Expr>> {
     let symbol = call.symbol.get().into();
-    let result = env
-        .load_symbol_with(symbol, Some(FuncCellType::Macro), |val| {
-            let ObjectRef::Function(func) = val.as_ref() else {
-                return Ok(Err(RuntimeError::WrongType {
-                    expected: "function",
-                    actual: (val.get_tag()),
-                }));
-            };
-            let args = call
-                .args
-                .iter()
-                .map(|arg| {
-                    let obj: LispObject = arg.clone().into();
-                    obj.tag()
-                })
-                .collect::<Vec<_>>();
-
-            let result = func.run(&args, env).and_then(|result| {
-                // Convert the macro result to tokens
-                let tokens = lisp_object_to_tokens(result.untag());
-
-                // Parse the tokens back into an expression
-                let tokens_with_span = tokens
-                    .into_iter()
-                    .map(|tok| (tok, crate::core::parser::Span::dummy()));
-                let stream = Stream::from_iter(tokens_with_span)
-                    .map(crate::core::parser::Span::dummy(), |(t, s)| (t, s));
-
-                match crate::core::parser::expr_parser::expr_parser()
-                    .parse(stream)
-                    .into_result()
-                {
-                    Ok(expr) => Ok(expr),
-                    Err(parse_errors) => Err(RuntimeError::MacroExpansionError {
-                        message: format!(
-                            "Failed to parse macro expansion result: {:?}",
-                            parse_errors
-                        ),
-                    }),
-                }
-            });
-            Ok(result)
+    let guard = env.load_symbol_guard(symbol, Some(FuncCellType::Macro)).ok()?;
+    let val = guard.as_ref();
+    let ObjectRef::Function(func) = val.as_ref() else {
+        return Some(Err(RuntimeError::WrongType {
+            expected: "function",
+            actual: (val.get_tag()),
+        }));
+    };
+    let args = call
+        .args
+        .iter()
+        .map(|arg| {
+            let obj: LispObject = arg.clone().into();
+            obj.tag()
         })
-        .ok();
+        .collect::<Vec<_>>();
 
-    result
+    let result = func.run(&args, env).and_then(|result| {
+        // Convert the macro result to tokens
+        let tokens = lisp_object_to_tokens(result.untag());
+
+        // Parse the tokens back into an expression
+        let tokens_with_span = tokens
+            .into_iter()
+            .map(|tok| (tok, crate::core::parser::Span::dummy()));
+        let stream = Stream::from_iter(tokens_with_span)
+            .map(crate::core::parser::Span::dummy(), |(t, s)| (t, s));
+
+        match crate::core::parser::expr_parser::expr_parser()
+            .parse(stream)
+            .into_result()
+        {
+            Ok(expr) => Ok(expr),
+            Err(parse_errors) => Err(RuntimeError::MacroExpansionError {
+                message: format!(
+                    "Failed to parse macro expansion result: {:?}",
+                    parse_errors
+                ),
+            }),
+        }
+    });
+
+    Some(result)
 }
