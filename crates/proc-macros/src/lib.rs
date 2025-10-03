@@ -11,6 +11,18 @@ mod defun;
 mod defun_internal;
 mod function;
 
+/// register a rust subroutine to lisp runtime.
+/// Arguments can be:
+/// 1. primitive types, like i64, f64 or char, Symbol or LispSymbol;
+/// 2. `Object`, which you owns this object;
+/// 3. A inner type of `ObjectRef`, will not call `drop`.
+/// 4. For &optional arguments, you can use Option<Arg>, with `Arg` in either of previous form.
+/// 5. for &rest arguemnts, you can have a slice like &[Object]. the inner type cannot be others.
+/// 6. the last argument's type must be `&Envrionment`.
+/// Most time, argument type 3 is encouraged, in this way the system is GC transparent,
+/// so you shall not worry about GC implmenation.
+/// the return type should be `Object`, subtype of `LispObject`, `Result<Object>` or subtype of
+/// `Result<LispObject>`.
 #[proc_macro_attribute]
 pub fn defun(attr_ts: TokenStream, fn_ts: TokenStream) -> TokenStream {
     let function = parse_macro_input!(fn_ts as function::Function);
