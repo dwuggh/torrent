@@ -558,6 +558,12 @@ pub fn inventory_submit(
         #[automatically_derived]
         #[doc(hidden)]
         fn #register_func_name(jit_builder: &mut cranelift_jit::JITBuilder) {
+            tracing::info!(
+                "adding native function {}({}): {:?}",
+                stringify!(#subr_name),
+                stringify!(#func_name),
+                #func_name as *const u8
+            );
 
             jit_builder.symbol(#lisp_name, #func_name as *const u8);
 

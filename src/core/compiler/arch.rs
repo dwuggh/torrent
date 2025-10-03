@@ -24,7 +24,9 @@ mod x86_64 {
     #[inline]
     pub(crate) unsafe fn current_frame_pointer() -> *const u8 {
         let fp: usize;
-        core::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack, preserves_flags));
+        unsafe {
+            core::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack, preserves_flags));
+        }
         fp as *const u8
     }
 }
@@ -51,7 +53,9 @@ mod aarch64 {
     #[inline]
     pub(crate) unsafe fn current_frame_pointer() -> *const u8 {
         let fp: usize;
-        core::arch::asm!("mov {fp}, x29", fp = out(reg) fp, options(nomem, nostack, preserves_flags));
+        unsafe {
+            core::arch::asm!("mov {fp}, x29", fp = out(reg) fp, options(nomem, nostack, preserves_flags));
+        }
         fp as *const u8
     }
 }
