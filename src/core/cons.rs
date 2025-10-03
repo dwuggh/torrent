@@ -1,4 +1,4 @@
-use proc_macros::Trace;
+use proc_macros::{defun, Trace};
 
 use crate::{
     core::Tagged,
@@ -196,5 +196,70 @@ impl Cons {
 impl From<Cons> for Object {
     fn from(value: Cons) -> Self {
         LispCons(Gc::new(value)).tag()
+    }
+}
+
+#[defun]
+fn cons(car: Object, cdr: Object) -> Object {
+    LispCons::new(car, cdr).tag()
+}
+
+#[defun]
+fn list(vals: &[Object]) -> Object {
+    if vals.is_empty() {
+        nil()
+    } else {
+        let iter = vals.iter().map(|o| o.clone());
+        LispCons::from_iter(iter).map(|c| c.tag()).unwrap_or_else(nil)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::number::LispInteger;
+    use crate::core::object::{ObjectRef, nil};
+
+    #[test]
+    fn test_cons_basic() {
+        let car = LispInteger(42).tag();
+        let cdr = nil();
+        let pair = super::cons(car.clone(), cdr.clone());
+
+        match pair.as_ref() {
+            ObjectRef::Cons(cons_cell) => {
+                let ObjectRef::Int(v) = cons_cell.car().as_ref() else { panic!("car not int") };
+                assert_eq!(v, 42);
+                assert!(matches!(cons_cell.cdr().as_ref(), ObjectRef::Nil));
+            }
+            _ => panic!("cons did not return a cons cell"),
+        }
+    }
+
+    #[test]
+    fn test_list_empty() {
+        let lst = super::list(&[]);
+        assert!(matches!(lst.as_ref(), ObjectRef::Nil));
+    }
+
+    #[test]
+    fn test_list_multiple() {
+        let vals = vec![LispInteger(1).tag(), LispInteger(2).tag(), LispInteger(3).tag()];
+        let lst = super::list(&vals);
+        match lst.as_ref() {
+            ObjectRef::Cons(cons_cell) => {
+                let v = cons_cell.to_vec().expect("proper list");
+                assert_eq!(v.len(), 3);
+                let ints: Vec<i64> = v
+                    .into_iter()
+                    .map(|o| {
+                        let ObjectRef::Int(i) = o.as_ref() else { panic!("not int") };
+                        i
+                    })
+                    .collect();
+                assert_eq!(ints, vec![1, 2, 3]);
+            }
+            _ => panic!("list did not return cons"),
+        }
     }
 }
