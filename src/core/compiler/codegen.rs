@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use cranelift::codegen::Context;
 use cranelift::codegen::ir::{BlockCall, JumpTableData, TrapCode};
+use cranelift::codegen::Context;
 use cranelift::prelude::*;
 use cranelift_jit::JITModule;
 use cranelift_module::DataDescription;
@@ -9,9 +9,8 @@ use cranelift_module::FuncId;
 use cranelift_module::Module;
 use rustc_hash::FxHashSet;
 
-use crate::core::Tagged;
 use crate::core::compiler::error::{CodegenError, CodegenResult};
-use crate::core::compiler::stack_map::{FunctionMetadata, append_func_metadata};
+use crate::core::compiler::stack_map::{append_func_metadata, FunctionMetadata};
 use crate::core::function::FunctionSignature;
 use crate::core::function::LispFunction;
 use crate::core::ident::Ident;
@@ -20,6 +19,7 @@ use crate::core::object::TRUE;
 use crate::core::parser::expr::*;
 use crate::core::symbol::LispSymbol;
 use crate::core::symbol::Symbol;
+use crate::core::Tagged;
 
 #[derive(Debug)]
 pub struct UnresolvedClosure {
@@ -82,20 +82,119 @@ impl UnresolvedClosure {
     }
 }
 
+#[allow(dead_code)]
+pub struct CodegenContext<'a> {
+    pub module: &'a mut JITModule,
+    pub data_desc: &'a mut DataDescription,
+    pub builtin_funcs: &'a HashMap<String, FuncId>,
+}
+
+impl<'a> CodegenContext<'a> {
+    pub fn from_parts(
+        module: &'a mut JITModule,
+        data_desc: &'a mut DataDescription,
+        builtin_funcs: &'a HashMap<String, FuncId>,
+    ) -> Self {
+        Self {
+            module,
+            data_desc,
+            builtin_funcs,
+        }
+    }
+
+    /// Define, collect stack maps, finalize, and return the finalized function pointer.
+    pub fn define_and_finalize_function(
+        &mut self,
+        ctx: &mut Context,
+        func_id: FuncId,
+    ) -> *const u8 {
+        // Define the function into the module
+        self.module.define_function(func_id, ctx).unwrap();
+
+        // Collect stack maps emitted by Cranelift for GC
+        let compiled_code = ctx.compiled_code().expect("compiled code missing");
+        let stack_maps = compiled_code
+            .buffer
+            .user_stack_maps()
+            .into_iter()
+            .map(|(offset, length, map)| {
+                let refs = map.entries().map(|val| val.1).collect::<Vec<_>>();
+                (*offset, *length, refs)
+            })
+            .collect::<Vec<_>>();
+        let func_size = compiled_code.buffer.total_size() as usize;
+
+        // Clear context and finalize
+        self.module.clear_context(ctx);
+        self.module.finalize_definitions().unwrap();
+        let func_ptr = self.module.get_finalized_function(func_id);
+
+        // Register function metadata for stack scanning
+        let metadata = FunctionMetadata::new(func_ptr, func_size, stack_maps);
+        append_func_metadata(metadata);
+
+        func_ptr
+    }
+}
+
 pub struct Codegen<'a> {
-    module: &'a mut JITModule,
-    data_desc: &'a mut DataDescription,
+    ctx: CodegenContext<'a>,
     builder: FunctionBuilder<'a>,
     func: LispFunction,
     locals: Vec<(Arg, Variable)>,
     captures: FxHashSet<Arg>,
     pub func_id: FuncId,
     env: Value,
-    builtin_funcs: &'a HashMap<String, FuncId>,
     defined_funcs: Vec<Closure>,
 }
 
 impl<'a> Codegen<'a> {
+    /// Shared boilerplate for declaring a function, creating a FunctionBuilder,
+    /// preparing the entry block, and returning the block parameters.
+    ///
+    /// This consolidates the common setup used by both `Codegen::new` and
+    /// `Codegen::new_empty` after their respective signatures are constructed.
+    fn create_function_prologue(
+        module: &mut JITModule,
+        fctx: &'a mut FunctionBuilderContext,
+        ctx: &'a mut Context,
+    ) -> CodegenResult<(FunctionBuilder<'a>, FuncId, Vec<Value>)> {
+        let func_id = module.declare_anonymous_function(&ctx.func.signature)?;
+        tracing::debug!("Declared anonymous function with id: {:?}", func_id);
+
+        let mut builder = FunctionBuilder::new(&mut ctx.func, fctx);
+        let entry_block = builder.create_block();
+        builder.append_block_params_for_function_params(entry_block);
+        builder.switch_to_block(entry_block);
+        builder.seal_block(entry_block);
+
+        let params = builder.block_params(entry_block).to_vec();
+        tracing::debug!("Entry block has {} parameters", params.len());
+
+        Ok((builder, func_id, params))
+    }
+
+    /// Assemble a `Codegen` from common parts. This avoids duplicating struct
+    /// construction across constructors.
+    fn assemble(
+        cgctx: CodegenContext<'a>,
+        builder: FunctionBuilder<'a>,
+        func: LispFunction,
+        env: Value,
+        func_id: FuncId,
+    ) -> Self {
+        Self {
+            ctx: cgctx,
+            builder,
+            func,
+            locals: Vec::new(),
+            captures: Default::default(),
+            env,
+            func_id,
+            defined_funcs: Vec::new(),
+        }
+    }
+
     pub fn new_empty<'s>(
         module: &'a mut JITModule,
         data_desc: &'a mut DataDescription,
@@ -114,44 +213,20 @@ impl<'a> Codegen<'a> {
             sig.params.len(),
             sig.returns.len()
         );
+        // Prepare common parts
+        let (builder, func_id, params) = Self::create_function_prologue(module, fctx, ctx)?;
+        let cgctx = CodegenContext::from_parts(module, data_desc, builtin_funcs);
 
-        let func_id = module.declare_anonymous_function(&ctx.func.signature)?;
-        tracing::debug!("Declared anonymous function with id: {:?}", func_id);
-
-        let mut builder = FunctionBuilder::new(&mut ctx.func, fctx);
-
-        let entry_block = builder.create_block();
-        builder.append_block_params_for_function_params(entry_block);
-        builder.switch_to_block(entry_block);
-        builder.seal_block(entry_block);
-        // builder.block_params(entry_block);
-
-        let block_params = builder.block_params(entry_block);
-        tracing::debug!("Entry block has {} parameters", block_params.len());
-
-        let env = block_params[0];
+        let env = params[0];
 
         let func = LispFunction::new_closure(func_id, FunctionSignature::default());
-        // let closure_val = translate_value(&mut builder, func_runtime_val);
 
-        let mut codegen = Self {
-            module,
-            data_desc,
-            builtin_funcs,
-            builder,
-            func,
-
-            locals: Vec::new(),
-            captures: Default::default(),
-            env,
-            func_id,
-            defined_funcs: Vec::new(),
-        };
+        let mut codegen = Self::assemble(cgctx, builder, func, env, func_id);
 
         let fp = codegen.builder.ins().get_frame_pointer(types::I64);
-        let ra = codegen.builder.ins().get_return_address(types::I64);
+        // let ra = codegen.builder.ins().get_return_address(types::I64);
 
-        codegen.call_internal("sm_dbg", &[ra]);
+        // codegen.call_internal("sm_dbg", &[ra]);
         codegen.call_internal("set_trampoline_start_fp", &[fp]);
 
         Ok(codegen)
@@ -167,31 +242,12 @@ impl<'a> Codegen<'a> {
     ) -> CodegenResult<Self> {
         tracing::debug!("Creating new codegen with config: {:?}", lambda);
 
-        let argc = lambda.args.total();
         let use_trampoline = lambda.args.use_trampoline();
 
         // make signature
         let sig = &mut ctx.func.signature;
 
-        // TODO move this as function for FunctionSignature
-
-        if lambda.args.use_trampoline() {
-            // args_ptr: pointer to arguments array
-            sig.params.push(AbiParam::new(types::I64));
-            // args_cnt: number of arguments
-            sig.params.push(AbiParam::new(types::I64));
-            // env arg
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-        } else {
-            for _ in 0..argc {
-                sig.params.push(AbiParam::new(types::I64));
-            }
-
-            // env arg
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-        }
+        prepare_signature(&lambda.args, sig);
 
         tracing::debug!(
             "Function signature created with {} params, {} returns(use trampoline: {use_trampoline})",
@@ -199,18 +255,9 @@ impl<'a> Codegen<'a> {
             sig.returns.len()
         );
 
-        let func_id = module.declare_anonymous_function(&ctx.func.signature)?;
-        tracing::debug!("Declared anonymous function with id: {:?}", func_id);
-
-        let mut builder = FunctionBuilder::new(&mut ctx.func, fctx);
-
-        let entry_block = builder.create_block();
-        builder.append_block_params_for_function_params(entry_block);
-        builder.switch_to_block(entry_block);
-        builder.seal_block(entry_block);
-        // builder.block_params(entry_block);
-
-        let params = builder.block_params(entry_block).to_vec();
+        // Prepare common parts
+        let (builder, func_id, params) = Self::create_function_prologue(module, fctx, ctx)?;
+        let cgctx = CodegenContext::from_parts(module, data_desc, builtin_funcs);
 
         let env = if use_trampoline {
             params
@@ -224,22 +271,10 @@ impl<'a> Codegen<'a> {
                 .unwrap_or_else(|| panic!("expected env parameter for direct call"))
         };
 
-        let locals = Vec::new();
         let signature = FunctionSignature::from_args(&lambda.args);
         let func = LispFunction::new_closure(func_id, signature);
 
-        let mut codegen = Self {
-            module,
-            data_desc,
-            builtin_funcs,
-            builder,
-            locals,
-            func,
-            env,
-            func_id,
-            defined_funcs: Vec::new(),
-            captures: Default::default(),
-        };
+        let mut codegen = Self::assemble(cgctx, builder, func, env, func_id);
 
         let fp = codegen.builder.ins().get_frame_pointer(types::I64);
         let ra = codegen.builder.ins().get_return_address(types::I64);
@@ -250,12 +285,14 @@ impl<'a> Codegen<'a> {
         if use_trampoline {
             let args_ptr = params[0];
             let args_cnt = params[1];
-            codegen.setup_locals(lambda, IncomingArgs::Trampoline { args_ptr, args_cnt })?;
+            codegen.setup_locals(&lambda.args, IncomingArgs::Trampoline { args_ptr, args_cnt })?;
         } else {
             let env_index = params.len().saturating_sub(1);
             let direct_args = &params[..env_index];
-            codegen.setup_locals(lambda, IncomingArgs::Direct { args: direct_args })?;
+            codegen.setup_locals(&lambda.args, IncomingArgs::Direct { args: direct_args })?;
         }
+
+        codegen.append_captures_to_local(&lambda.captures.borrow());
 
         Ok(codegen)
     }
@@ -265,7 +302,6 @@ impl<'a> Codegen<'a> {
     }
 
     fn t(&mut self) -> Value {
-        // let t = LispValue
         self.builder.ins().iconst(types::I64, TRUE)
     }
 
@@ -279,7 +315,6 @@ impl<'a> Codegen<'a> {
     }
 
     pub fn translate_exprs<'s>(&mut self, exprs: &[Expr]) -> CodegenResult<Value> {
-        // TODO need to drop other values
         exprs
             .iter()
             .map(|e| self.translate_expr(e))
@@ -305,13 +340,17 @@ impl<'a> Codegen<'a> {
         tracing::debug!("function args count: {}", args.len());
 
         let func_id = *self
+            .ctx
             .builtin_funcs
             .get(func_name)
             .unwrap_or_else(|| panic!("Function '{}' not found in builtin_funcs", func_name));
 
         tracing::debug!("function id: {:?}", func_id);
 
-        let func_ref = self.module.declare_func_in_func(func_id, self.builder.func);
+        let func_ref = self
+            .ctx
+            .module
+            .declare_func_in_func(func_id, self.builder.func);
         let inst = self.builder.ins().call(func_ref, args);
         let results = self.builder.inst_results(inst);
 
@@ -350,10 +389,16 @@ impl<'a> Codegen<'a> {
             .load(types::I64, MemFlags::new(), base, (index * 8) as i32)
     }
 
-    fn setup_locals(&mut self, lambda: &Lambda, incoming: IncomingArgs<'_>) -> CodegenResult<()> {
-        let captures = lambda.captures.borrow();
-        let args = &lambda.args;
+    fn append_captures_to_local(&mut self, captures: &Vec<Var>) {
+        for capture in captures.iter() {
+            let var = self.builder.declare_var(types::I64);
+            let ident = Ident::from(*capture);
+            let arg = Arg::new_uncap(ident);
+            self.locals.push((arg, var));
+        }
+    }
 
+    fn setup_locals(&mut self, args: &Args, incoming: IncomingArgs<'_>) -> CodegenResult<()> {
         self.call_internal("mark_bind", &[self.env]);
 
         let optional_args = args
@@ -462,14 +507,6 @@ impl<'a> Codegen<'a> {
             }
         }
 
-        // actual value of captures are loaded afterwards
-        for capture in captures.iter() {
-            let var = self.builder.declare_var(types::I64);
-            let ident = Ident::from(*capture);
-            let arg = Arg::new_uncap(ident);
-            self.locals.push((arg, var));
-        }
-
         Ok(())
     }
 
@@ -529,7 +566,7 @@ impl<'a> Codegen<'a> {
             ExprType::Literal(literal) => self.translate_literal(literal),
             ExprType::Vector(exprs) => self.translate_vector(exprs),
             ExprType::Call(call) => self.translate_call(call),
-            ExprType::SpecialForm(special_form) => self.translate_special_form(special_form),
+            ExprType::SpecialForm(special) => self.translate_special_form(special),
         }
     }
 
@@ -673,7 +710,7 @@ impl<'a> Codegen<'a> {
                 self.builder.switch_to_block($block);
                 self.builder.seal_block($block);
 
-                let mut sig = self.module.make_signature();
+                let mut sig = self.ctx.module.make_signature();
                 for _ in 0..$argc {
                     sig.params.push(AbiParam::new(types::I64));
                 }
@@ -748,7 +785,7 @@ impl<'a> Codegen<'a> {
         let args_cnt = self.builder.ins().iconst(types::I64, argc as i64);
 
         // Create trampoline signature (args_ptr, args_cnt, env)
-        let mut sig = self.module.make_signature();
+        let mut sig = self.ctx.module.make_signature();
         sig.params.push(AbiParam::new(types::I64)); // args_ptr
         sig.params.push(AbiParam::new(types::I64)); // args_cnt
         sig.params.push(AbiParam::new(types::I64)); // env
@@ -968,12 +1005,12 @@ impl<'a> Codegen<'a> {
 
     fn translate_lambda_expr<'s>(&mut self, lambda: &Lambda) -> CodegenResult<Value> {
         let mut fctx = FunctionBuilderContext::new();
-        let mut ctx = self.module.make_context();
+        let mut ctx = self.ctx.module.make_context();
 
         let mut codegen = Codegen::new(
-            self.module,
-            self.data_desc,
-            self.builtin_funcs,
+            self.ctx.module,
+            self.ctx.data_desc,
+            self.ctx.builtin_funcs,
             &mut fctx,
             &mut ctx,
             &lambda,
@@ -986,28 +1023,11 @@ impl<'a> Codegen<'a> {
         let (result, unresolved) = codegen.finalize(result);
 
         tracing::debug!("Defining lambda function with id: {:?}", func_id);
-        self.module.define_function(func_id, &mut ctx)?;
 
-        let compiled_code = ctx.compiled_code().unwrap();
-        let stack_maps = compiled_code
-            .buffer
-            .user_stack_maps()
-            .into_iter()
-            .map(|(offset, length, map)| {
-                let refs = map.entries().map(|val| val.1).collect::<Vec<_>>();
-                (*offset, *length, refs)
-            })
-            .collect::<Vec<_>>();
-        let func_size = compiled_code.buffer.total_size() as usize;
-
-        // tracing::info!("{:?}", stack_maps);
-        self.module.clear_context(&mut ctx);
-
-        self.module.finalize_definitions()?;
-        let func_ptr = self.module.get_finalized_function(func_id);
-
-        let metadata = FunctionMetadata::new(func_ptr, func_size, stack_maps);
-        append_func_metadata(metadata);
+        // Use the new CodegenContext helper to define, collect stack maps and finalize.
+        let mut cgctx =
+            CodegenContext::from_parts(self.ctx.module, self.ctx.data_desc, self.ctx.builtin_funcs);
+        let func_ptr = cgctx.define_and_finalize_function(&mut ctx, func_id);
 
         result.func.set_func_ptr(func_ptr);
         let func_val = self.translate_lispobj(&result.func);
@@ -1096,5 +1116,89 @@ impl<'a> Codegen<'a> {
         let val = self.call_internal("defvar", &[sym, sym_len, val, self.env])[0];
 
         Ok(val)
+    }
+}
+
+fn prepare_signature(args: &Args, sig: &mut Signature) {
+    if args.use_trampoline() {
+        // args_ptr: pointer to arguments array
+        sig.params.push(AbiParam::new(types::I64));
+        // args_cnt: number of arguments
+        sig.params.push(AbiParam::new(types::I64));
+        // env arg
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+    } else {
+        let argc = args.total();
+        for _ in 0..argc {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+
+        // env arg
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+    }
+}
+
+fn identify_env(params: &[Value], use_trampoline: bool) -> Value {
+    if use_trampoline {
+        params
+            .get(2)
+            .copied()
+            .unwrap_or_else(|| panic!("expected env parameter for trampoline"))
+    } else {
+        params
+            .last()
+            .copied()
+            .unwrap_or_else(|| panic!("expected env parameter for direct call"))
+    }
+}
+
+struct CodegenBuilder {
+    args: Args,
+}
+
+impl CodegenBuilder {
+    fn prepare_signature(&self, sig: &mut Signature) {
+        prepare_signature(&self.args, sig);
+    }
+
+    fn identify_env(&self, params: &[Value]) -> Value {
+        identify_env(params, self.args.use_trampoline())
+    }
+
+    /// setup local bindings and return the special value binding for envrionment
+    fn setup_locals(&self, params: &[Value], codegen: &mut Codegen) -> CodegenResult<()> {
+        if self.args.use_trampoline() {
+            let args_ptr = params[0];
+            let args_cnt = params[1];
+            codegen.setup_locals(&self.args, IncomingArgs::Trampoline { args_ptr, args_cnt })?;
+        } else {
+            let env_index = params.len().saturating_sub(1);
+            let direct_args = &params[..env_index];
+            codegen.setup_locals(&self.args, IncomingArgs::Direct { args: direct_args })?;
+        }
+        Ok(())
+    }
+
+    fn gen_unit<'a>(
+        &self,
+        module: &'a mut JITModule,
+        data_desc: &'a mut DataDescription,
+        builtin_funcs: &'a HashMap<String, FuncId>,
+        fctx: &'a mut FunctionBuilderContext,
+        ctx: &'a mut Context,
+    ) -> CodegenResult<Codegen<'a>> {
+        let sig = &mut ctx.func.signature;
+        self.prepare_signature(sig);
+
+        let (builder, func_id, params) = Codegen::create_function_prologue(module, fctx, ctx)?;
+        let cgctx = CodegenContext::from_parts(module, data_desc, builtin_funcs);
+        let env = self.identify_env(&params);
+
+        let func = LispFunction::new_closure(func_id, FunctionSignature::from_args(&self.args));
+        let mut codegen = Codegen::assemble(cgctx, builder, func, env, func_id);
+        self.setup_locals(&params, &mut codegen)?;
+        Ok(codegen)
     }
 }
