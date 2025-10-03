@@ -11,6 +11,7 @@ use rustc_hash::FxHashSet;
 
 use crate::core::Tagged;
 use crate::core::compiler::error::{CodegenError, CodegenResult};
+use crate::core::compiler::stack_map::{FunctionMetadata, append_func_metadata};
 use crate::core::function::FunctionSignature;
 use crate::core::function::LispFunction;
 use crate::core::ident::Ident;
@@ -133,7 +134,7 @@ impl<'a> Codegen<'a> {
         let func = LispFunction::new_closure(func_id, FunctionSignature::default());
         // let closure_val = translate_value(&mut builder, func_runtime_val);
 
-        let codegen = Self {
+        let mut codegen = Self {
             module,
             data_desc,
             builtin_funcs,
@@ -146,6 +147,12 @@ impl<'a> Codegen<'a> {
             func_id,
             defined_funcs: Vec::new(),
         };
+
+        let fp = codegen.builder.ins().get_frame_pointer(types::I64);
+        let ra = codegen.builder.ins().get_return_address(types::I64);
+
+        codegen.call_internal("sm_dbg", &[ra]);
+        codegen.call_internal("set_trampoline_start_fp", &[fp]);
 
         Ok(codegen)
     }
@@ -234,6 +241,12 @@ impl<'a> Codegen<'a> {
             captures: Default::default(),
         };
 
+        let fp = codegen.builder.ins().get_frame_pointer(types::I64);
+        let ra = codegen.builder.ins().get_return_address(types::I64);
+
+        codegen.call_internal("sm_dbg", &[ra]);
+        codegen.call_internal("gcroot_scan", &[fp]);
+
         if use_trampoline {
             let args_ptr = params[0];
             let args_cnt = params[1];
@@ -313,6 +326,7 @@ impl<'a> Codegen<'a> {
 
     fn bind_argument(&mut self, arg: &Arg, initial: Value) -> Value {
         let var = self.builder.declare_var(types::I64);
+        self.builder.declare_var_needs_stack_map(var);
         self.locals.push((arg.clone(), var));
 
         let value = if arg.is_shared() {
@@ -973,10 +987,28 @@ impl<'a> Codegen<'a> {
 
         tracing::debug!("Defining lambda function with id: {:?}", func_id);
         self.module.define_function(func_id, &mut ctx)?;
+
+        let compiled_code = ctx.compiled_code().unwrap();
+        let stack_maps = compiled_code
+            .buffer
+            .user_stack_maps()
+            .into_iter()
+            .map(|(offset, length, map)| {
+                let refs = map.entries().map(|val| val.1).collect::<Vec<_>>();
+                (*offset, *length, refs)
+            })
+            .collect::<Vec<_>>();
+        let func_size = compiled_code.buffer.total_size() as usize;
+
+        // tracing::info!("{:?}", stack_maps);
         self.module.clear_context(&mut ctx);
 
         self.module.finalize_definitions()?;
         let func_ptr = self.module.get_finalized_function(func_id);
+
+        let metadata = FunctionMetadata::new(func_ptr, func_size, stack_maps);
+        append_func_metadata(metadata);
+
         result.func.set_func_ptr(func_ptr);
         let func_val = self.translate_lispobj(&result.func);
 

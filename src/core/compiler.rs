@@ -56,9 +56,11 @@ impl InternalFnPlugin {
     }
 }
 
+pub mod arch;
 mod codegen;
 pub mod error;
 pub mod jit;
 pub mod macro_item;
+pub mod stack_map;
 // pub mod optimization;
 // pub mod scope;

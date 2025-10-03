@@ -30,13 +30,14 @@ impl JIT {
         // flag_builder.set("enable_safepoints", "true").unwrap();
         flag_builder.set("is_pic", "false").unwrap();
         flag_builder.set("opt_level", "speed").unwrap();
-        flag_builder.set("enable_verifier", "false").unwrap();
+        // flag_builder.set("enable_verifier", "false").unwrap();
+        flag_builder.set("enable_safepoints", "true").unwrap();
+        flag_builder.set("preserve_frame_pointers", "true").unwrap();
+        let flags = settings::Flags::new(flag_builder);
         let isa_builder = cranelift_native::builder().unwrap_or_else(|msg| {
             panic!("host machine is not supported: {}", msg);
         });
-        let isa = isa_builder
-            .finish(settings::Flags::new(flag_builder))
-            .unwrap();
+        let isa = isa_builder.finish(flags).unwrap();
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
 
         // builder.symbol("apply", apply as *const u8);
