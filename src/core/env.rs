@@ -15,9 +15,10 @@ use crate::{
 pub struct Bind {
     #[no_trace]
     pub symbol: Symbol,
-    pub old: Object,
+    pub value: Object,
 }
 
+use rustc_hash::FxHashMap;
 #[derive(Debug, Clone, PartialEq, Eq, Trace)]
 pub enum SpecStackItem {
     Bind(Bind),
@@ -26,11 +27,12 @@ pub enum SpecStackItem {
     Unwind,
 }
 
+use std::cell::RefCell;
+
 #[derive(Debug, Default)]
 pub struct Environment {
     /// the obarray
-    // TODO should this be GC'd? or make SymbolCell GC
-    pub symbol_map: SymbolMap,
+    pub symbol_map: Gc<SymbolMap>,
 
     pub spec_stack: Gc<Vec<SpecStackItem>>,
 
@@ -61,6 +63,63 @@ impl FuncCellType {
     }
 }
 
+thread_local! {
+    static DYN_STACK: std::cell::RefCell<Vec<BindNode>> = std::cell::RefCell::new(Vec::new());
+    static DYN_TOP: std::cell::RefCell<rustc_hash::FxHashMap<Symbol, usize>> = std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+    static DYN_MARKS: std::cell::RefCell<Vec<usize>> = std::cell::RefCell::new(Vec::new());
+}
+
+#[derive(Debug, Clone)]
+struct BindNode {
+    symbol: Symbol,
+    value: Object,
+    prev: Option<usize>,
+}
+
+fn tls_lookup(symbol: Symbol) -> Option<Object> {
+    DYN_TOP.with(|top| top.borrow().get(&symbol).copied()).and_then(|idx| {
+        DYN_STACK.with(|stack| stack.borrow().get(idx).map(|n| n.value.clone()))
+    })
+}
+
+fn tls_bind(symbol: Symbol, value: Object) {
+    let prev = DYN_TOP.with(|m| m.borrow().get(&symbol).copied());
+    let idx = DYN_STACK.with(|s| {
+        let mut s = s.borrow_mut();
+        let idx = s.len();
+        s.push(BindNode { symbol, value, prev });
+        idx
+    });
+    DYN_TOP.with(|m| {
+        let mut m = m.borrow_mut();
+        m.insert(symbol, idx);
+    });
+}
+
+fn tls_mark() {
+    let depth = DYN_STACK.with(|s| s.borrow().len());
+    DYN_MARKS.with(|marks| marks.borrow_mut().push(depth));
+}
+
+fn tls_unbind_to_mark(env: &Environment) {
+    let mark = DYN_MARKS.with(|marks| marks.borrow_mut().pop());
+    let Some(mark) = mark else { return; };
+    DYN_STACK.with(|s| {
+        let mut s = s.borrow_mut();
+        while s.len() > mark {
+            if let Some(node) = s.pop() {
+                // Unroot the value
+                env.pop_stackmap(&node.value);
+                // Restore top index
+                DYN_TOP.with(|m| {
+                    let mut m = m.borrow_mut();
+                    if let Some(prev) = node.prev { m.insert(node.symbol, prev); } else { m.remove(&node.symbol); }
+                });
+            }
+        }
+    });
+}
+
 impl Environment {
     /// load symbol's value from the global symbol table. Neglect the stacked lexical values.
     /// this can be used to load function cells, as they are always global;
@@ -75,12 +134,19 @@ impl Environment {
     where
         F: FnOnce(&Object) -> RuntimeResult<T>,
     {
-        self.symbol_map.get_symbol_cell_with(symbol, |cell| {
-            let data = cell.data();
+        // Fast-path: thread-local dynamic binding lookup for values
+        if load_function_cell.is_none() {
+            if let Some(val) = tls_lookup(symbol) {
+                return job(&val);
+            }
+        }
+
+        // Fall back to global environment
+        self.symbol_map.get().get_symbol_cell_with(symbol, |cell| {
             match load_function_cell {
                 Some(ty) => {
-                    let ObjectRef::Cons(cons) = data.func.as_ref() else {
-                        return Err(RuntimeError::wrong_type("cons", data.func.get_tag()));
+                    let ObjectRef::Cons(cons) = cell.func.as_ref() else {
+                        return Err(RuntimeError::wrong_type("cons", cell.func.get_tag()));
                     };
                     let ObjectRef::Symbol(marker) = cons.car().as_ref() else {
                         return Err(RuntimeError::wrong_type("symbol", cons.car().get_tag()));
@@ -94,20 +160,19 @@ impl Environment {
                     }
                 }
                 None => {
-                    tracing::debug!("loaded value: {:?}", data.value);
-                    // let value = Object(data.value.0);
-                    return job(&data.value);
+                    tracing::debug!("loaded value from global: {:?}", cell.value);
+                    return job(&cell.value);
                 }
             }
         })
     }
 
-    pub fn get_symbol_cell(&self, symbol: Symbol) -> Option<&SymbolCell> {
-        self.symbol_map.get_symbol_cell(symbol)
+    pub fn get_symbol_cell(&self, symbol: Symbol) -> Option<SymbolCell> {
+        self.symbol_map.get().get_symbol_cell(symbol)
     }
 
-    pub fn get_or_init_symbol(&self, symbol: Symbol) -> &SymbolCell {
-        self.symbol_map.get_or_init_symbol(symbol)
+    pub fn get_or_init_symbol(&self, symbol: Symbol) -> SymbolCell {
+        self.symbol_map.get_mut().get_or_init_symbol(symbol)
     }
 
     pub fn push_stackmap(&self, obj: &Object) {
@@ -119,61 +184,33 @@ impl Environment {
     }
 
     pub fn push_spec_stack(&self, item: SpecStackItem) {
-        self.spec_stack.get_mut().push(item)
+        if let SpecStackItem::LexicalMark = item {
+            tls_mark();
+        }
     }
 
-    pub fn push_special_symbol(&self, symbol: Symbol, mut value: Object) -> RuntimeResult<()> {
-        let old = self.symbol_map.get_symbol_cell_with(symbol, |cell| {
-            let data = cell.data();
-            let old = &mut value;
-            std::mem::swap(&mut data.value, old);
-            Ok(value)
-        })?;
-        self.push_spec_stack(SpecStackItem::Bind(Bind { symbol, old }));
+    pub fn push_special_symbol(&self, symbol: Symbol, value: Object) -> RuntimeResult<()> {
+        // Push dynamic binding in thread-local stack and root it
+        tls_bind(symbol, value.clone());
+        self.push_stackmap(&value);
         Ok(())
     }
 
-    pub fn pop_spec_stack(&self) -> RuntimeResult<SpecStackItem> {
-        let item = self.spec_stack.get_mut().pop();
-        match item {
-            Some(SpecStackItem::Bind(Bind { symbol, mut old })) => {
-                old = self.symbol_map.get_symbol_cell_with(symbol, |cell| {
-                    let data = cell.data();
-                    let val = &mut old;
-                    std::mem::swap(&mut data.value, val);
-                    Ok(old)
-                })?;
-                Ok(SpecStackItem::Bind(Bind { symbol, old }))
-            }
-            Some(v) => Ok(v),
-            None => Err(RuntimeError::InternalError {
-                message: "cannot pop spec stack".to_string(),
-            }),
-        }
-    }
-
     pub fn pop_lexical(&self) -> RuntimeResult<()> {
-        while let item = self.pop_spec_stack()? {
-            if matches!(item, SpecStackItem::LexicalMark) {
-                return Ok(());
-            }
-        }
-        return Err(RuntimeError::InternalError {
-            message: "wrong structure for spec stack".to_string(),
-        });
+        tls_unbind_to_mark(self);
+        Ok(())
     }
 
     pub fn is_special(&self, symbol: Symbol) -> bool {
         self.symbol_map
+            .get()
             .get_symbol_cell(symbol)
-            .map(|cell| cell.data().special)
+            .map(|cell| cell.special)
             .unwrap_or(false)
     }
 
     /// declare a `defvar` or `defconst`
-    fn declare_var(&self, ident: Ident) -> Symbol {
-        self.symbol_map.intern(ident, true).0
-    }
+    fn declare_var(&self, ident: Ident) -> Symbol { self.symbol_map.get_mut().intern(ident, true).0 }
 }
 
 use scc::HashMap;

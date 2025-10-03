@@ -9,18 +9,15 @@
 use indexmap::IndexMap;
 use proc_macros::Trace;
 
-use crate::core::error::{RuntimeError, RuntimeResult};
+use crate::core::error::RuntimeResult;
 use crate::core::ident::Ident;
 use crate::core::object::{LispType, Object, nil};
 use crate::core::tagged_ptr::{Tagged, TaggedObj, shifting_tag, shifting_untag};
-use crate::gc::{Gc, Trace};
+use crate::gc::Trace;
 
 // =============================================================================
 // Type Aliases and Constants
 // =============================================================================
-
-/// Internal map type for symbol storage
-type Map = IndexMap<Ident, SymbolCell, rustc_hash::FxBuildHasher>;
 
 /// Maximum index value used to indicate ident-only symbols
 const IDENT_ONLY_INDEX: u32 = 0xFFFFFFFF;
@@ -68,6 +65,9 @@ pub struct UnpackedLispSymbol {
 // Symbol Storage and Management
 // =============================================================================
 
+/// Internal map type for symbol storage
+type Map = IndexMap<Ident, SymbolCell, rustc_hash::FxBuildHasher>;
+
 /// Thread-safe symbol table with garbage collection support.
 ///
 /// The SymbolMap manages symbol interning and provides access to symbol cells.
@@ -80,14 +80,10 @@ pub struct UnpackedLispSymbol {
 /// let sym = map.intern(Ident::from("test"), false);
 /// assert_eq!(sym.0.name(), "test");
 /// ```
-#[derive(Debug, Trace)]
+#[derive(Debug)]
 pub struct SymbolMap {
-    map: Gc<SymbolMapInner>,
+    map: Map,
 }
-
-/// Internal storage for the symbol map.
-#[derive(Debug, Default)]
-struct SymbolMapInner(Map);
 
 /// Container for symbol metadata and bindings.
 ///
@@ -97,11 +93,7 @@ struct SymbolMapInner(Map);
 /// - Special/keyword status
 /// - Interning status
 #[derive(Debug, Trace, Clone)]
-pub struct SymbolCell(pub Gc<SymbolCellData>);
-
-/// Data stored in each symbol cell.
-#[derive(Debug, Trace, Clone)]
-pub struct SymbolCellData {
+pub struct SymbolCell {
     /// The symbol this cell represents
     #[no_trace]
     pub name: Symbol,
@@ -266,27 +258,10 @@ impl SymbolMap {
     /// * `size` - Initial capacity for the symbol table
     pub fn with_capacity(size: usize) -> Self {
         let map = Map::with_capacity_and_hasher(size, rustc_hash::FxBuildHasher::default());
-        Self {
-            map: Gc::new(SymbolMapInner(map)),
-        }
+        Self { map }
     }
 
-    /// Get a symbol cell and apply a function to it.
-    ///
-    /// # Arguments
-    /// * `symbol` - The symbol to look up
-    /// * `job` - Function to apply to the symbol cell
-    ///
-    /// # Returns
-    /// Result of the function or an unbound symbol error.
-    pub fn get_symbol_cell_with<F, T>(&self, symbol: Symbol, job: F) -> RuntimeResult<T>
-    where
-        F: FnOnce(&SymbolCell) -> RuntimeResult<T>,
-    {
-        self.get_symbol_cell(symbol)
-            .ok_or(RuntimeError::unbound_symbol(symbol))
-            .and_then(job)
-    }
+    // (removed: earlier inlined version of get_symbol_cell_with)
 
     /// Intern a symbol with the given identifier.
     ///
@@ -299,8 +274,8 @@ impl SymbolMap {
     ///
     /// # Returns
     /// The interned LispSymbol.
-    pub fn intern(&self, ident: Ident, special: bool) -> LispSymbol {
-        let map = self.map_mut();
+    pub fn intern(&mut self, ident: Ident, special: bool) -> LispSymbol {
+        let map = &mut self.map;
         match map.entry(ident) {
             indexmap::map::Entry::Occupied(occupied_entry) => {
                 let index = occupied_entry.index();
@@ -324,9 +299,21 @@ impl SymbolMap {
     /// # Returns
     /// Some(Symbol) if found, None otherwise.
     pub fn get(&self, ident: Ident) -> Option<Symbol> {
-        self.map()
+        self.map
             .get_index_of(&ident)
             .map(|index| Symbol::new(index, ident))
+    }
+
+    /// Get a symbol cell and apply a function to it.
+    /// Returns an error if the symbol is unbound.
+    pub fn get_symbol_cell_with<F, T>(&self, symbol: Symbol, job: F) -> RuntimeResult<T>
+    where
+        F: FnOnce(&SymbolCell) -> RuntimeResult<T>,
+    {
+        let cell = self
+            .get_symbol_cell(symbol)
+            .ok_or(crate::core::error::RuntimeError::unbound_symbol(symbol))?;
+        job(&cell)
     }
 
     /// Get the symbol cell for a given symbol.
@@ -336,10 +323,10 @@ impl SymbolMap {
     ///
     /// # Returns
     /// Some(SymbolCell) if found, None otherwise.
-    pub fn get_symbol_cell(&self, symbol: Symbol) -> Option<&SymbolCell> {
+    pub fn get_symbol_cell(&self, symbol: Symbol) -> Option<SymbolCell> {
         match symbol.index() {
-            Some(index) => self.map().get_index(index).map(|(_, cell)| cell),
-            None => self.map().get(&symbol.ident()),
+            Some(index) => self.map.get_index(index).map(|(_, cell)| cell.clone()),
+            None => self.map.get(&symbol.ident()).cloned(),
         }
     }
 
@@ -353,9 +340,9 @@ impl SymbolMap {
     ///
     /// # Returns
     /// Reference to the symbol cell.
-    pub fn get_or_init_symbol(&self, symbol: Symbol) -> &SymbolCell {
+    pub fn get_or_init_symbol(&mut self, symbol: Symbol) -> SymbolCell {
         match symbol.index() {
-            Some(index) => self.map().get_index(index).map(|(_, cell)| cell).unwrap(),
+            Some(index) => self.map.get_index(index).map(|(_, cell)| cell.clone()).unwrap(),
             None => {
                 let text = symbol.name();
                 let special = text.starts_with(':');
@@ -365,17 +352,47 @@ impl SymbolMap {
         }
     }
 
-    /// Get immutable reference to the internal map.
-    #[inline]
-    fn map(&self) -> &Map {
-        &self.map.get().0
+    /// Mutate the value cell of a symbol (initializing it if needed).
+    pub fn set_value(&mut self, symbol: Symbol, value: Object) {
+        match symbol.index() {
+            Some(index) => {
+                if let Some((_, cell)) = self.map.get_index_mut(index) {
+                    cell.value = value;
+                }
+            }
+            None => {
+                let ident = symbol.ident();
+                let special = symbol.name().starts_with(':');
+                let entry = self
+                    .map
+                    .entry(ident)
+                    .or_insert_with(|| SymbolCell::new(symbol, special));
+                entry.value = value;
+            }
+        }
     }
 
-    /// Get mutable reference to the internal map.
-    #[inline]
-    fn map_mut(&self) -> &mut Map {
-        &mut self.map.get_mut().0
+    /// Mutate the function cell of a symbol (initializing it if needed).
+    pub fn set_func(&mut self, symbol: Symbol, func: Object) {
+        match symbol.index() {
+            Some(index) => {
+                if let Some((_, cell)) = self.map.get_index_mut(index) {
+                    cell.func = func;
+                }
+            }
+            None => {
+                let ident = symbol.ident();
+                let special = symbol.name().starts_with(':');
+                let entry = self
+                    .map
+                    .entry(ident)
+                    .or_insert_with(|| SymbolCell::new(symbol, special));
+                entry.func = func;
+            }
+        }
     }
+
+    // Accessors removed; `map` is owned.
 }
 
 // =============================================================================
@@ -389,37 +406,20 @@ impl SymbolCell {
     /// * `sym` - The symbol this cell represents
     /// * `special` - Whether this is a special form or keyword
     pub fn new(sym: Symbol, special: bool) -> Self {
-        SymbolCell(Gc::new(SymbolCellData::new(sym, special)))
-    }
-
-    /// Get mutable access to the cell data.
-    ///
-    /// # Returns
-    /// Mutable reference to the SymbolCellData.
-    pub fn data(&self) -> &mut SymbolCellData {
-        self.0.get_mut()
+        SymbolCell {
+            name: sym,
+            interned: true,
+            special,
+            func: nil(),
+            value: nil(),
+        }
     }
 
     /// Get the symbol this cell represents.
     ///
     /// # Returns
     /// The LispSymbol for this cell.
-    pub fn symbol(&self) -> LispSymbol {
-        LispSymbol(self.data().name)
-    }
-}
-
-impl SymbolCellData {
-    /// Create new symbol cell data.
-    fn new(name: Symbol, special: bool) -> Self {
-        Self {
-            name,
-            interned: true,
-            func: nil(),
-            value: nil(),
-            special,
-        }
-    }
+    pub fn symbol(&self) -> LispSymbol { LispSymbol(self.name) }
 }
 
 // =============================================================================
@@ -451,10 +451,10 @@ impl Tagged for LispSymbol {
     }
 }
 
-unsafe impl Trace for SymbolMapInner {
+unsafe impl Trace for SymbolMap {
     unsafe fn trace(&self, visitor: crate::gc::Visitor) {
         unsafe {
-            for (_, cell) in self.0.iter() {
+            for (_, cell) in self.map.iter() {
                 cell.trace(visitor);
             }
         }
@@ -462,7 +462,7 @@ unsafe impl Trace for SymbolMapInner {
 
     unsafe fn finalize(&mut self) {
         unsafe {
-            for (_, cell) in self.0.iter_mut() {
+            for (_, mut cell) in std::mem::take(&mut self.map).into_iter() {
                 cell.finalize();
             }
         }
@@ -571,7 +571,7 @@ mod tests {
 
     #[test]
     fn test_symbol_interning() {
-        let map = SymbolMap::default();
+        let mut map = SymbolMap::default();
         let sym1 = map.intern(Ident::from("test"), false);
         let sym2 = map.intern(Ident::from("test"), false);
 
@@ -582,10 +582,10 @@ mod tests {
 
     #[test]
     fn test_special_symbols() {
-        let map = SymbolMap::default();
+        let mut map = SymbolMap::default();
         let keyword = map.intern(Ident::from(":keyword"), true);
         let cell = map.get_symbol_cell(keyword.0).unwrap();
-        assert!(cell.data().special);
+        assert!(cell.special);
     }
 
     #[test]
@@ -615,8 +615,8 @@ mod tests {
         let cell = SymbolCell::new(sym, false);
 
         assert_eq!(cell.symbol().0, sym);
-        assert!(!cell.data().special);
-        assert!(cell.data().interned);
+        assert!(!cell.special);
+        assert!(cell.interned);
     }
 
     #[test]
@@ -632,10 +632,10 @@ mod tests {
 
     #[test]
     fn test_symbol_map_get_or_init() {
-        let map = SymbolMap::default();
+        let mut map = SymbolMap::default();
         let sym = Symbol::from(":keyword");
 
         let cell = map.get_or_init_symbol(sym);
-        assert!(cell.data().special); // Should detect ':' prefix
+        assert!(cell.special); // Should detect ':' prefix
     }
 }

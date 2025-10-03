@@ -95,8 +95,7 @@ fn defvar(name: i64, len: usize, value: Object, env: &Environment) -> Result<Obj
 
     let symbol = name.into();
     tracing::debug!("calling defvar: symbol {symbol:?}, value: {value:?}");
-    let cell = env.get_or_init_symbol(symbol);
-    cell.data().value = value;
+    env.symbol_map.get_mut().set_value(symbol, value);
     Ok(symbol.tag())
 }
 
@@ -127,10 +126,9 @@ fn load_captured(ident: Ident, func: &mut Function) -> Result<Object> {
 #[internal_fn]
 pub fn store_symbol_function(symbol: Symbol, func: Object, env: &Environment) {
     tracing::debug!("storing function {func:?} to symbol {}", symbol.name());
-    let data_ref = env.get_or_init_symbol(symbol);
-    let symbol = LispSymbol::from("function").tag();
-    let cell = LispCons::new(symbol, func);
-    data_ref.data().func = cell.tag();
+    let marker = LispSymbol::from("function").tag();
+    let cell = LispCons::new(marker, func);
+    env.symbol_map.get_mut().set_func(symbol, cell.tag());
 }
 
 #[internal_fn]
