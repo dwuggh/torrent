@@ -52,12 +52,74 @@ Rune’s design document claims reference counting is slow; that is not necessar
 
 Cycle collection is addressed by [cite:@baconConcurrentCycleCollection2001] and follow‑ups (see [cite:@jonesGarbageCollectionHandbook2023]). Barrier costs can be mitigated through **deferred reference counting** and **coalesced reference counting**; the latter is particularly powerful. We also have LXR [cite:@zhaoLowLatencyHighThroughputGarbage2022], a recent high‑performance RC GC.
 
+** bridging GC'd runtime with rust
+The goal is:
+- correctly manage objects on the fridge of lisp and rust;
+- manage objects inside rust subroutine by rust.
+
+for the first goal, we can use the trampoline trick adopt by wasmtime, that is, only walk stack frames inside cranelift, by recording enter and exit frame pointers. For those inside is job for goal 2.
+
+the 2nd goal is natural, but tech speaking this is not easy.
+
+The best reference I can find so far is section 11.4 at [cite:@jonesGarbageCollectionHandbook2023]. The major difficulty here is how to deal with a moving GC. It presents 2 solutions:
+1. provide a handle to an object;
+2. support pin and unpin for an object.
+The first approach, used by java JNI, is clean and performant. The caveat is we need all external method to follow the same design. Pin and Unpin is what rune currently do, it doesn't affect native code at all by deferring the overhead to GC. besides it might also introduce data races, if the collector and the code are mutating the same field.
+
+for the first approach, we may design the handle like this:
+#+BEGIN_SRC rust
+thread_local! {
+    static ROOTSET: RefCell<Vec<GcErased>> = Default::default();
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LocalRef<'a, T> {
+    index: usize,
+    data: PhantomData<&'a T>,
+}
+#+END_SRC
+Then all rust subroutines need to accept ~LocalRef<'a, Object>~, this may not be desired. We can do that by macro, but that would mean, calling another rust subroutine in a rust subr is not correctly handled:
+#+BEGIN_SRC rust
+#[defun]
+fn foo(obj: &Object) {
+    bar(obj)
+}
+
+// macro will expand like this:
+fn __rust_wrapper_foo(obj: i64) {
+    let obj: Object = obj.into();
+    let handle = store(obj);
+
+    let pair = cons(a, b); // allocate inside rust subr
+
+    // pair is not added to stack map or local root set, but we expect it to be managed
+
+    bar(handle.get(), &pair)
+}
+
+#[defun]
+fn bar(obj: &Object, pair: &Object) {
+    // ...
+}
+#+END_SRC
+
+*** mapping rust ownership model to GC
+This is the crucial chanllenge for rust ergonomics. I currently do the following:
+- read barrier <-> Object::as_ref()
+- write barrier <-> Object::clone()
+- inc rc/dec rc <-> clone/drop
+However, this face a chanllenge in rust subroutines:
+To achieve concurrency, access to a symbol's value in an env is provided with a guard, like any other concurrent data structure. This design aims to provide a lock-free read for symbols, and reduce overhead on frequent inc rc. Some rust subroutines take ~&Object~ as argument: meaning it do not own the object, so a reference may be used.
+
+However, this is not consistent with GC model: they tend to be cloned. what's more, current model cannot correctly handle dec rc: all GC objects are created with ref count 0, but in rust subroutine, we cannot distinguish which object is temp created, which are referenced from envrionment!
+
 ** Rust implementations
 [[https://github.com/maplant/scheme-rs][scheme-rs]] implements the Bacon–Rajan algorithm, which I initially copied. However, it does not adopt coalesced RC and uses Tokio channels to send mutation buffers immediately, adding overhead. On Fibonacci benchmarks, scheme‑rs performs poorly. I could not run flamegraph or perf with Tokio enabled, so I lack data, but I suspect the GC is the major factor.
 
 Recently, a BFS‑based refinement of Bacon–Rajan was proposed [cite:@giallorenzoBreadthfirstCycleCollection2025], with a Rust implementation. I have not read the paper thoroughly yet.
 
 [[[https://mmtk.io][MMTK](https://mmtk.io][MMTK)]] is a growing GC SDK in Rust. LXR [cite:@zhaoLowLatencyHighThroughputGarbage2022] is implemented on a separate MMTK branch; there are many divergent commits, so merging will take time. MMTK already provides a solid platform; my long‑term goal is to integrate with it.
+
 
 ** aside: GC and QEC
 I feel like there could be some connections between (cocurrent) Garbage Collection and Quantum Error Correction. Only that GC must be determinsitic, while QEC can be probablistic.
