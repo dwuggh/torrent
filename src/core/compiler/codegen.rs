@@ -138,10 +138,11 @@ impl<'a> CodegenContext<'a> {
 }
 
 pub struct Codegen<'a> {
-    ctx: CodegenContext<'a>,
+    cgctx: CodegenContext<'a>,
     builder: FunctionBuilder<'a>,
     func: LispFunction,
     locals: Vec<(Arg, Variable)>,
+
     captures: FxHashSet<Arg>,
     pub func_id: FuncId,
     env: Value,
@@ -184,7 +185,7 @@ impl<'a> Codegen<'a> {
         func_id: FuncId,
     ) -> Self {
         Self {
-            ctx: cgctx,
+            cgctx,
             builder,
             func,
             locals: Vec::new(),
@@ -285,7 +286,10 @@ impl<'a> Codegen<'a> {
         if use_trampoline {
             let args_ptr = params[0];
             let args_cnt = params[1];
-            codegen.setup_locals(&lambda.args, IncomingArgs::Trampoline { args_ptr, args_cnt })?;
+            codegen.setup_locals(
+                &lambda.args,
+                IncomingArgs::Trampoline { args_ptr, args_cnt },
+            )?;
         } else {
             let env_index = params.len().saturating_sub(1);
             let direct_args = &params[..env_index];
@@ -340,7 +344,7 @@ impl<'a> Codegen<'a> {
         tracing::debug!("function args count: {}", args.len());
 
         let func_id = *self
-            .ctx
+            .cgctx
             .builtin_funcs
             .get(func_name)
             .unwrap_or_else(|| panic!("Function '{}' not found in builtin_funcs", func_name));
@@ -348,7 +352,7 @@ impl<'a> Codegen<'a> {
         tracing::debug!("function id: {:?}", func_id);
 
         let func_ref = self
-            .ctx
+            .cgctx
             .module
             .declare_func_in_func(func_id, self.builder.func);
         let inst = self.builder.ins().call(func_ref, args);
@@ -785,7 +789,7 @@ impl<'a> Codegen<'a> {
         let args_cnt = self.builder.ins().iconst(types::I64, argc as i64);
 
         // Create trampoline signature (args_ptr, args_cnt, env)
-        let mut sig = self.ctx.module.make_signature();
+        let mut sig = self.cgctx.module.make_signature();
         sig.params.push(AbiParam::new(types::I64)); // args_ptr
         sig.params.push(AbiParam::new(types::I64)); // args_cnt
         sig.params.push(AbiParam::new(types::I64)); // env
@@ -1005,12 +1009,12 @@ impl<'a> Codegen<'a> {
 
     fn translate_lambda_expr<'s>(&mut self, lambda: &Lambda) -> CodegenResult<Value> {
         let mut fctx = FunctionBuilderContext::new();
-        let mut ctx = self.ctx.module.make_context();
+        let mut ctx = self.cgctx.module.make_context();
 
         let mut codegen = Codegen::new(
-            self.ctx.module,
-            self.ctx.data_desc,
-            self.ctx.builtin_funcs,
+            self.cgctx.module,
+            self.cgctx.data_desc,
+            self.cgctx.builtin_funcs,
             &mut fctx,
             &mut ctx,
             &lambda,
@@ -1025,8 +1029,11 @@ impl<'a> Codegen<'a> {
         tracing::debug!("Defining lambda function with id: {:?}", func_id);
 
         // Use the new CodegenContext helper to define, collect stack maps and finalize.
-        let mut cgctx =
-            CodegenContext::from_parts(self.ctx.module, self.ctx.data_desc, self.ctx.builtin_funcs);
+        let mut cgctx = CodegenContext::from_parts(
+            self.cgctx.module,
+            self.cgctx.data_desc,
+            self.cgctx.builtin_funcs,
+        );
         let func_ptr = cgctx.define_and_finalize_function(&mut ctx, func_id);
 
         result.func.set_func_ptr(func_ptr);
@@ -1117,6 +1124,31 @@ impl<'a> Codegen<'a> {
 
         Ok(val)
     }
+}
+
+fn gen_funcall(module: &mut JITModule) -> CodegenResult<()> {
+    let mut fctx = FunctionBuilderContext::new();
+    module.make_context();
+    let mut ctx = module.make_context();
+    let sig = &mut ctx.func.signature;
+    // args_ptr: pointer to arguments array
+    sig.params.push(AbiParam::new(types::I64));
+    // args_cnt: number of arguments
+    sig.params.push(AbiParam::new(types::I64));
+    // env arg
+    sig.params.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(types::I64));
+
+    let (mut builder, func_id, params) =
+        Codegen::create_function_prologue(module, &mut fctx, &mut ctx)?;
+
+    let arg_ptr = params[0];
+    let arg_cnt = params[1];
+    let env = params[2];
+
+    let func = builder.ins().load(types::I64, MemFlags::trusted(), arg_ptr, 0);
+
+    todo!()
 }
 
 fn prepare_signature(args: &Args, sig: &mut Signature) {

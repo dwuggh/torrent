@@ -81,6 +81,23 @@ fn funcall(func: &Object, args: &[Object], env: &Environment) -> Result<Object> 
 }
 
 #[internal_fn]
+fn load_func(symbol_or_func: Object, env: &Environment) -> Result<Object> {
+    match symbol_or_func.as_ref() {
+        ObjectRef::Symbol(sym) => {
+            let guard = env.load_symbol_guard(sym, Some(FuncCellType::Function))?;
+            let obj = guard.as_ref();
+            let ObjectRef::Function(func) = obj.as_ref() else {
+                runtime_bail!(WrongType, expected: "function", actual: obj.get_tag());
+            };
+            return Ok(obj.clone());
+            // val is dropped here. its refcount increased in load_symbol, so its fine.
+        }
+        ObjectRef::Function(_) => Ok(symbol_or_func),
+        _ => runtime_bail!(WrongType, expected: "function", actual: symbol_or_func.get_tag()),
+    }
+}
+
+#[internal_fn]
 fn defvar(name: i64, len: usize, value: Object, env: &Environment) -> Result<Object> {
     if name == 0 {
         runtime_bail!(InternalError, message: "null pointer passed to defvar".to_string());
