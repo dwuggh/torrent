@@ -323,7 +323,7 @@ fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
                     #load_arg
                     let #tmp = #object(arg_val as u64);
                     env.stack_map.push(&#tmp);
-                    let #ident: &#mut_val #ty = (#tmp).try_into()?;
+                    let #ident: &#mut_val #ty = (&#tmp).try_into()?;
                 };
                 init_args.push(init);
                 let post = quote! {
