@@ -1,13 +1,15 @@
 use proc_macros::{defun, Trace};
-
 use crate::{
     core::Tagged,
     core::{
-        object::{LispType, Object, ObjectRef, nil},
+        object::{LispType, Object, ObjectRef, nil, tru},
         tagged_ptr::TaggedObj,
     },
     gc::Gc,
 };
+use crate::core::error::RuntimeResult as Result;
+use crate::runtime_bail;
+use crate::runtime_error;
 
 #[derive(Clone, Trace, Debug)]
 pub struct LispCons(pub Gc<Cons>);
@@ -209,8 +211,173 @@ fn list(vals: &[Object]) -> Object {
     if vals.is_empty() {
         nil()
     } else {
-        let iter = vals.iter().map(|o| o.clone());
+        let iter = vals.iter().cloned();
         LispCons::from_iter(iter).map(|c| c.tag()).unwrap_or_else(nil)
+    }
+}
+
+#[defun]
+fn car(obj: Object) -> Result<Object> {
+    match obj.as_ref() {
+        ObjectRef::Nil => Ok(nil()),
+        ObjectRef::Cons(cons_cell) => Ok(cons_cell.car().clone()),
+        _ => runtime_bail!(CannotTakeCar, value: obj),
+    }
+}
+
+#[defun]
+fn cdr(obj: Object) -> Result<Object> {
+    match obj.as_ref() {
+        ObjectRef::Nil => Ok(nil()),
+        ObjectRef::Cons(cons_cell) => Ok(cons_cell.cdr().clone()),
+        _ => runtime_bail!(CannotTakeCdr, value: obj),
+    }
+}
+
+#[defun]
+fn setcar(cell: &mut Cons, newcar: Object) -> Object {
+    cell.set_car(newcar.clone());
+    newcar
+}
+
+#[defun]
+fn setcdr(cell: &mut Cons, newcdr: Object) -> Object {
+    cell.set_cdr(newcdr.clone());
+    newcdr
+}
+
+#[defun]
+fn consp(obj: Object) -> Object {
+    match obj.as_ref() {
+        ObjectRef::Cons(_) => tru(),
+        _ => nil(),
+    }
+}
+
+#[defun]
+fn listp(obj: Object) -> Object {
+    match obj.as_ref() {
+        ObjectRef::Cons(_) | ObjectRef::Nil => tru(),
+        _ => nil(),
+    }
+}
+
+#[defun]
+fn atom(obj: Object) -> Object {
+    match obj.as_ref() {
+        ObjectRef::Cons(_) => nil(),
+        _ => tru(),
+    }
+}
+
+// not moved to src/fns.rs
+#[defun]
+fn length(list: Object) -> Result<Object> {
+    match list.as_ref() {
+        ObjectRef::Nil => Ok(crate::core::number::LispInteger(0).tag()),
+        ObjectRef::Cons(cons_cell) => {
+            if let Some(len) = cons_cell.length() {
+                Ok(crate::core::number::LispInteger(len as i64).tag())
+            } else { runtime_bail!(NotAList, value: list) }
+        }
+        _ => runtime_bail!(NotAList, value: list),
+    }
+}
+
+#[defun]
+fn nth(n: i64, list: Object) -> Result<Object> {
+    if n < 0 { return Ok(nil()); }
+    let mut idx = n as usize;
+    let mut cur = list;
+    loop {
+        match cur.as_ref() {
+            ObjectRef::Nil => return Ok(nil()),
+            ObjectRef::Cons(cons_cell) => {
+                if idx == 0 { return Ok(cons_cell.car().clone()); }
+                idx -= 1;
+                cur = cons_cell.cdr().clone();
+            }
+            _ => return runtime_bail!(NotAList, value: cur),
+        }
+    }
+}
+
+#[defun]
+fn nthcdr(n: i64, list: Object) -> Result<Object> {
+    if n < 0 { return Ok(list); }
+    let mut idx = n as usize;
+    let mut cur = list;
+    loop {
+        match cur.as_ref() {
+            ObjectRef::Nil => return Ok(nil()),
+            ObjectRef::Cons(cons_cell) => {
+                if idx == 0 { return Ok(cur); }
+                idx -= 1;
+                cur = cons_cell.cdr().clone();
+            }
+            _ => return runtime_bail!(NotAList, value: cur),
+        }
+    }
+}
+
+#[defun]
+fn append(list: Object, tail: Object) -> Result<Object> {
+    match list.as_ref() {
+        ObjectRef::Nil => Ok(tail),
+        ObjectRef::Cons(cons_cell) => {
+            let result = cons_cell.append(tail);
+            Ok(Object::from(result))
+        }
+        _ => runtime_bail!(NotAList, value: list),
+    }
+}
+
+#[defun]
+fn reverse(list: Object) -> Result<Object> {
+    match list.as_ref() {
+        ObjectRef::Nil => Ok(nil()),
+        ObjectRef::Cons(cons_cell) => {
+            let Some(res) = cons_cell.reverse() else { return runtime_bail!(NotAList, value: list) };
+            Ok(Object::from(res))
+        }
+        _ => runtime_bail!(NotAList, value: list),
+    }
+}
+
+// eq/equal moved to src/data.rs
+
+#[defun]
+fn memq(elt: Object, list: Object) -> Result<Object> {
+    let mut cur = list;
+    loop {
+        match cur.as_ref() {
+            ObjectRef::Nil => return Ok(nil()),
+            ObjectRef::Cons(cons_cell) => {
+                if cons_cell.car().0 == elt.0 { return Ok(cur); }
+                cur = cons_cell.cdr().clone();
+            }
+            _ => return runtime_bail!(NotAList, value: cur),
+        }
+    }
+}
+
+#[defun]
+fn assoc(key: Object, alist: Object) -> Result<Object> {
+    let mut cur = alist;
+    loop {
+        match cur.as_ref() {
+            ObjectRef::Nil => return Ok(nil()),
+            ObjectRef::Cons(cons_cell) => {
+                match cons_cell.car().as_ref() {
+                    ObjectRef::Cons(pair) => {
+                        if pair.car().0 == key.0 { return Ok(cons_cell.car().clone()); }
+                    }
+                    _ => {}
+                }
+                cur = cons_cell.cdr().clone();
+            }
+            _ => return runtime_bail!(NotAList, value: cur),
+        }
     }
 }
 
@@ -219,6 +386,7 @@ mod tests {
     use super::*;
     use crate::core::number::LispInteger;
     use crate::core::object::{ObjectRef, nil};
+    use crate::core::symbol::Symbol;
 
     #[test]
     fn test_cons_basic() {
@@ -260,6 +428,127 @@ mod tests {
                 assert_eq!(ints, vec![1, 2, 3]);
             }
             _ => panic!("list did not return cons"),
+        }
+    }
+
+    #[test]
+    fn test_car_cdr() {
+        let pair = super::cons(LispInteger(10).tag(), LispInteger(20).tag());
+        let car = super::car(pair.clone()).unwrap();
+        let cdr = super::cdr(pair.clone()).unwrap();
+        let ObjectRef::Int(v1) = car.as_ref() else { panic!("car not int") };
+        assert_eq!(v1, 10);
+        let ObjectRef::Int(v2) = cdr.as_ref() else { panic!("cdr not int") };
+        assert_eq!(v2, 20);
+
+        // (car nil) and (cdr nil) => nil
+        assert!(matches!(super::car(nil()).unwrap().as_ref(), ObjectRef::Nil));
+        assert!(matches!(super::cdr(nil()).unwrap().as_ref(), ObjectRef::Nil));
+    }
+
+    #[test]
+    fn test_setcar_setcdr() {
+        let mut cell = LispCons::new(LispInteger(1).tag(), LispInteger(2).tag());
+        super::setcar(&mut cell.0.get_mut(), LispInteger(3).tag());
+        super::setcdr(&mut cell.0.get_mut(), LispInteger(4).tag());
+        let cons_obj = cell.tag();
+        match cons_obj.as_ref() {
+            ObjectRef::Cons(c) => {
+                let ObjectRef::Int(a) = c.car().as_ref() else { panic!("car not int") };
+                let ObjectRef::Int(d) = c.cdr().as_ref() else { panic!("cdr not int") };
+                assert_eq!(a, 3);
+                assert_eq!(d, 4);
+            }
+            _ => panic!("not cons"),
+        }
+    }
+
+    #[test]
+    fn test_predicates() {
+        let lst = super::list(&[LispInteger(1).tag()]);
+        assert!(matches!(super::consp(lst.clone()).as_ref(), ObjectRef::True));
+        assert!(matches!(super::listp(lst.clone()).as_ref(), ObjectRef::True));
+        assert!(matches!(super::listp(nil()).as_ref(), ObjectRef::True));
+        assert!(matches!(super::atom(LispInteger(1).tag()).as_ref(), ObjectRef::True));
+        // assert!(matches!(super::null(nil()).as_ref(), ObjectRef::True));
+    }
+
+    #[test]
+    fn test_length_nth_nthcdr() {
+        let lst = super::list(&[LispInteger(1).tag(), LispInteger(2).tag(), LispInteger(3).tag()]);
+        let len = super::length(lst.clone()).unwrap();
+        let ObjectRef::Int(l) = len.as_ref() else { panic!("len not int") };
+        assert_eq!(l, 3);
+
+        let second = super::nth(1, lst.clone()).unwrap();
+        let ObjectRef::Int(v) = second.as_ref() else { panic!("nth not int") };
+        assert_eq!(v, 2);
+
+        let rest = super::nthcdr(2, lst.clone()).unwrap();
+        match rest.as_ref() {
+            ObjectRef::Cons(c) => {
+                let ObjectRef::Int(v) = c.car().as_ref() else { panic!("not int") };
+                assert_eq!(v, 3);
+            }
+            _ => panic!("nthcdr not cons"),
+        }
+    }
+
+    #[test]
+    fn test_append_reverse() {
+        let a = super::list(&[LispInteger(1).tag(), LispInteger(2).tag()]);
+        let b = super::list(&[LispInteger(3).tag(), LispInteger(4).tag()]);
+        let app = super::append(a, b).unwrap();
+        let ints: Vec<i64> = match app.as_ref() {
+            ObjectRef::Cons(c) => c
+                .to_vec()
+                .unwrap()
+                .into_iter()
+                .map(|o| if let ObjectRef::Int(i) = o.as_ref() { i } else { panic!("not int") })
+                .collect(),
+            _ => panic!("not cons"),
+        };
+        assert_eq!(ints, vec![1, 2, 3, 4]);
+
+        let rev = super::reverse(super::list(&[LispInteger(1).tag(), LispInteger(2).tag(), LispInteger(3).tag()])).unwrap();
+        let ints: Vec<i64> = match rev.as_ref() {
+            ObjectRef::Cons(c) => c
+                .to_vec()
+                .unwrap()
+                .into_iter()
+                .map(|o| if let ObjectRef::Int(i) = o.as_ref() { i } else { panic!("not int") })
+                .collect(),
+            _ => panic!("not cons"),
+        };
+        assert_eq!(ints, vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn test_memq_assoc() {
+        // memq
+        let lst = super::list(&[LispInteger(1).tag(), LispInteger(2).tag(), LispInteger(3).tag()]);
+        let m = super::memq(LispInteger(2).tag(), lst).unwrap();
+        match m.as_ref() {
+            ObjectRef::Cons(c) => {
+                let ObjectRef::Int(v) = c.car().as_ref() else { panic!("not int") };
+                assert_eq!(v, 2);
+            }
+            _ => panic!("memq not cons"),
+        }
+
+        // assoc
+        let key_a = Symbol::from("a").tag();
+        let key_b = Symbol::from("b").tag();
+        let pair_a = super::cons(key_a.clone(), LispInteger(1).tag());
+        let pair_b = super::cons(key_b.clone(), LispInteger(2).tag());
+        let alist = super::list(&[pair_a, pair_b.clone()]);
+        let found = super::assoc(key_b, alist).unwrap();
+        match found.as_ref() {
+            ObjectRef::Cons(p) => {
+                let ObjectRef::Int(v) = p.cdr().as_ref() else { panic!("not int") };
+                assert_eq!(v, 2);
+            }
+            _ => panic!("assoc not cons pair"),
         }
     }
 }

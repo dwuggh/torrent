@@ -1,5 +1,7 @@
 pub mod core;
 pub mod gc;
+pub mod data;
+pub mod fns;
 
 use crate::core::{
     compiler::jit::JIT,
