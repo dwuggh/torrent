@@ -1,6 +1,6 @@
 use mmtk::vm::Collection;
 
-use crate::thread::{self, THREAD_MANAGER};
+use crate::thread::{THREAD_MANAGER, spawn_gc_worker};
 use crate::vm::MM;
 
 pub struct VMCollection;
@@ -19,15 +19,15 @@ impl Collection<MM> for VMCollection {
 
     fn block_for_gc(tls: mmtk::util::VMMutatorThread) {
         // Park this mutator if a GC request is in flight.
-        let thread = crate::thread::MutatorThread::from_mutator_thread(tls);
+        let thread = unsafe { crate::thread::MutatorThread::from_mutator_thread(tls) };
         thread.block();
     }
 
-    fn spawn_gc_thread(tls: mmtk::util::VMThread, ctx: mmtk::vm::GCThreadContext<MM>) {
-        // Minimal wiring: leave unimplemented until MMTk integration is finalized.
-        // GC workers will be spawned by the runtime embedding.
-        // (This hook can be filled with worker.run(...) once the global MMTk is available.)
-        let _ = (tls, ctx);
-        todo!()
+    fn spawn_gc_thread(_tls: mmtk::util::VMThread, ctx: mmtk::vm::GCThreadContext<MM>) {
+        match ctx {
+            mmtk::vm::GCThreadContext::Worker(worker) => {
+                spawn_gc_worker(worker).expect("failed to spawn MMTk GC worker thread");
+            }
+        }
     }
 }

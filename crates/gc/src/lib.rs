@@ -51,10 +51,8 @@ pub fn alloc<O: Tagged>() -> Option<u64> {
 }
 
 pub fn destroy_mutator() {
-    let manager = &THREAD_MANAGER;
-    let thread = manager.add_or_get_current_thread();
-    let mut g = thread.mutator.lock().unwrap();
-    let mut mutator = g.take().unwrap();
+    let thread = THREAD_MANAGER.add_or_get_current_thread();
+    let mut mutator = thread.take_mutator().unwrap();
     mmtk::memory_manager::destroy_mutator(&mut mutator);
 }
 

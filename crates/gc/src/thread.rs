@@ -1,7 +1,9 @@
 use std::cell::{Cell, RefCell, UnsafeCell};
+use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, Weak};
+use std::thread::JoinHandle;
 
 use mmtk::util::{Address, OpaquePointer, VMMutatorThread, VMThread, VMWorkerThread};
 use mmtk::{Mutator, MutatorContext};
@@ -27,7 +29,7 @@ pub enum ThreadKind {
 }
 
 #[repr(C)]
-struct ThreadHeader {
+pub(crate) struct ThreadHeader {
     kind: ThreadKind,
     id: u32,
 }
@@ -51,7 +53,7 @@ unsafe impl Send for MutatorThread {}
 unsafe impl Sync for MutatorThread {}
 
 #[repr(C)]
-struct GcWorkerThread {
+pub(crate) struct GcWorkerThread {
     header: ThreadHeader,
     manager: Weak<ThreadManager>,
 }
@@ -71,7 +73,7 @@ pub static THREAD_MANAGER: LazyLock<Arc<ThreadManager>> =
 #[derive(Clone)]
 enum TlsThread {
     Mutator(Arc<MutatorThread>),
-    GcWorker(Arc<GcWorkerThread>)
+    GcWorker(Arc<GcWorkerThread>),
 }
 
 // Thread-local handle to the registered Thread.
@@ -86,7 +88,10 @@ impl MutatorThread {
     pub fn new(manager: &std::sync::Arc<ThreadManager>) -> Self {
         let id = manager.next_id();
         Self {
-            header: ThreadHeader { kind: ThreadKind::Mutator, id },
+            header: ThreadHeader {
+                kind: ThreadKind::Mutator,
+                id,
+            },
             block_requested: AtomicBool::new(false),
             mutator: UnsafeCell::new(None),
             park_lock: Mutex::new(ThreadState::Mutating),
@@ -95,8 +100,34 @@ impl MutatorThread {
         }
     }
 
-    fn mutator(&self) -> &mut Mutator<MM> {
-        todo!()
+    pub fn bind_mutator(&self, mutator: Box<Mutator<MM>>) {
+        let slot = unsafe { &mut *self.mutator.get() };
+        assert!(slot.is_none(), "mutator is already bound to this thread");
+        *slot = Some(mutator);
+    }
+
+    pub fn take_mutator(&self) -> Option<Box<Mutator<MM>>> {
+        unsafe { &mut *self.mutator.get() }.take()
+    }
+
+    pub(crate) fn mutator(&self) -> &mut Mutator<MM> {
+        // The VM binding creates mutable mutator references only for the current
+        // thread or after stop-the-world has parked mutators.
+        let slot = unsafe { &mut *self.mutator.get() };
+        slot.as_deref_mut()
+            .expect("mutator thread has no bound MMTk mutator")
+    }
+
+    pub fn guard_mutator(&self) -> Option<MutatorGuard<'_>> {
+        unsafe { &*self.mutator.get() }
+            .as_ref()
+            .map(|_| MutatorGuard { thread: self })
+    }
+
+    pub(crate) fn mutator_ptr(&self) -> Option<*mut Mutator<MM>> {
+        unsafe { &mut *self.mutator.get() }
+            .as_deref_mut()
+            .map(|mutator| mutator as *mut Mutator<MM>)
     }
 
     pub fn alloc(&self, size: usize) -> Address {
@@ -123,11 +154,44 @@ impl MutatorThread {
 
         *state = ThreadState::Blocked;
         self.block_requested.store(false, Ordering::Release);
+        self.park_cv.notify_all();
         // gc workloads can start here
 
         while *state == ThreadState::Blocked {
             state = self.park_cv.wait(state).unwrap();
         }
+    }
+
+    pub fn block(&self) {
+        let mut state = self.park_lock.lock().unwrap();
+        match *state {
+            ThreadState::Mutating | ThreadState::RequestToBlock => {
+                // process local handles
+                *state = ThreadState::Blocked;
+                self.block_requested.store(false, Ordering::Release);
+                self.park_cv.notify_all();
+            }
+            ThreadState::Immutable | ThreadState::BlockedInImmutable => {
+                panic!(
+                    "block_for_gc called while thread is not mutating: {:?}",
+                    *state
+                );
+            }
+            ThreadState::New | ThreadState::Terminated => {
+                panic!(
+                    "block_for_gc called on non-running thread: {:?}",
+                    *state
+                );
+            }
+            ThreadState::Blocked => {}
+        }
+
+        while *state == ThreadState::Blocked {
+            state = self.park_cv.wait(state).unwrap();
+        }
+
+        // resumed
+        // reload roots
     }
 
     // called from gc thread
@@ -198,7 +262,6 @@ impl MutatorThread {
             }
             self.block_requested.store(false, Ordering::Release);
         }
-
     }
 
     fn leave_native(&self) {
@@ -213,7 +276,25 @@ impl MutatorThread {
 
         *state = ThreadState::Mutating;
     }
+}
 
+pub struct MutatorGuard<'a> {
+    thread: &'a MutatorThread,
+}
+
+impl Deref for MutatorGuard<'_> {
+    type Target = Mutator<MM>;
+
+    fn deref(&self) -> &Self::Target {
+        let ptr = self.thread.mutator() as *mut Mutator<MM> as *const Mutator<MM>;
+        unsafe { &*ptr }
+    }
+}
+
+impl DerefMut for MutatorGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.thread.mutator()
+    }
 }
 
 impl ThreadManager {
@@ -226,10 +307,10 @@ impl ThreadManager {
     }
 
     pub fn request_stop_all_mutators<F>(&self, mut visitor: F)
-        where F: FnMut(&'static mut Mutator<MM>)
+    where
+        F: FnMut(&'static mut Mutator<MM>),
     {
         let threads = self.mutator_threads.lock().unwrap();
-
 
         for t in threads.iter() {
             t.request_block();
@@ -242,10 +323,9 @@ impl ThreadManager {
         // NOTE in future, flush tlabs here
 
         for t in threads.iter() {
-            let mutator = unsafe {
-                &mut *(t.mutator() as *mut _)
-            };
-            visitor(mutator)
+            if let Some(mutator) = t.mutator_ptr() {
+                visitor(unsafe { &mut *mutator })
+            }
         }
 
         // let active = threads.len();
@@ -264,6 +344,70 @@ impl ThreadManager {
     fn next_id(&self) -> u32 {
         self.next_thread_id.fetch_add(1, Ordering::Relaxed)
     }
+
+    pub fn add_or_get_current_thread(self: &Arc<Self>) -> Arc<MutatorThread> {
+        TLS_THREAD.with(|tls| {
+            if let Some(thread) = tls.borrow().clone() {
+                return match thread {
+                    TlsThread::Mutator(thread) => thread,
+                    TlsThread::GcWorker(_) => {
+                        panic!("current thread is already registered as a GC worker")
+                    }
+                };
+            }
+
+            let thread = Arc::new(MutatorThread::new(self));
+            TLS_THREAD_PTR.with(|ptr| ptr.set(NonNull::new(&thread.header as *const _ as *mut _)));
+            *tls.borrow_mut() = Some(TlsThread::Mutator(thread.clone()));
+            self.mutator_threads.lock().unwrap().push(thread.clone());
+            thread
+        })
+    }
+
+    pub(crate) fn add_current_gc_thread(self: &Arc<Self>) -> Arc<GcWorkerThread> {
+        TLS_THREAD.with(|tls| {
+            if let Some(thread) = tls.borrow().clone() {
+                return match thread {
+                    TlsThread::GcWorker(thread) => thread,
+                    TlsThread::Mutator(_) => {
+                        panic!("current thread is already registered as a mutator")
+                    }
+                };
+            }
+
+            let thread = Arc::new(GcWorkerThread::new(self));
+            TLS_THREAD_PTR.with(|ptr| ptr.set(NonNull::new(&thread.header as *const _ as *mut _)));
+            *tls.borrow_mut() = Some(TlsThread::GcWorker(thread.clone()));
+            self.gc_threads.lock().unwrap().push(thread.clone());
+            thread
+        })
+    }
+
+    pub(crate) fn bound_mutator_ptrs(&self) -> Vec<*mut Mutator<MM>> {
+        self.mutator_threads
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|thread| thread.mutator_ptr())
+            .collect()
+    }
+
+    pub(crate) fn number_of_bound_mutators(&self) -> usize {
+        self.mutator_threads
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|thread| thread.mutator_ptr().is_some())
+            .count()
+    }
+}
+
+pub fn current_thread() -> Arc<MutatorThread> {
+    TLS_THREAD.with(|tls| match tls.borrow().clone() {
+        Some(TlsThread::Mutator(thread)) => thread,
+        Some(TlsThread::GcWorker(_)) => panic!("current thread is a GC worker, not a mutator"),
+        None => panic!("current thread is not registered with the GC thread manager"),
+    })
 }
 
 pub fn is_mutator(tls: VMThread) -> bool {
@@ -327,8 +471,7 @@ impl MutatorThread {
     /// Safety: same as `try_from_vmthread`.
     #[inline]
     pub unsafe fn from_vmthread<'a>(tls: VMThread) -> &'a MutatorThread {
-        unsafe { Self::try_from_vmthread(tls) }
-            .expect("VMThread does not point to a MutatorThread")
+        unsafe { Self::try_from_vmthread(tls) }.expect("VMThread does not point to a MutatorThread")
     }
 
     /// Recover a mutator thread from a VMMutatorThread.
@@ -341,6 +484,17 @@ impl MutatorThread {
 }
 
 impl GcWorkerThread {
+    fn new(manager: &std::sync::Arc<ThreadManager>) -> Self {
+        let id = manager.next_id();
+        Self {
+            header: ThreadHeader {
+                kind: ThreadKind::GcWorker,
+                id,
+            },
+            manager: Arc::downgrade(manager),
+        }
+    }
+
     /// Create a VMThread opaque handle pointing to this GC worker's common header.
     #[inline]
     pub fn to_vmthread(&self) -> VMThread {
@@ -385,5 +539,41 @@ impl GcWorkerThread {
     #[inline]
     pub unsafe fn from_worker_thread<'a>(tls: VMWorkerThread) -> &'a GcWorkerThread {
         unsafe { Self::from_vmthread(tls.0) }
+    }
+}
+
+pub(crate) fn spawn_gc_worker(
+    worker: Box<mmtk::scheduler::GCWorker<MM>>,
+) -> std::io::Result<JoinHandle<()>> {
+    let mmtk = worker.mmtk;
+    std::thread::Builder::new()
+        .name("mmtk-gc-worker".to_string())
+        .spawn(move || {
+            let thread = THREAD_MANAGER.add_current_gc_thread();
+            mmtk::memory_manager::start_worker(mmtk, thread.to_worker_thread(), worker);
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opaque_thread_header_preserves_kind() {
+        let manager = Arc::new(ThreadManager::new());
+
+        let mutator = MutatorThread::new(&manager);
+        assert!(is_mutator(mutator.to_vmthread()));
+        assert_eq!(
+            unsafe { kind_from_vmthread(mutator.to_vmthread()) },
+            ThreadKind::Mutator
+        );
+
+        let worker = GcWorkerThread::new(&manager);
+        assert!(!is_mutator(worker.to_vmthread()));
+        assert_eq!(
+            unsafe { kind_from_vmthread(worker.to_vmthread()) },
+            ThreadKind::GcWorker
+        );
     }
 }
