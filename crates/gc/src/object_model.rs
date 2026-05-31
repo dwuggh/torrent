@@ -6,15 +6,9 @@ use mmtk::{
     },
 };
 
-use crate::{
-    gc::{GcHeader, GcTag, TagSpec},
-    vm::MM,
-};
+use crate::{gc::metadata_for_object, vm::MM};
 
 pub struct VMObjectModel;
-
-const OBJECT_REF_OFFSET: usize = std::mem::size_of::<usize>();
-const CONS_SIZE: usize = std::mem::size_of::<u64>() * 2;
 
 impl mmtk::vm::ObjectModel<MM> for VMObjectModel {
     const GLOBAL_LOG_BIT_SPEC: VMGlobalLogBitSpec = VMGlobalLogBitSpec::side_first();
@@ -23,12 +17,13 @@ impl mmtk::vm::ObjectModel<MM> for VMObjectModel {
         VMLocalForwardingPointerSpec::in_header(0);
 
     const LOCAL_FORWARDING_BITS_SPEC: VMLocalForwardingBitsSpec =
-        VMLocalForwardingBitsSpec::in_header(62);
+        VMLocalForwardingBitsSpec::side_first();
 
-    const LOCAL_MARK_BIT_SPEC: VMLocalMarkBitSpec = VMLocalMarkBitSpec::side_first();
+    const LOCAL_MARK_BIT_SPEC: VMLocalMarkBitSpec =
+        VMLocalMarkBitSpec::side_after(Self::LOCAL_FORWARDING_BITS_SPEC.as_spec());
 
     const LOCAL_LOS_MARK_NURSERY_SPEC: VMLocalLOSMarkNurserySpec =
-        VMLocalLOSMarkNurserySpec::side_first();
+        VMLocalLOSMarkNurserySpec::side_after(Self::LOCAL_MARK_BIT_SPEC.as_spec());
 
     fn copy(
         from: mmtk::util::ObjectReference,
@@ -41,7 +36,8 @@ impl mmtk::vm::ObjectModel<MM> for VMObjectModel {
         unsafe {
             std::ptr::copy(from_start.to_ptr::<u8>(), c.to_mut_ptr::<u8>(), bytes);
         }
-        let to = unsafe { ObjectReference::from_raw_address_unchecked(c + OBJECT_REF_OFFSET) };
+        let to =
+            unsafe { ObjectReference::from_raw_address_unchecked(c + crate::OBJECT_REF_OFFSET) };
         copy_context.post_copy(to, bytes, semantics);
         to
     }
@@ -64,17 +60,12 @@ impl mmtk::vm::ObjectModel<MM> for VMObjectModel {
         _from: mmtk::util::ObjectReference,
         to: mmtk::util::Address,
     ) -> mmtk::util::ObjectReference {
-        unsafe { ObjectReference::from_raw_address_unchecked(to + OBJECT_REF_OFFSET) }
+        unsafe { ObjectReference::from_raw_address_unchecked(to + crate::OBJECT_REF_OFFSET) }
     }
 
     fn get_current_size(object: mmtk::util::ObjectReference) -> usize {
-        let first_word: u64 = unsafe { Self::ref_to_header(object).load() };
-        if GcTag::is_header_word(first_word) {
-            let header: &GcHeader = unsafe { Self::ref_to_header(object).as_ref() };
-            header.metadata().size
-        } else {
-            CONS_SIZE
-        }
+        let metadata = unsafe { metadata_for_object(object) };
+        unsafe { (metadata.size)(object) }
     }
 
     fn get_size_when_copied(object: mmtk::util::ObjectReference) -> usize {
@@ -93,10 +84,10 @@ impl mmtk::vm::ObjectModel<MM> for VMObjectModel {
         &[]
     }
 
-    const OBJECT_REF_OFFSET_LOWER_BOUND: isize = OBJECT_REF_OFFSET as isize;
+    const OBJECT_REF_OFFSET_LOWER_BOUND: isize = crate::OBJECT_REF_OFFSET as isize;
 
     fn ref_to_object_start(object: mmtk::util::ObjectReference) -> mmtk::util::Address {
-        object.to_raw_address().sub(OBJECT_REF_OFFSET)
+        object.to_raw_address().sub(crate::OBJECT_REF_OFFSET)
     }
 
     fn ref_to_header(object: mmtk::util::ObjectReference) -> mmtk::util::Address {

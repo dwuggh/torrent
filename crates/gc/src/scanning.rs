@@ -1,10 +1,10 @@
 use std::sync::OnceLock;
 
 use mmtk::util::{Address, ObjectReference};
-use mmtk::vm::{ObjectModel, Scanning};
+use mmtk::vm::Scanning;
 
 use crate::TaggedPtrSlot;
-use crate::gc::{GcHeader, Visitor, VisitorImpl};
+use crate::gc::{Visitor, VisitorImpl, metadata_for_object};
 use crate::vm::MM;
 
 pub trait StackMapProvider: Send + Sync {
@@ -42,19 +42,13 @@ impl Scanning<MM> for VMScanning {
         object: mmtk::util::ObjectReference,
         slot_visitor: &mut SV,
     ) {
-        let header_addr = crate::object_model::VMObjectModel::ref_to_header(object);
-        let first_word: u64 = unsafe { header_addr.load() };
-        let addr = object.to_raw_address();
-
         let mut adapter = SlotVisitorAdapter::<SV> { slot_visitor };
         let mut visitor = Visitor::new(&mut adapter);
-        if GcHeader::is_header_word(first_word) {
-            let header = unsafe { (header_addr.to_ptr::<GcHeader>()).as_ref().unwrap() };
-            (header.metadata().trace)(addr, visitor);
-        } else {
-            visitor.visit_slot_address(header_addr);
-            visitor.visit_slot_address(addr);
-        }
+        let metadata = unsafe { metadata_for_object(object) };
+
+        // Erased scanning goes through metadata so headered and headerless
+        // layouts keep their slot-address logic in one place.
+        unsafe { (metadata.trace)(object, &mut visitor) };
     }
 
     fn notify_initial_thread_scan_complete(_partial_scan: bool, _tls: mmtk::util::VMWorkerThread) {}
