@@ -13,6 +13,7 @@ use crate::core::{
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
+
     // gc::collector::init_gc();
     let text = std::fs::read_to_string("src/test.el")?;
     // let text = include_str!("test.el");

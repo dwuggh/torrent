@@ -14,6 +14,7 @@ pub mod parser;
 pub mod runtime;
 pub mod string;
 pub mod symbol;
+pub mod tag;
 pub mod vector;
 
 pub use tagged_ptr::Tagged;

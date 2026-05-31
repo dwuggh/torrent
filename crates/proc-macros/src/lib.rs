@@ -58,11 +58,14 @@ pub fn derive_trace(input: TokenStream) -> TokenStream {
         ..
     } = parse_macro_input!(input);
 
-    match data {
-        syn::Data::Struct(data_struct) => derive_trace_struct(ident, data_struct, generics).into(),
-        syn::Data::Enum(data_enum) => derive_trace_enum(ident, data_enum, generics).into(),
-        _ => panic!("Union types are not supported."),
-    }
+    let tok = quote! {};
+    tok.into()
+
+    // match data {
+    //     syn::Data::Struct(data_struct) => derive_trace_struct(ident, data_struct, generics).into(),
+    //     syn::Data::Enum(data_enum) => derive_trace_enum(ident, data_enum, generics).into(),
+    //     _ => panic!("Union types are not supported."),
+    // }
 }
 
 fn derive_trace_struct(

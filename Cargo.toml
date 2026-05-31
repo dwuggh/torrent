@@ -21,6 +21,7 @@ chumsky = "1.0.0-alpha.8"
 anyhow = "1.0.99"
 tokio = { version = "1.47.1", features = ["full"] }
 proc-macros = { path = "crates/proc-macros" }
+gc = { path = "crates/gc" }
 cranelift = "0.123.2"
 cranelift-jit = "0.123.2"
 cranelift-native = "0.123.2"

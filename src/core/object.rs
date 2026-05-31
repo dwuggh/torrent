@@ -58,19 +58,19 @@ impl Object {
     }
 }
 
-unsafe impl Trace for Object {
+impl Trace for Object {
     unsafe fn trace(&self, visitor: crate::gc::Visitor) {
-        unsafe {
-            match self.as_ref() {
-                ObjectRef::Str(str) => str.trace(visitor),
-                ObjectRef::Vector(vector) => vector.trace(visitor),
-                ObjectRef::Cons(cons) => cons.trace(visitor),
-                ObjectRef::Function(function) => function.trace(visitor),
-                ObjectRef::HashTable(hash_table) => hash_table.trace(visitor),
-                _ => {}
-            }
-            // self.untag_ref().trace(visitor);
-        }
+        // unsafe {
+        //     match self.as_ref() {
+        //         ObjectRef::Str(str) => str.trace(visitor),
+        //         ObjectRef::Vector(vector) => vector.trace(visitor),
+        //         ObjectRef::Cons(cons) => cons.trace(visitor),
+        //         ObjectRef::Function(function) => function.trace(visitor),
+        //         ObjectRef::HashTable(hash_table) => hash_table.trace(visitor),
+        //         _ => {}
+        //     }
+        //     // self.untag_ref().trace(visitor);
+        // }
     }
 
     unsafe fn finalize(&mut self) {

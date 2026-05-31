@@ -41,6 +41,21 @@ Emacs Lisp Source → HIR → Baseline JIT → Optimizing JIT
 
 Only the baseline JIT has a naive implementation today.
 
+** pointer tagging
+we use 8 byte alignment.
+For type tagging, all types that need a header will store its specific tag in the header, as a secondary tagging, while first level tagged types do not have a header.
+the tag table is:
+- 000: integer
+- 111: nil
+- 001: symbol
+  - 0001: symbol
+  - 1001: indexed symbol
+- 010: cons
+- 011: char
+- 101: reserved for cons marker; header must end with this
+- 110: secondary
+
+
 * GC Design
   GC theory is vast; I can only summarize what I have read. My main reference is the GC handbook [cite:@jonesGarbageCollectionHandbook2023].
 
@@ -119,6 +134,54 @@ However, this is not consistent with GC model: they tend to be cloned. what's mo
 Recently, a BFS‑based refinement of Bacon–Rajan was proposed [cite:@giallorenzoBreadthfirstCycleCollection2025], with a Rust implementation. I have not read the paper thoroughly yet.
 
 [[[https://mmtk.io][MMTK](https://mmtk.io][MMTK)]] is a growing GC SDK in Rust. LXR [cite:@zhaoLowLatencyHighThroughputGarbage2022] is implemented on a separate MMTK branch; there are many divergent commits, so merging will take time. MMTK already provides a solid platform; my long‑term goal is to integrate with it.
+
+
+** mmtk
+We now use mmtk as the GC backend.
+*** how to implement a mmtk binding in rust
+generally speaking, we need to:
+1. fill the VM trait, and
+2. use the mutator in our code.
+
+We will divide this into several topics.
+**** slot for tagged pointer
+a slot in mmtk is a "reference to reference". the slot points to the lisp object, a tagged pointer; slot will load and store to it, no matter it is on stack, on heap,
+or in some thread-local handle. The implementation is straight forward. Note that a lisp object could also be immediate value like small integer, char, or symbol. in this case,
+we should not load from it.
+**** Object layout
+There are 2 types of object: immediate object and tagged pointer object. the latter contains a header, which has a word size. the header layout is:
+optional hash: 32 bits -- reserved: 26 bits -- tag: 3 bits -- header marker: 3 bits
+the header marker is used for compact cons representation. cons type is a pointer object type but has no headers. To do so we enforce a header marker:
+all headers end with 0b101, which will never be a tag; so if a "header" ends with others, then it must be a cons.
+
+The memory manager may use header as forwarding pointer. it is fine.
+
+**** ObjectReference
+The ~ObjectReference~ has a degree of freedom: it can point to anywhere inside the allocation area. In this implementation, we place it to a word after the object's start.
+so for a cons type, ~ObjectReference~ will point to the place between car and cdr. this wouldn't affect anything, except when look up size, we need to check the header mark first. but
+the header is checked anyway, it won't lose any performance.
+
+**** mutator
+We need to store a mutator for each mutation thread. then we can use ~mutator.alloc~ and ~mutator.alloc_slow~ for allocation.
+for mutating object fields, we should use ~barrier.object_reference_write_pre~ or ~barrier.object_reference_write_post~, depending on the barrier. Note that this is necessary:
+many barriers only has 1 side; and for SATBBarrier, the ~object_reference_write_post~ is even ~unimplemented!()~. so this is highly coupled with specific strategy. we need to get
+a mutator for oursleves.
+***** fast path allocation
+****** codegen
+For the sake of JIT optimization, we should not make trampoline call for allocation. so the fast allocation should be directly programmed into isa.
+****** TLAB
+rsgc creates a Thread Local Allocation Buffer allocator that maps mmtk's bump allocator; in fast path we directly allocate on it, and in slow path, the objects are compacted, then
+we can sync our TLAB with mmtk.
+**** thread management and gc polling
+looking at apis in Collection:
+when gc is triggered, system will notify target threads to stop by ~block_for_gc~, after it is done, wake it up by ~resume~.
+one cheap way to implement it is to poll at every safepoint. safepoint means one can correctly do things in scanning.
+safepoint_poll:
+read state, check if a block is needed
+if need_block: block by condvar
+
+if not need_block: resume
+
 
 
 ** aside: GC and QEC
