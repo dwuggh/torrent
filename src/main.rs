@@ -7,6 +7,7 @@ use crate::core::{
     compiler::jit::JIT,
     env::Environment,
     object::Object,
+    object::init_gc_types,
     parser::{macro_expansion::expand_and_resolve_everything, parse_src},
 };
 
@@ -14,7 +15,7 @@ use crate::core::{
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    // gc::collector::init_gc();
+    init_gc_types();
     let text = std::fs::read_to_string("src/test.el")?;
     // let text = include_str!("test.el");
     let env = Environment::default();

@@ -6,10 +6,9 @@ use crate::core::{
     parser::Span,
     string::LispStr,
     symbol::{LispSymbol, Symbol},
-    tagged_ptr::TaggedObj,
+    tag::Tag,
     vector::LispVector,
 };
-use crate::gc::Gc;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -420,7 +419,7 @@ impl From<Expr> for LispObject {
                     .map(|e| e.into())
                     .map(|obj: LispObject| obj.tag())
                     .collect();
-                LispObject::Vector(LispVector(Gc::new(objects)))
+                LispObject::Vector(LispVector::new(objects))
             }
             ExprType::Call(call) => {
                 // Convert function call to a list: (function arg1 arg2 ...)
@@ -931,7 +930,7 @@ fn quote_data_to_lisp_object(data: QuotedData) -> LispObject {
                 .map(quote_data_to_lisp_object)
                 .map(|obj| obj.tag())
                 .collect();
-            LispObject::Vector(LispVector(Gc::new(objects)))
+            LispObject::Vector(LispVector::new(objects))
         }
         QuotedData::Unquote(expr) => {
             // Convert unquote to (unquote expr)

@@ -1,20 +1,24 @@
 use std::sync::OnceLock;
 
-use mmtk::util::{Address, ObjectReference};
+use mmtk::util::{Address, VMMutatorThread};
 use mmtk::vm::Scanning;
 
-use crate::TaggedPtrSlot;
-use crate::gc::{Visitor, VisitorImpl, metadata_for_object};
-use crate::vm::MM;
+use super::{
+    metadata_for_object, mmtk_instance, vm::MM, TaggedPtrSlot, Visitor, VisitorImpl,
+};
 
 pub trait StackMapProvider: Send + Sync {
-    /// Enumerate precise GC roots for the given mutator thread.
-    /// Each callback argument is a pointer to an ObjectReference slot.
-    fn enumerate_roots(
-        &self,
-        tls: mmtk::util::VMMutatorThread,
-        visit: &mut dyn FnMut(*mut mmtk::util::ObjectReference),
-    );
+    /// Visit precise stack roots for the given mutator thread.
+    ///
+    /// Providers must report addresses of machine words that hold Torrent
+    /// tagged `Object` values. MMTk will load and update those words through
+    /// `TaggedPtrSlot` if the referenced object moves.
+    fn visit_stack_roots(&self, tls: VMMutatorThread, visitor: &mut dyn StackRootVisitor);
+}
+
+pub trait StackRootVisitor {
+    /// Visit the address of a stack slot containing one raw tagged `Object`.
+    fn visit_tagged_slot(&mut self, slot: Address);
 }
 
 static STACKMAP_PROVIDER: OnceLock<&'static dyn StackMapProvider> = OnceLock::new();
@@ -64,10 +68,15 @@ impl Scanning<MM> for VMScanning {
 
         let mut slots: Vec<TaggedPtrSlot> = Vec::new();
         let mtls = mutator.mutator_tls;
-        provider.enumerate_roots(mtls, &mut |p: *mut ObjectReference| {
-            let addr = Address::from_ptr(p);
-            slots.push(TaggedPtrSlot::from_address(addr));
-        });
+        struct RootCollector<'a>(&'a mut Vec<TaggedPtrSlot>);
+
+        impl StackRootVisitor for RootCollector<'_> {
+            fn visit_tagged_slot(&mut self, slot: Address) {
+                self.0.push(TaggedPtrSlot::from_address(slot));
+            }
+        }
+
+        provider.visit_stack_roots(mtls, &mut RootCollector(&mut slots));
         factory.create_process_roots_work(slots);
     }
 
@@ -75,6 +84,7 @@ impl Scanning<MM> for VMScanning {
         _tls: mmtk::util::VMWorkerThread,
         _factory: impl mmtk::vm::RootsWorkFactory<<MM as mmtk::vm::VMBinding>::VMSlot>,
     ) {
+        let generational = mmtk_instance().get_plan().generational();
         // No additional VM-specific roots in this minimal design.
     }
 

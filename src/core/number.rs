@@ -1,8 +1,8 @@
 use crate::core::{
-    Tagged,
-    object::LispType,
-    tagged_ptr::{shifting_tag, shifting_untag},
+    object::Object,
+    tag::{TAG_FLOAT, Tag, TaggedPtrError, Untag},
 };
+use crate::gc::{HeaderedObject, Trace, Visitor};
 
 // pub(crate) const MAX_FIXNUM: i64 = i64::MAX >> 8;
 // pub(crate) const MIN_FIXNUM: i64 = i64::MIN >> 8;
@@ -11,9 +11,11 @@ use crate::core::{
 pub struct LispInteger(pub i64);
 pub type Integer = i64;
 
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
+pub struct LispFloat(pub crate::gc::Gc<Float>);
+
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
-pub struct LispFloat(pub f64);
-pub type Float = f64;
+pub struct Float(pub f64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LispCharacter(pub Character);
@@ -48,23 +50,47 @@ impl std::fmt::Display for Character {
     }
 }
 
-impl_tagged_for_prim!(LispInteger, LispType::Int, Integer);
-impl_tagged_for_prim!(LispFloat, LispType::Float, Float);
-impl Tagged for LispCharacter {
-    const TAG: LispType = (LispType::Character);
-    type Data<'a> = Character;
-    type DataMut<'a> = Character;
-    unsafe fn to_raw(&self) -> u64 {
-        shifting_tag(self.0.0, Self::TAG)
+impl Tag for LispInteger {
+    fn tag(self) -> Object {
+        Object::from_raw(((self.0 as u64) << 3) | crate::gc::GcTag::INT as u64)
     }
-    unsafe fn from_raw(raw: u64) -> Self {
-        unsafe { std::mem::transmute(shifting_untag(raw)) }
+}
+
+impl Untag for LispInteger {
+    fn untag(object: Object) -> Result<Self, TaggedPtrError> {
+        if object.get_tag() == crate::gc::GcTag::INT {
+            Ok(Self((object.raw() as i64) >> 3))
+        } else {
+            Err(TaggedPtrError::TypeMisMatch)
+        }
     }
-    unsafe fn cast<'a>(val: u64) -> Self::Data<'a> {
-        unsafe { Self::from_raw(val).0 }
+}
+
+impl crate::gc::Tagged for Float {
+    const TAG: u8 = TAG_FLOAT;
+}
+
+unsafe impl HeaderedObject for Float {}
+
+unsafe impl Trace for Float {
+    unsafe fn trace(&self, _visitor: &mut Visitor) {}
+}
+
+impl_tagged_for_gc!(LispFloat, Float);
+
+impl Tag for LispCharacter {
+    fn tag(self) -> Object {
+        Object::from_raw((self.0.0 << 3) | crate::gc::GcTag::CHAR as u64)
     }
-    unsafe fn cast_mut<'a>(val: u64) -> Self::DataMut<'a> {
-        unsafe { Self::from_raw(val).0 }
+}
+
+impl Untag for LispCharacter {
+    fn untag(object: Object) -> Result<Self, TaggedPtrError> {
+        if object.get_tag() == crate::gc::GcTag::CHAR {
+            Ok(Self(Character(object.raw() >> 3)))
+        } else {
+            Err(TaggedPtrError::TypeMisMatch)
+        }
     }
 }
 
@@ -102,13 +128,13 @@ impl From<LispInteger> for i64 {
     }
 }
 
-impl AsRef<f64> for LispFloat {
+impl AsRef<f64> for Float {
     fn as_ref(&self) -> &f64 {
         &self.0
     }
 }
 
-impl AsMut<f64> for LispFloat {
+impl AsMut<f64> for Float {
     fn as_mut(&mut self) -> &mut f64 {
         &mut self.0
     }
@@ -116,23 +142,23 @@ impl AsMut<f64> for LispFloat {
 
 impl LispFloat {
     pub fn new(value: f64) -> Self {
-        Self(value)
+        Self(crate::gc::Gc::new(Float(value)))
     }
 
     pub fn value(&self) -> f64 {
-        self.0
+        self.0.as_ref().0
     }
 }
 
 impl From<f64> for LispFloat {
     fn from(value: f64) -> Self {
-        Self(value)
+        Self::new(value)
     }
 }
 
 impl From<LispFloat> for f64 {
     fn from(value: LispFloat) -> Self {
-        value.0
+        value.value()
     }
 }
 

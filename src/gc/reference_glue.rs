@@ -1,6 +1,6 @@
 use mmtk::{util::ObjectReference, vm::ReferenceGlue};
 
-use crate::vm::MM;
+use super::vm::MM;
 
 pub struct VMReferenceGlue;
 

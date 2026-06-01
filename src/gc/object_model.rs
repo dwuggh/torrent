@@ -6,7 +6,7 @@ use mmtk::{
     },
 };
 
-use crate::{gc::metadata_for_object, vm::MM};
+use super::{metadata_for_object, vm::MM, OBJECT_REF_OFFSET};
 
 pub struct VMObjectModel;
 
@@ -31,13 +31,13 @@ impl mmtk::vm::ObjectModel<MM> for VMObjectModel {
         copy_context: &mut mmtk::util::copy::GCWorkerCopyContext<MM>,
     ) -> mmtk::util::ObjectReference {
         let bytes = Self::get_current_size(from);
-        let c = copy_context.alloc_copy(from, bytes, 8, 0, semantics);
+        let c = copy_context.alloc_copy(from, bytes, 8, OBJECT_REF_OFFSET, semantics);
         let from_start = Self::ref_to_object_start(from);
         unsafe {
             std::ptr::copy(from_start.to_ptr::<u8>(), c.to_mut_ptr::<u8>(), bytes);
         }
         let to =
-            unsafe { ObjectReference::from_raw_address_unchecked(c + crate::OBJECT_REF_OFFSET) };
+            unsafe { ObjectReference::from_raw_address_unchecked(c + OBJECT_REF_OFFSET) };
         copy_context.post_copy(to, bytes, semantics);
         to
     }
@@ -60,7 +60,7 @@ impl mmtk::vm::ObjectModel<MM> for VMObjectModel {
         _from: mmtk::util::ObjectReference,
         to: mmtk::util::Address,
     ) -> mmtk::util::ObjectReference {
-        unsafe { ObjectReference::from_raw_address_unchecked(to + crate::OBJECT_REF_OFFSET) }
+        unsafe { ObjectReference::from_raw_address_unchecked(to + OBJECT_REF_OFFSET) }
     }
 
     fn get_current_size(object: mmtk::util::ObjectReference) -> usize {
@@ -77,17 +77,17 @@ impl mmtk::vm::ObjectModel<MM> for VMObjectModel {
     }
 
     fn get_align_offset_when_copied(_object: mmtk::util::ObjectReference) -> usize {
-        0
+        OBJECT_REF_OFFSET
     }
 
     fn get_type_descriptor(_reference: mmtk::util::ObjectReference) -> &'static [i8] {
         &[]
     }
 
-    const OBJECT_REF_OFFSET_LOWER_BOUND: isize = crate::OBJECT_REF_OFFSET as isize;
+    const OBJECT_REF_OFFSET_LOWER_BOUND: isize = OBJECT_REF_OFFSET as isize;
 
     fn ref_to_object_start(object: mmtk::util::ObjectReference) -> mmtk::util::Address {
-        object.to_raw_address().sub(crate::OBJECT_REF_OFFSET)
+        object.to_raw_address().sub(OBJECT_REF_OFFSET)
     }
 
     fn ref_to_header(object: mmtk::util::ObjectReference) -> mmtk::util::Address {

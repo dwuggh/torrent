@@ -1,26 +1,69 @@
-use proc_macros::{defun, Trace};
+use std::{alloc::Layout, ptr::NonNull};
+
+use proc_macros::defun;
 use crate::{
-    core::Tagged,
     core::{
-        object::{LispType, Object, ObjectRef, nil, tru},
-        tagged_ptr::TaggedObj,
+        object::{HeapSlotUpdate, Object, ObjectRef, nil, tru},
+        tag::Tag,
     },
-    gc::Gc,
+    gc::{Gc, HeapObject, Trace, Visitor},
 };
 use crate::core::error::RuntimeResult as Result;
 use crate::runtime_bail;
 use crate::runtime_error;
 
-#[derive(Clone, Trace, Debug)]
+#[derive(Clone, Debug)]
 pub struct LispCons(pub Gc<Cons>);
 
-#[derive(Clone, Trace, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cons {
     car: Object,
     cdr: Object,
 }
 
-impl_tagged_for_gc!(LispCons, LispType::Cons, Cons);
+impl crate::gc::Tagged for Cons {
+    const TAG: u8 = crate::gc::GcTag::CONS;
+}
+
+unsafe impl Trace for Cons {
+    unsafe fn trace(&self, visitor: &mut Visitor) {
+        // Cons is compact `[car][cdr]`; both words are tagged object slots.
+        unsafe { self.car.trace(visitor) };
+        unsafe { self.cdr.trace(visitor) };
+    }
+}
+
+unsafe impl HeapObject for Cons {
+    type Repr = Cons;
+
+    const PRIMARY_TAG: u8 = crate::gc::GcTag::CONS;
+
+    fn layout() -> Layout {
+        Layout::new::<Cons>()
+    }
+
+    unsafe fn init(start: crate::gc::mmtk::util::Address, value: Self) {
+        unsafe { start.store::<Cons>(value) };
+    }
+
+    unsafe fn data_from_object_ref(
+        object: crate::gc::mmtk::util::ObjectReference,
+    ) -> NonNull<Self> {
+        let start = object.to_raw_address().sub(crate::gc::OBJECT_REF_OFFSET);
+        unsafe { NonNull::new_unchecked(start.to_mut_ptr::<Cons>()) }
+    }
+
+    unsafe fn object_ref_from_data(data: NonNull<Self>) -> crate::gc::mmtk::util::ObjectReference {
+        let start = crate::gc::mmtk::util::Address::from_ptr(data.as_ptr());
+        unsafe {
+            crate::gc::mmtk::util::ObjectReference::from_raw_address_unchecked(
+                start + crate::gc::OBJECT_REF_OFFSET,
+            )
+        }
+    }
+}
+
+impl_tagged_for_gc!(LispCons, Cons);
 
 impl LispCons {
     pub fn new(car: Object, cdr: Object) -> Self {
@@ -37,22 +80,22 @@ impl LispCons {
 
     /// Get the car (first element) of the cons cell
     pub fn car(&self) -> &Object {
-        &self.0.get().car
+        &self.0.as_ref().car
     }
 
     /// Get the cdr (rest) of the cons cell
     pub fn cdr(&self) -> &Object {
-        &self.0.get().cdr
+        &self.0.as_ref().cdr
     }
 
     /// Set the car (first element) of the cons cell
     pub fn set_car(&mut self, value: Object) {
-        self.0.get_mut().car = value;
+        self.0.as_mut().set_car(value);
     }
 
     /// Set the cdr (rest) of the cons cell
     pub fn set_cdr(&mut self, value: Object) {
-        self.0.get_mut().cdr = value;
+        self.0.as_mut().set_cdr(value);
     }
 }
 
@@ -69,12 +112,12 @@ impl Cons {
 
     /// Set the car (first element) of the cons cell
     pub fn set_car(&mut self, value: Object) {
-        self.car = value;
+        self.update_slot(|this| &mut this.car, value);
     }
 
     /// Set the cdr (rest) of the cons cell
     pub fn set_cdr(&mut self, value: Object) {
-        self.cdr = value;
+        self.update_slot(|this| &mut this.cdr, value);
     }
 
     /// Check if this cons cell is a proper list (ends with nil)
@@ -449,8 +492,8 @@ mod tests {
     #[test]
     fn test_setcar_setcdr() {
         let mut cell = LispCons::new(LispInteger(1).tag(), LispInteger(2).tag());
-        super::setcar(&mut cell.0.get_mut(), LispInteger(3).tag());
-        super::setcdr(&mut cell.0.get_mut(), LispInteger(4).tag());
+        super::setcar(cell.0.as_mut(), LispInteger(3).tag());
+        super::setcdr(cell.0.as_mut(), LispInteger(4).tag());
         let cons_obj = cell.tag();
         match cons_obj.as_ref() {
             ObjectRef::Cons(c) => {

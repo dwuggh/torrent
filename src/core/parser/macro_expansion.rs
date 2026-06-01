@@ -266,31 +266,23 @@ pub fn lisp_object_to_tokens(obj: LispObject) -> Vec<Token> {
         LispObject::Nil => vec![Token::Ident("nil".into())],
         LispObject::True => vec![Token::Ident("t".into())],
         LispObject::Int(lisp_integer) => vec![Token::Integer(lisp_integer.0)],
-        LispObject::Float(lisp_float) => vec![Token::Float(lisp_float.0)],
+        LispObject::Float(lisp_float) => vec![Token::Float(lisp_float.value())],
         LispObject::Character(lisp_character) => vec![Token::Character(lisp_character.value())],
         LispObject::Str(lisp_str) => vec![Token::Str(lisp_str.to_string())],
         LispObject::Symbol(lisp_symbol) => vec![Token::Ident(lisp_symbol.0.ident())],
         LispObject::Vector(lisp_vector) => {
             let mut tokens = vec![Token::LBracket];
-            for item in lisp_vector.0.get() {
+            for item in lisp_vector.0.as_ref().iter() {
                 let item_obj = item.clone().untag();
                 tokens.extend(lisp_object_to_tokens(item_obj));
             }
             tokens.push(Token::RBracket);
             tokens
         }
-        LispObject::Cons(lisp_cons) => cons_to_tokens(&lisp_cons.0.get()),
+        LispObject::Cons(lisp_cons) => cons_to_tokens(lisp_cons.0.as_ref()),
         LispObject::Function(_) => {
             // Functions can't be directly converted to tokens for macro expansion
             vec![Token::Ident("#<function>".into())]
-        }
-        LispObject::HashTable(_) => {
-            // Hash tables can't be directly converted to tokens for macro expansion
-            vec![Token::Ident("#<hash-table>".into())]
-        }
-        LispObject::Indirect(indirect) => {
-            let obj = indirect.0.get().clone().untag();
-            lisp_object_to_tokens(obj)
         }
     }
 }

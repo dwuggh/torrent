@@ -1,14 +1,17 @@
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, Weak};
 use std::thread::JoinHandle;
 
-use mmtk::util::{Address, OpaquePointer, VMMutatorThread, VMThread, VMWorkerThread};
-use mmtk::{Mutator, MutatorContext};
+use mmtk::util::{
+    alloc::{AllocatorSelector, BumpAllocator, ImmixAllocator},
+    Address, OpaquePointer, VMMutatorThread, VMThread, VMWorkerThread,
+};
+use mmtk::{AllocationSemantics, Mutator, MutatorContext};
 
-use crate::vm::MM;
+use super::{default_allocator_selector, lab::LocalAllocationBuffer, vm::MM, OBJECT_REF_OFFSET};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum ThreadState {
@@ -28,6 +31,22 @@ pub enum ThreadKind {
     GcWorker = 2,
 }
 
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AllocFastPath {
+    None = 0,
+    Tlab = 1,
+}
+
+impl AllocFastPath {
+    fn from_byte(value: u8) -> Self {
+        match value {
+            1 => Self::Tlab,
+            _ => Self::None,
+        }
+    }
+}
+
 #[repr(C)]
 pub(crate) struct ThreadHeader {
     kind: ThreadKind,
@@ -37,8 +56,10 @@ pub(crate) struct ThreadHeader {
 #[repr(C)]
 pub struct MutatorThread {
     pub header: ThreadHeader,
-    /// JIT fast path for allocation
     pub block_requested: AtomicBool,
+    /// JIT fast path for allocation.
+    pub lab: Cell<LocalAllocationBuffer>,
+    pub alloc_fastpath: AtomicU8,
     // Mutator bound to this thread (set/unset by the runtime). Owned and pinned in TLS
     // to keep a stable address across its lifetime.
     pub(crate) mutator: UnsafeCell<Option<Box<Mutator<MM>>>>,
@@ -85,6 +106,17 @@ thread_local! {
 }
 
 impl MutatorThread {
+    #[allow(dead_code)]
+    pub const LAB_OFFSET: usize = std::mem::offset_of!(Self, lab);
+    #[allow(dead_code)]
+    pub const LAB_CURSOR_OFFSET: usize =
+        Self::LAB_OFFSET + std::mem::offset_of!(LocalAllocationBuffer, cursor);
+    #[allow(dead_code)]
+    pub const LAB_LIMIT_OFFSET: usize =
+        Self::LAB_OFFSET + std::mem::offset_of!(LocalAllocationBuffer, limit);
+    #[allow(dead_code)]
+    pub const ALLOC_FASTPATH_OFFSET: usize = std::mem::offset_of!(Self, alloc_fastpath);
+
     pub fn new(manager: &std::sync::Arc<ThreadManager>) -> Self {
         let id = manager.next_id();
         Self {
@@ -93,6 +125,8 @@ impl MutatorThread {
                 id,
             },
             block_requested: AtomicBool::new(false),
+            lab: Cell::new(LocalAllocationBuffer::new()),
+            alloc_fastpath: AtomicU8::new(AllocFastPath::None as u8),
             mutator: UnsafeCell::new(None),
             park_lock: Mutex::new(ThreadState::Mutating),
             park_cv: Condvar::new(),
@@ -100,13 +134,18 @@ impl MutatorThread {
         }
     }
 
-    pub fn bind_mutator(&self, mutator: Box<Mutator<MM>>) {
+    pub fn bind_mutator(&self, mutator: Box<Mutator<MM>>, alloc_fastpath: AllocFastPath) {
         let slot = unsafe { &mut *self.mutator.get() };
         assert!(slot.is_none(), "mutator is already bound to this thread");
+        self.alloc_fastpath
+            .store(alloc_fastpath as u8, Ordering::Release);
         *slot = Some(mutator);
     }
 
     pub fn take_mutator(&self) -> Option<Box<Mutator<MM>>> {
+        self.flush_tlab();
+        self.alloc_fastpath
+            .store(AllocFastPath::None as u8, Ordering::Release);
         unsafe { &mut *self.mutator.get() }.take()
     }
 
@@ -131,8 +170,87 @@ impl MutatorThread {
     }
 
     pub fn alloc(&self, size: usize) -> Address {
-        self.mutator()
-            .alloc(size, 8, 0, mmtk::AllocationSemantics::Default)
+        if AllocFastPath::from_byte(self.alloc_fastpath.load(Ordering::Acquire))
+            == AllocFastPath::Tlab
+        {
+            let mut lab = self.lab.get();
+            if let Some(start) = lab.allocate(size, 8, OBJECT_REF_OFFSET) {
+                self.lab.set(lab);
+                return start;
+            }
+
+            return self.alloc_slow_default(size);
+        }
+
+        self.alloc_default(size)
+    }
+
+    fn alloc_default(&self, size: usize) -> Address {
+        self.mutator().alloc(
+            size,
+            8,
+            OBJECT_REF_OFFSET,
+            AllocationSemantics::Default,
+        )
+    }
+
+    fn alloc_slow_default(&self, size: usize) -> Address {
+        self.flush_tlab();
+        let start = self.alloc_default(size);
+        self.refill_tlab();
+        start
+    }
+
+    pub(crate) fn flush_tlab(&self) {
+        let mut lab = self.lab.get();
+        let (cursor, limit) = lab.take();
+        self.lab.set(lab);
+        if cursor.is_zero() {
+            debug_assert!(limit.is_zero());
+            return;
+        }
+
+        match default_allocator_selector() {
+            selector @ AllocatorSelector::Immix(_) => unsafe {
+                self.mutator()
+                    .allocator_impl_mut::<ImmixAllocator<MM>>(selector)
+                    .bump_pointer
+                    .reset(cursor, limit);
+            },
+            selector @ AllocatorSelector::BumpPointer(_) => unsafe {
+                self.mutator()
+                    .allocator_impl_mut::<BumpAllocator<MM>>(selector)
+                    .bump_pointer
+                    .reset(cursor, limit);
+            },
+            _ => {}
+        }
+    }
+
+    fn refill_tlab(&self) {
+        let Some((cursor, limit)) = (match default_allocator_selector() {
+            selector @ AllocatorSelector::Immix(_) => unsafe {
+                let bump_pointer = &self
+                    .mutator()
+                    .allocator_impl_mut::<ImmixAllocator<MM>>(selector)
+                    .bump_pointer;
+                Some((bump_pointer.cursor, bump_pointer.limit))
+            },
+            selector @ AllocatorSelector::BumpPointer(_) => unsafe {
+                let bump_pointer = &self
+                    .mutator()
+                    .allocator_impl_mut::<BumpAllocator<MM>>(selector)
+                    .bump_pointer;
+                Some((bump_pointer.cursor, bump_pointer.limit))
+            },
+            _ => None,
+        }) else {
+            return;
+        };
+
+        let mut lab = self.lab.get();
+        lab.rebind(cursor, limit);
+        self.lab.set(lab);
     }
 
     pub fn safepoint_poll(&self) {
@@ -178,10 +296,7 @@ impl MutatorThread {
                 );
             }
             ThreadState::New | ThreadState::Terminated => {
-                panic!(
-                    "block_for_gc called on non-running thread: {:?}",
-                    *state
-                );
+                panic!("block_for_gc called on non-running thread: {:?}", *state);
             }
             ThreadState::Blocked => {}
         }
@@ -320,7 +435,9 @@ impl ThreadManager {
             t.wait_until_blocked();
         }
 
-        // NOTE in future, flush tlabs here
+        for t in threads.iter() {
+            t.flush_tlab();
+        }
 
         for t in threads.iter() {
             if let Some(mutator) = t.mutator_ptr() {

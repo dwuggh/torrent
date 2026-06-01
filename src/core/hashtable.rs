@@ -1,35 +1,10 @@
-use std::collections::HashMap;
+//! Placeholder for a moving-GC-safe hash table.
+//!
+//! The old `HashMap<Object, Object>` representation is intentionally deferred:
+//! moving collectors may rewrite object keys, which can invalidate hash buckets.
 
-use proc_macros::Trace;
+#[derive(Clone, Debug, Default)]
+pub struct HashTable;
 
-use crate::{
-    core::Tagged,
-    core::object::{LispType, Object},
-    gc::Gc,
-};
-
-#[derive(Clone, Trace, Debug)]
-pub struct LispHashTable(pub Gc<HashTable>);
-
-#[derive(Clone, Trace, Debug)]
-pub struct HashTable(HashMap<Object, Object>);
-
-impl_tagged_for_gc!(LispHashTable, LispType::HashTable, HashTable);
-
-impl Default for LispHashTable {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl LispHashTable {
-    pub fn new() -> Self {
-        LispHashTable(Gc::new(HashTable::new()))
-    }
-}
-
-impl HashTable {
-    pub fn new() -> Self {
-        HashTable(HashMap::new())
-    }
-}
+#[derive(Clone, Debug, Default)]
+pub struct LispHashTable;

@@ -8,13 +8,14 @@ use cranelift_module::FuncId;
 use cranelift_module::Module;
 
 use crate::core::compiler::codegen::Codegen;
+use crate::core::compiler::stack_map::install_stack_map_provider;
 use crate::core::compiler::{BuiltinFnPlugin, InternalFnPlugin};
 use crate::core::env::Environment;
 use crate::core::function::LispFunction;
 use crate::core::parser::expr::Expr;
 use crate::core::runtime::store_symbol_function;
 use crate::core::symbol::Symbol;
-use crate::core::tagged_ptr::TaggedObj;
+use crate::core::Tag;
 use anyhow::Result;
 
 pub struct JIT {
@@ -25,6 +26,8 @@ pub struct JIT {
 
 impl JIT {
     pub fn new(env: &Environment) -> Self {
+        install_stack_map_provider();
+
         let mut flag_builder = settings::builder();
         flag_builder.set("use_colocated_libcalls", "true").unwrap();
         // flag_builder.set("enable_safepoints", "true").unwrap();

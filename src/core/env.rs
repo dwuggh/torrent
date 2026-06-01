@@ -1,4 +1,3 @@
-use proc_macros::Trace;
 use rustc_hash::FxBuildHasher;
 
 use crate::{
@@ -7,24 +6,56 @@ use crate::{
         ident::Ident,
         object::{Object, ObjectRef},
         symbol::{Symbol, SymbolCell, SymbolMap},
+        tag::TAG_SPEC_STACK,
     },
-    gc::Gc,
+    gc::{Gc, HeaderedObject, Trace, Visitor},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Trace)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bind {
-    #[no_trace]
     pub symbol: Symbol,
     pub value: Object,
 }
 
 use rustc_hash::FxHashMap;
-#[derive(Debug, Clone, PartialEq, Eq, Trace)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpecStackItem {
     Bind(Bind),
     /// mark for start of a lexical envrionment
     LexicalMark,
     Unwind,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpecStack(pub Vec<SpecStackItem>);
+
+impl crate::gc::Tagged for SpecStack {
+    const TAG: u8 = TAG_SPEC_STACK;
+}
+
+unsafe impl HeaderedObject for SpecStack {}
+
+unsafe impl Trace for Bind {
+    unsafe fn trace(&self, visitor: &mut Visitor) {
+        unsafe { self.value.trace(visitor) };
+    }
+}
+
+unsafe impl Trace for SpecStackItem {
+    unsafe fn trace(&self, visitor: &mut Visitor) {
+        if let SpecStackItem::Bind(bind) = self {
+            unsafe { bind.trace(visitor) };
+        }
+    }
+}
+
+unsafe impl Trace for SpecStack {
+    unsafe fn trace(&self, visitor: &mut Visitor) {
+        // Dynamic binding entries keep tagged values alive while bound.
+        for item in &self.0 {
+            unsafe { item.trace(visitor) };
+        }
+    }
 }
 
 use std::cell::RefCell;
@@ -36,7 +67,7 @@ pub struct Environment {
     /// the obarray
     pub symbol_map: Gc<SymbolMap>,
 
-    pub spec_stack: Gc<Vec<SpecStackItem>>,
+    pub spec_stack: Gc<SpecStack>,
 
     pub stack_map: StackMap,
 }
@@ -160,7 +191,7 @@ impl Environment {
         }
 
         // Fall back to global environment
-        self.symbol_map.get().get_symbol_cell_with(symbol, |cell| {
+        self.symbol_map.as_ref().get_symbol_cell_with(symbol, |cell| {
             match load_function_cell {
                 Some(ty) => {
                     let ObjectRef::Cons(cons) = cell.func.as_ref() else {
@@ -202,7 +233,7 @@ impl Environment {
             }
         }
 
-        let cell_ref = match self.symbol_map.get().get_symbol_cell_ref(symbol) {
+        let cell_ref = match self.symbol_map.as_ref().get_symbol_cell_ref(symbol) {
             Some(cell) => cell,
             None => return Err(RuntimeError::unbound_symbol(symbol)),
         };
@@ -229,11 +260,12 @@ impl Environment {
     }
 
     pub fn get_symbol_cell(&self, symbol: Symbol) -> Option<SymbolCell> {
-        self.symbol_map.get().get_symbol_cell(symbol)
+        self.symbol_map.as_ref().get_symbol_cell(symbol)
     }
 
     pub fn get_or_init_symbol(&self, symbol: Symbol) -> SymbolCell {
-        self.symbol_map.get_mut().get_or_init_symbol(symbol)
+        let mut symbol_map = self.symbol_map.clone();
+        symbol_map.as_mut().get_or_init_symbol(symbol)
     }
 
     pub fn push_stackmap(&self, obj: &Object) {
@@ -264,14 +296,17 @@ impl Environment {
 
     pub fn is_special(&self, symbol: Symbol) -> bool {
         self.symbol_map
-            .get()
+            .as_ref()
             .get_symbol_cell(symbol)
             .map(|cell| cell.special)
             .unwrap_or(false)
     }
 
     /// declare a `defvar` or `defconst`
-    fn declare_var(&self, ident: Ident) -> Symbol { self.symbol_map.get_mut().intern(ident, true).0 }
+    fn declare_var(&self, ident: Ident) -> Symbol {
+        let mut symbol_map = self.symbol_map.clone();
+        symbol_map.as_mut().intern(ident, true).0
+    }
 }
 
 use scc::HashMap;

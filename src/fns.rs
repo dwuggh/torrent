@@ -14,7 +14,7 @@ fn lisp_not(obj: Object) -> Object {
 mod tests {
     use super::*;
     use crate::core::number::LispInteger;
-    use crate::core::tagged_ptr::TaggedObj;
+    use crate::core::Tag;
 
     #[test]
     fn test_not() {

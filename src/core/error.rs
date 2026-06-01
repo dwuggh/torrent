@@ -2,7 +2,7 @@ use thiserror::Error;
 
 use crate::core::{
     ident::Ident,
-    object::{LispType, Object},
+    object::Object,
     symbol::Symbol,
 };
 
@@ -13,7 +13,7 @@ pub enum RuntimeError {
     #[error("Wrong type argument: expected {expected}, got {actual}")]
     WrongType {
         expected: &'static str,
-        actual: LispType,
+        actual: u8,
     },
 
     #[error("Wrong number of arguments: expected {expected}, got {actual}")]
@@ -63,7 +63,7 @@ pub enum RuntimeError {
     ArithmeticOverflow,
 
     #[error("Invalid arithmetic operation on {operand_type}")]
-    InvalidArithmetic { operand_type: LispType },
+    InvalidArithmetic { operand_type: u8 },
 
     // List and sequence errors
     #[error("Wrong type argument: {value:?} is not a list")]
@@ -210,7 +210,7 @@ pub enum RuntimeError {
 
 impl RuntimeError {
     /// Create a wrong type error
-    pub fn wrong_type(expected: &'static str, actual: LispType) -> Self {
+    pub fn wrong_type(expected: &'static str, actual: u8) -> Self {
         Self::WrongType { expected, actual }
     }
 

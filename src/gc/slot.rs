@@ -1,12 +1,12 @@
 use mmtk::util::{Address, ObjectReference};
 use mmtk::vm::slot::Slot;
 
-use crate::gc::{GcTag, TagSpec};
+use super::{GcTag, TagSpec};
 
-/// A slot for pointer-sized tagged values with a fixed 8-bit low tag.
+/// A slot for pointer-sized tagged values with a fixed low primary tag.
 ///
-/// Encoding: value = (ptr << 8) | tag_low8.
-/// Only true reference fields should be exposed as TaggedPtrSlot to MMTk.
+/// Encoding: value = object-reference-address | low-primary-tag. Only true
+/// tagged object slots should be exposed as `TaggedPtrSlot` to MMTk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct TaggedPtrSlot {
@@ -44,7 +44,7 @@ impl Slot for TaggedPtrSlot {
 
     #[inline]
     fn store(&self, object: ObjectReference) {
-        // Preserve original low 8 bits from the current slot value.
+        // Preserve the current low primary tag while replacing pointer bits.
         let old_raw: usize = unsafe { self.slot_addr.load() };
         let tag = old_raw as u8 & GcTag::MASK;
         let obj_addr = object.to_raw_address().as_usize();

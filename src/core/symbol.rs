@@ -7,13 +7,13 @@
 //! - Special symbol handling (keywords starting with ':')
 
 use indexmap::IndexMap;
-use proc_macros::Trace;
+use std::ptr::NonNull;
 
 use crate::core::error::RuntimeResult;
 use crate::core::ident::Ident;
-use crate::core::object::{LispType, Object, nil};
-use crate::core::tagged_ptr::{Tagged, TaggedObj, shifting_tag, shifting_untag};
-use crate::gc::Trace;
+use crate::core::object::{nil, write_object_slot, Object};
+use crate::core::tag::{Tag, TaggedPtrError, Untag, TAG_SYMBOL_MAP};
+use crate::gc::{HeaderedObject, HeapObject, Trace, Visitor};
 
 // =============================================================================
 // Type Aliases and Constants
@@ -21,6 +21,11 @@ use crate::gc::Trace;
 
 /// Maximum index value used to indicate ident-only symbols
 const IDENT_ONLY_INDEX: u32 = 0xFFFFFFFF;
+const INDEXED_SYMBOL_TAG: u64 = 0b0001;
+const IDENT_ONLY_SYMBOL_TAG: u64 = 0b1001;
+const SYMBOL_TAG_MASK: u64 = 0b1111;
+const SYMBOL_PAYLOAD_SHIFT: u32 = 4;
+const SYMBOL_PAYLOAD_MASK: u64 = u64::MAX >> SYMBOL_PAYLOAD_SHIFT;
 
 // =============================================================================
 // Core Symbol Types
@@ -92,21 +97,19 @@ pub struct SymbolMap {
 /// - Value binding  
 /// - Special/keyword status
 /// - Interning status
-#[derive(Debug, Trace, Clone)]
+#[repr(C)]
+#[derive(Debug, Clone)]
 pub struct SymbolCell {
     /// The symbol this cell represents
-    #[no_trace]
     pub name: Symbol,
-    /// Whether this symbol is interned
-    #[no_trace]
-    pub interned: bool,
-    /// Whether this is a special form or keyword
-    #[no_trace]
-    pub special: bool,
     /// Function binding (nil if unbound)
     pub func: Object,
     /// Value binding (nil if unbound)
     pub value: Object,
+    /// Whether this symbol is interned
+    pub interned: bool,
+    /// Whether this is a special form or keyword
+    pub special: bool,
 }
 
 /// Collection of commonly used special symbols.
@@ -198,6 +201,16 @@ impl Symbol {
         } else {
             Some(unpacked.index as usize)
         }
+    }
+
+    /// Return true if this symbol has a fixed symbol-table index.
+    pub fn is_indexed(&self) -> bool {
+        self.index().is_some()
+    }
+
+    /// Return true if this symbol only carries its interned string identifier.
+    pub fn is_ident_only(&self) -> bool {
+        self.index().is_none()
     }
 }
 
@@ -350,7 +363,11 @@ impl SymbolMap {
     /// Reference to the symbol cell.
     pub fn get_or_init_symbol(&mut self, symbol: Symbol) -> SymbolCell {
         match symbol.index() {
-            Some(index) => self.map.get_index(index).map(|(_, cell)| cell.clone()).unwrap(),
+            Some(index) => self
+                .map
+                .get_index(index)
+                .map(|(_, cell)| cell.clone())
+                .unwrap(),
             None => {
                 let text = symbol.name();
                 let special = text.starts_with(':');
@@ -361,41 +378,69 @@ impl SymbolMap {
     }
 
     /// Mutate the value cell of a symbol (initializing it if needed).
-    pub fn set_value(&mut self, symbol: Symbol, value: Object) {
+    pub fn set_value(&mut self, symbol: Symbol, value: Object) -> Symbol {
+        let src = unsafe { SymbolMap::object_ref_from_data(NonNull::from(&mut *self)) };
         match symbol.index() {
             Some(index) => {
                 if let Some((_, cell)) = self.map.get_index_mut(index) {
-                    cell.value = value;
+                    write_object_slot(src, &mut cell.value, value);
+                    cell.name
+                } else {
+                    symbol
                 }
             }
             None => {
                 let ident = symbol.ident();
                 let special = symbol.name().starts_with(':');
-                let entry = self
-                    .map
-                    .entry(ident)
-                    .or_insert_with(|| SymbolCell::new(symbol, special));
-                entry.value = value;
+                match self.map.entry(ident) {
+                    indexmap::map::Entry::Occupied(mut occupied_entry) => {
+                        let symbol = Symbol::new(occupied_entry.index(), ident);
+                        let cell = occupied_entry.get_mut();
+                        cell.name = symbol;
+                        write_object_slot(src, &mut cell.value, value);
+                        symbol
+                    }
+                    indexmap::map::Entry::Vacant(vacant_entry) => {
+                        let symbol = Symbol::new(vacant_entry.index(), ident);
+                        let cell = vacant_entry.insert(SymbolCell::new(symbol, special));
+                        write_object_slot(src, &mut cell.value, value);
+                        symbol
+                    }
+                }
             }
         }
     }
 
     /// Mutate the function cell of a symbol (initializing it if needed).
-    pub fn set_func(&mut self, symbol: Symbol, func: Object) {
+    pub fn set_func(&mut self, symbol: Symbol, func: Object) -> Symbol {
+        let src = unsafe { SymbolMap::object_ref_from_data(NonNull::from(&mut *self)) };
         match symbol.index() {
             Some(index) => {
                 if let Some((_, cell)) = self.map.get_index_mut(index) {
-                    cell.func = func;
+                    write_object_slot(src, &mut cell.func, func);
+                    cell.name
+                } else {
+                    symbol
                 }
             }
             None => {
                 let ident = symbol.ident();
                 let special = symbol.name().starts_with(':');
-                let entry = self
-                    .map
-                    .entry(ident)
-                    .or_insert_with(|| SymbolCell::new(symbol, special));
-                entry.func = func;
+                match self.map.entry(ident) {
+                    indexmap::map::Entry::Occupied(mut occupied_entry) => {
+                        let symbol = Symbol::new(occupied_entry.index(), ident);
+                        let cell = occupied_entry.get_mut();
+                        cell.name = symbol;
+                        write_object_slot(src, &mut cell.func, func);
+                        symbol
+                    }
+                    indexmap::map::Entry::Vacant(vacant_entry) => {
+                        let symbol = Symbol::new(vacant_entry.index(), ident);
+                        let cell = vacant_entry.insert(SymbolCell::new(symbol, special));
+                        write_object_slot(src, &mut cell.func, func);
+                        symbol
+                    }
+                }
             }
         }
     }
@@ -427,52 +472,66 @@ impl SymbolCell {
     ///
     /// # Returns
     /// The LispSymbol for this cell.
-    pub fn symbol(&self) -> LispSymbol { LispSymbol(self.name) }
+    pub fn symbol(&self) -> LispSymbol {
+        LispSymbol(self.name)
+    }
 }
 
 // =============================================================================
 // Trait Implementations
 // =============================================================================
 
-impl Tagged for LispSymbol {
-    const TAG: LispType = LispType::Symbol;
-    type Data<'a> = Symbol;
-    type DataMut<'a> = Symbol;
-
-    unsafe fn to_raw(&self) -> u64 {
-        shifting_tag(self.0.0 as u64, Self::TAG)
+impl Tag for LispSymbol {
+    fn tag(self) -> Object {
+        let symbol = self.0;
+        let raw = if symbol.is_ident_only() {
+            ((symbol.ident().0 as u64) << SYMBOL_PAYLOAD_SHIFT) | IDENT_ONLY_SYMBOL_TAG
+        } else {
+            assert!(
+                symbol.0 <= SYMBOL_PAYLOAD_MASK,
+                "indexed symbol payload exceeds immediate symbol encoding"
+            );
+            (symbol.0 << SYMBOL_PAYLOAD_SHIFT) | INDEXED_SYMBOL_TAG
+        };
+        Object::from_raw(raw)
     }
+}
 
-    unsafe fn from_raw(raw: u64) -> Self {
-        unsafe {
-            let val = shifting_untag(raw);
-            std::mem::transmute(val)
+impl Untag for LispSymbol {
+    fn untag(object: Object) -> Result<Self, TaggedPtrError> {
+        if object.get_tag() == crate::gc::GcTag::SYMBOL {
+            let payload = object.raw() >> SYMBOL_PAYLOAD_SHIFT;
+            match object.raw() & SYMBOL_TAG_MASK {
+                INDEXED_SYMBOL_TAG => Ok(Self(Symbol(payload))),
+                IDENT_ONLY_SYMBOL_TAG => {
+                    Ok(Self(Symbol::new_ident(Ident::from_raw(payload as u32))))
+                }
+                _ => Err(TaggedPtrError::TypeMisMatch),
+            }
+        } else {
+            Err(TaggedPtrError::TypeMisMatch)
         }
     }
+}
 
-    unsafe fn cast<'a>(val: u64) -> Self::Data<'a> {
-        unsafe { Self::from_raw(val).0 }
-    }
+impl crate::gc::Tagged for SymbolMap {
+    const TAG: u8 = TAG_SYMBOL_MAP;
+}
 
-    unsafe fn cast_mut<'a>(val: u64) -> Self::DataMut<'a> {
-        unsafe { Self::from_raw(val).0 }
+unsafe impl HeaderedObject for SymbolMap {}
+
+unsafe impl Trace for SymbolCell {
+    unsafe fn trace(&self, visitor: &mut Visitor) {
+        unsafe { self.func.trace(visitor) };
+        unsafe { self.value.trace(visitor) };
     }
 }
 
 unsafe impl Trace for SymbolMap {
-    unsafe fn trace(&self, visitor: crate::gc::Visitor) {
-        unsafe {
-            for (_, cell) in self.map.iter() {
-                cell.trace(visitor);
-            }
-        }
-    }
-
-    unsafe fn finalize(&mut self) {
-        unsafe {
-            for (_, mut cell) in std::mem::take(&mut self.map).into_iter() {
-                cell.finalize();
-            }
+    unsafe fn trace(&self, visitor: &mut Visitor) {
+        // Symbol cells hold global function/value bindings as tagged slots.
+        for (_, cell) in self.map.iter() {
+            unsafe { cell.trace(visitor) };
         }
     }
 }
@@ -575,6 +634,7 @@ mod tests {
         let sym = Symbol::from("test");
         assert_eq!(sym.name(), "test");
         assert!(sym.index().is_none()); // Not interned yet
+        assert!(sym.is_ident_only());
     }
 
     #[test]
@@ -586,6 +646,7 @@ mod tests {
         // Should be the same symbol
         assert_eq!(sym1.0, sym2.0);
         assert_eq!(sym1.0.name(), "test");
+        assert!(sym1.0.is_indexed());
     }
 
     #[test]
@@ -615,6 +676,7 @@ mod tests {
 
         let symbol = Symbol::from(unpacked);
         assert!(symbol.index().is_none());
+        assert!(symbol.is_ident_only());
     }
 
     #[test]
@@ -628,14 +690,51 @@ mod tests {
     }
 
     #[test]
-    fn test_tagged_symbol() {
+    fn test_ident_only_symbol_tag() {
         let sym = Symbol::from("test");
         let lisp_sym = LispSymbol(sym);
 
-        let raw = unsafe { lisp_sym.to_raw() };
-        let restored = unsafe { LispSymbol::from_raw(raw) };
+        let raw = lisp_sym.tag();
+        let raw_tag = raw.raw() & SYMBOL_TAG_MASK;
+        let logical_tag = raw.get_tag();
+        let restored = LispSymbol::untag(raw).unwrap();
 
+        assert_eq!(raw_tag, IDENT_ONLY_SYMBOL_TAG);
+        assert_eq!(logical_tag, crate::gc::GcTag::SYMBOL);
         assert_eq!(lisp_sym.0.name(), restored.0.name());
+        assert!(restored.0.is_ident_only());
+    }
+
+    #[test]
+    fn test_indexed_symbol_tag() {
+        let ident = Ident::from("test");
+        let sym = Symbol::new(42, ident);
+        let lisp_sym = LispSymbol(sym);
+
+        let raw = lisp_sym.tag();
+        let raw_tag = raw.raw() & SYMBOL_TAG_MASK;
+        let logical_tag = raw.get_tag();
+        let restored = LispSymbol::untag(raw).unwrap();
+
+        assert_eq!(raw_tag, INDEXED_SYMBOL_TAG);
+        assert_eq!(logical_tag, crate::gc::GcTag::SYMBOL);
+        assert_eq!(restored.0, sym);
+        assert!(restored.0.is_indexed());
+    }
+
+    #[test]
+    fn test_indexed_symbol_with_odd_payload_stays_indexed() {
+        let sym = Symbol::new(3, Ident::from_raw(1));
+
+        let raw = LispSymbol(sym).tag();
+        let raw_tag = raw.raw() & SYMBOL_TAG_MASK;
+        let restored = LispSymbol::untag(raw).unwrap();
+
+        assert_eq!(sym.0 & 1, 1);
+        assert_eq!(raw_tag, INDEXED_SYMBOL_TAG);
+        assert_eq!(restored.0.index(), Some(3));
+        assert_eq!(restored.0.ident().0, 1);
+        assert!(restored.0.is_indexed());
     }
 
     #[test]
@@ -645,5 +744,6 @@ mod tests {
 
         let cell = map.get_or_init_symbol(sym);
         assert!(cell.special); // Should detect ':' prefix
+        assert!(cell.name.is_indexed());
     }
 }

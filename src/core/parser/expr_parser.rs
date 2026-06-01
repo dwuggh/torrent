@@ -516,7 +516,7 @@ mod tests {
         // Test float
         let result = parse_src("3.14").unwrap();
         match &*result.ty.borrow() {
-            ExprType::Literal(Literal::Number(Number::Real(f))) => assert_eq!(f.0, 3.14),
+            ExprType::Literal(Literal::Number(Number::Real(f))) => assert_eq!(f.value(), 3.14),
             _ => panic!("Expected float literal"),
         }
 

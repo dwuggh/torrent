@@ -1,3 +1,5 @@
+use std::ptr::NonNull;
+
 use super::env::Environment;
 use crate::{
     core::{
@@ -6,12 +8,12 @@ use crate::{
         error::{RuntimeError, RuntimeResult},
         function::{Function, FunctionType},
         ident::Ident,
-        indirect::Indirect,
         number::LispInteger,
-        object::{LispObject, Object, ObjectRef, nil, tru},
+        object::{Object, ObjectRef, nil, tru, write_object_slot},
         symbol::{LispSymbol, Symbol},
-        tagged_ptr::TaggedObj,
+        tag::Tag,
     },
+    gc::HeapObject,
     runtime_bail,
 };
 type Result<T> = RuntimeResult<T>;
@@ -112,18 +114,23 @@ fn defvar(name: i64, len: usize, value: Object, env: &Environment) -> Result<Obj
 
     let symbol = name.into();
     tracing::debug!("calling defvar: symbol {symbol:?}, value: {value:?}");
-    env.symbol_map.get_mut().set_value(symbol, value);
+    let mut symbol_map = env.symbol_map.clone();
+    let symbol = symbol_map.as_mut().set_value(symbol, value);
     Ok(symbol.tag())
 }
 
 #[internal_fn]
 fn store_captured(ident: Ident, object: Object, func: &mut Function) {
     tracing::debug!("calling store_captured");
+    let src = unsafe { Function::object_ref_from_data(NonNull::from(&mut *func)) };
     let FunctionType::Lambda(func) = func.get_func_type_mut() else {
         return;
     };
-    // let value = ObjectVal::new(object, shared == 1);
-    func.captures.insert(ident, object);
+    if let Some(slot) = func.captures.get_mut(&ident) {
+        write_object_slot(src, slot, object);
+    } else {
+        func.captures.insert(ident, object);
+    }
 }
 
 #[internal_fn]
@@ -145,7 +152,8 @@ pub fn store_symbol_function(symbol: Symbol, func: Object, env: &Environment) {
     tracing::debug!("storing function {func:?} to symbol {}", symbol.name());
     let marker = LispSymbol::from("function").tag();
     let cell = LispCons::new(marker, func);
-    env.symbol_map.get_mut().set_func(symbol, cell.tag());
+    let mut symbol_map = env.symbol_map.clone();
+    symbol_map.as_mut().set_func(symbol, cell.tag());
 }
 
 #[internal_fn]
@@ -210,16 +218,6 @@ fn signal_wrong_number_of_args(func: &Function, argc: usize) -> Result<Object> {
         expected: expected_msg,
         actual: argc
     );
-}
-
-#[internal_fn]
-fn create_indirect_object(obj: Object) -> Object {
-    tracing::debug!("calling create_indirect_object");
-    // if obj.get_tag() == LispType::Indirect {
-    //     obj
-    // } else {
-    // }
-    LispObject::Indirect(Indirect::new(obj)).tag()
 }
 
 #[internal_fn]

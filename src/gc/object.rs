@@ -4,12 +4,18 @@ use std::{
     hash::Hash,
     marker::PhantomData,
     ptr::NonNull,
-    sync::{LazyLock, RwLock},
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        LazyLock, RwLock,
+    },
 };
 
-use mmtk::util::{Address, ObjectReference};
+use mmtk::{
+    util::{Address, ObjectReference},
+    AllocationSemantics,
+};
 
-use crate::{Tagged, thread::current_thread};
+use super::{post_alloc_with_semantics, thread::current_thread, Tagged, OBJECT_REF_OFFSET};
 
 /// The tag policy for the low bits of Torrent tagged values.
 ///
@@ -37,6 +43,8 @@ pub trait TagSpec: Copy + Send + Sync + Debug + PartialEq + Eq + Hash {
 pub struct GcTag;
 
 impl GcTag {
+    /// Mask for the low primary tag bits.
+    pub const MASK: u8 = 0b111;
     /// Fixnum/immediate integer tag.
     pub const INT: u8 = 0b000;
     /// Immediate symbol tag.
@@ -91,7 +99,9 @@ pub unsafe trait Trace {
     ///
     /// The object must still be a valid initialized value, and finalization
     /// must not expose invalid slots to the collector.
-    unsafe fn finalize(&mut self) {}
+    unsafe fn finalize(&mut self) {
+        unsafe { std::ptr::drop_in_place(self) };
+    }
 }
 
 /// Backend used by [`Visitor`] to hand slots to MMTk.
@@ -137,6 +147,7 @@ pub struct MetaData {
 
 static VTABLE: LazyLock<RwLock<Vec<Option<MetaData>>>> =
     LazyLock::new(|| RwLock::new(vec![None; 256]));
+static HEADERLESS_METADATA_TAG: AtomicU8 = AtomicU8::new(GcTag::CONS);
 
 /// Register erased metadata for `tag`.
 ///
@@ -145,6 +156,30 @@ static VTABLE: LazyLock<RwLock<Vec<Option<MetaData>>>> =
 pub fn register_metadata(tag: u8, metadata: MetaData) {
     let mut table = VTABLE.write().expect("metadata table lock poisoned");
     table[tag as usize] = Some(metadata);
+}
+
+/// Register the logical tag used when an object has no header word.
+///
+/// Torrent currently uses this for compact cons cells. Headerless metadata
+/// lookup cannot read a [`GcHeader`], so the runtime must tell the GC binding
+/// which logical tag to use for such objects.
+pub fn register_headerless_metadata_tag(tag: u8) {
+    HEADERLESS_METADATA_TAG.store(tag, Ordering::Relaxed);
+}
+
+/// Build an erased metadata entry for a concrete heap object type.
+pub fn metadata_for<T: HeapObject>() -> MetaData {
+    MetaData {
+        layout: T::layout(),
+        trace: trace_erased::<T>,
+        finalize: finalize_erased::<T>,
+        size: size_erased::<T>,
+    }
+}
+
+/// Register metadata for a concrete heap object type.
+pub fn register_heap_object<T: HeapObject>() {
+    register_metadata(T::TAG, metadata_for::<T>());
 }
 
 /// Return metadata for a logical object tag.
@@ -163,17 +198,28 @@ pub fn get_metadata_for_tag(tag: u8) -> Option<MetaData> {
 ///
 /// `object` must be an object reference produced by this VM binding.
 pub unsafe fn metadata_for_object(object: ObjectReference) -> MetaData {
-    let start = object.to_raw_address().sub(crate::OBJECT_REF_OFFSET);
+    let tag = unsafe { logical_tag_for_object(object) };
+    get_metadata_for_tag(tag).expect("no metadata for object tag")
+}
+
+/// Return the logical metadata tag for an erased object reference.
+///
+/// Headered objects carry the tag in [`GcHeader`]. Headerless objects use the
+/// runtime-registered headerless logical tag.
+///
+/// # Safety
+///
+/// `object` must be an object reference produced by this VM binding.
+pub unsafe fn logical_tag_for_object(object: ObjectReference) -> u8 {
+    let start = object.to_raw_address().sub(OBJECT_REF_OFFSET);
     let first_word: u64 = unsafe { start.load() };
 
-    let tag = if GcHeader::is_header_word(first_word) {
+    if GcHeader::is_header_word(first_word) {
         let header = unsafe { start.as_ref::<GcHeader>() };
         header.tag()
     } else {
-        GcTag::CONS
-    };
-
-    get_metadata_for_tag(tag).expect("no metadata for object tag")
+        HEADERLESS_METADATA_TAG.load(Ordering::Relaxed)
+    }
 }
 
 /// Header word stored at the allocation start of secondary objects.
@@ -182,22 +228,18 @@ pub unsafe fn metadata_for_object(object: ObjectReference) -> MetaData {
 pub struct GcHeader {
     /// Encoded header payload.
     ///
-    /// The low three bits are the header marker. The next three bits are the
-    /// logical object tag. MMTk forwarding bits live in side metadata so they
-    /// cannot corrupt the runtime tag bits while an object is being forwarded.
+    /// The low three bits are the header marker. The next byte stores the full
+    /// logical object tag used for metadata lookup. MMTk forwarding bits live
+    /// in side metadata so they cannot corrupt Torrent's tag bits while an
+    /// object is being forwarded.
     data: u64,
 }
 
 impl GcHeader {
     /// Create a header for a logical object tag.
     pub fn new(tag: u8) -> Self {
-        debug_assert_eq!(
-            tag & !GcTag::MASK,
-            0,
-            "only three-bit logical tags fit in GcHeader"
-        );
         Self {
-            data: ((tag & GcTag::MASK) as u64) << 3 | GcTag::HEADER_MARKER as u64,
+            data: (tag as u64) << 3 | GcTag::HEADER_MARKER as u64,
         }
     }
 
@@ -213,62 +255,13 @@ impl GcHeader {
     /// not leak into the tag.
     pub fn tag(self) -> u8 {
         debug_assert!(Self::is_header_word(self.data));
-        ((self.data >> 3) & GcTag::MASK as u64) as u8
+        ((self.data >> 3) & 0xff) as u8
     }
 
     /// Return erased metadata for this header's logical tag.
     pub fn metadata(&self) -> MetaData {
         get_metadata_for_tag(self.tag()).expect("no metadata for tag")
     }
-}
-
-/// Raw tagged Lisp object word.
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Eq, Hash)]
-pub struct Object(u64);
-
-impl Object {
-    /// Create an object from a raw tagged word.
-    pub fn from_raw(raw: u64) -> Self {
-        Self(raw)
-    }
-
-    /// Return the raw tagged object word.
-    pub fn raw(self) -> u64 {
-        self.0
-    }
-
-    /// Return the low primary tag bits.
-    pub fn word_tag(self) -> u8 {
-        self.0 as u8 & GcTag::MASK
-    }
-
-    /// Return the untagged object-reference pointer bits.
-    pub fn untagged_ptr(self) -> Option<NonNull<()>> {
-        let raw = self.0 & !(GcTag::MASK as u64);
-        NonNull::new(raw as *mut ())
-    }
-}
-
-/// Convert a raw Lisp [`Object`] into a typed value.
-///
-/// This trait is the language-level tagging API. Heap implementations should
-/// delegate to [`Gc::from_object`] so pointer layout stays in [`HeapObject`].
-pub trait Untag: Sized {
-    /// The typed value produced by untagging.
-    type Target;
-
-    /// Try to decode `object` as this type.
-    fn untag(object: Object) -> Option<Self::Target>;
-}
-
-/// Convert a typed value into a raw Lisp [`Object`].
-///
-/// This is separate from [`HeapObject`] because immediate values and heap
-/// references both participate in Lisp object tagging.
-pub trait Tag {
-    /// Encode `self` as a raw tagged Lisp object.
-    fn tag(self) -> Object;
 }
 
 /// Typed handle for a logical heap object.
@@ -287,9 +280,11 @@ impl<T: HeapObject> Gc<T> {
     /// Allocate and initialize a new GC-managed value.
     pub fn new(value: T) -> Self {
         let thread = current_thread();
-        let start = thread.alloc(T::layout().size());
+        let size = T::layout().size();
+        let start = thread.alloc(size);
         unsafe { T::init(start, value) };
         let object = unsafe { T::object_ref_from_start(start) };
+        post_alloc_with_semantics(thread.mutator(), object, size, AllocationSemantics::Default);
         Self::from_object_ref(object)
     }
 
@@ -303,27 +298,25 @@ impl<T: HeapObject> Gc<T> {
         }
     }
 
-    /// Try to create a typed handle from a raw tagged Lisp object.
-    pub fn from_object(object: Object) -> Option<Self> {
-        if object.word_tag() != T::PRIMARY_TAG {
-            return None;
-        }
-
-        Some(Self {
-            ptr: object.untagged_ptr()?,
-            _marker: PhantomData,
-        })
-    }
-
     /// Return this handle as an MMTk object reference.
     pub fn object_ref(&self) -> ObjectReference {
         unsafe { ObjectReference::from_raw_address_unchecked(Address::from_ptr(self.ptr.as_ptr())) }
     }
 
-    /// Convert this handle to a raw tagged Lisp object word.
-    pub fn to_object(&self) -> Object {
-        let raw = self.ptr.as_ptr() as usize as u64;
-        Object(raw | T::PRIMARY_TAG as u64)
+    /// Create a typed handle from an untagged object-reference pointer.
+    ///
+    /// The main crate owns Lisp `Object` tagging. It clears the low primary
+    /// bits and delegates the untagged pointer to this constructor.
+    pub fn from_untagged_ptr(ptr: NonNull<()>) -> Self {
+        Self {
+            ptr,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Return the untagged pointer stored by this handle.
+    pub fn as_untagged_ptr(&self) -> NonNull<()> {
+        self.ptr
     }
 
     /// Borrow the logical heap value.
@@ -337,17 +330,41 @@ impl<T: HeapObject> Gc<T> {
     }
 }
 
-impl<T: HeapObject> Untag for Gc<T> {
-    type Target = Self;
-
-    fn untag(object: Object) -> Option<Self::Target> {
-        Self::from_object(object)
+impl<T: HeapObject> Clone for Gc<T> {
+    fn clone(&self) -> Self {
+        Self {
+            ptr: self.ptr,
+            _marker: PhantomData,
+        }
     }
 }
 
-impl<T: HeapObject> Tag for Gc<T> {
-    fn tag(self) -> Object {
-        self.to_object()
+impl<T: HeapObject + Debug> Debug for Gc<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.as_ref().fmt(f)
+    }
+}
+
+impl<T: HeapObject + PartialEq> PartialEq for Gc<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_ref() == other.as_ref()
+    }
+}
+
+impl<T: HeapObject + Eq> Eq for Gc<T> {}
+
+impl<T: HeapObject + PartialOrd> PartialOrd for Gc<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.as_ref().partial_cmp(other.as_ref())
+    }
+}
+
+impl<T> Default for Gc<T>
+where
+    T: HeapObject + Default,
+{
+    fn default() -> Self {
+        Self::new(T::default())
     }
 }
 
@@ -358,6 +375,34 @@ pub struct Headered<T: Tagged> {
     header: GcHeader,
     /// Logical heap value stored after the header.
     data: T,
+}
+
+/// Marker for heap objects that use the default one-word header layout.
+///
+/// This exists for Rust coherence: the blanket [`HeapObject`] implementation
+/// applies only to types that opt into headered layout, leaving room for
+/// compact custom layouts such as cons cells.
+///
+/// # Safety
+///
+/// Implementors must be valid as the `data` field of [`Headered<Self>`].
+pub unsafe trait HeaderedObject: Tagged + Trace + Sized + 'static {}
+
+unsafe impl<T> HeapObject for T
+where
+    T: HeaderedObject,
+{
+    type Repr = Headered<T>;
+
+    const PRIMARY_TAG: u8 = GcTag::SECONDARY;
+
+    unsafe fn init(start: Address, value: Self) {
+        let repr = Headered {
+            header: GcHeader::new(Self::TAG),
+            data: value,
+        };
+        unsafe { start.store::<Headered<T>>(repr) };
+    }
 }
 
 /// Contract between a logical heap type and its physical heap layout.
@@ -399,7 +444,10 @@ pub unsafe trait HeapObject: Tagged + Trace + Sized + 'static {
     /// # Safety
     ///
     /// `start` must be the allocation start for a valid object of this type.
-    unsafe fn object_ref_from_start(start: Address) -> ObjectReference;
+    #[inline(always)]
+    unsafe fn object_ref_from_start(start: Address) -> ObjectReference {
+        unsafe { ObjectReference::from_raw_address_unchecked(start + OBJECT_REF_OFFSET) }
+    }
 
     /// Convert an MMTk object reference back to allocation start.
     ///
@@ -409,7 +457,10 @@ pub unsafe trait HeapObject: Tagged + Trace + Sized + 'static {
     /// # Safety
     ///
     /// `object` must be an object reference for this heap object type.
-    unsafe fn start_from_object_ref(object: ObjectReference) -> Address;
+    #[inline(always)]
+    unsafe fn start_from_object_ref(object: ObjectReference) -> Address {
+        object.to_raw_address().sub(OBJECT_REF_OFFSET)
+    }
 
     /// Convert an MMTk object reference to a logical value pointer.
     ///
@@ -420,7 +471,10 @@ pub unsafe trait HeapObject: Tagged + Trace + Sized + 'static {
     /// # Safety
     ///
     /// `object` must be an object reference for this heap object type.
-    unsafe fn data_from_object_ref(object: ObjectReference) -> NonNull<Self>;
+    #[inline(always)]
+    unsafe fn data_from_object_ref(object: ObjectReference) -> NonNull<Self> {
+        unsafe { NonNull::new_unchecked(object.to_raw_address().to_mut_ptr::<Self>()) }
+    }
 
     /// Convert a logical value pointer back to the MMTk object reference.
     ///
@@ -430,5 +484,22 @@ pub unsafe trait HeapObject: Tagged + Trace + Sized + 'static {
     /// # Safety
     ///
     /// `data` must point into a live object of this heap object type.
-    unsafe fn object_ref_from_data(data: NonNull<Self>) -> ObjectReference;
+    #[inline(always)]
+    unsafe fn object_ref_from_data(data: NonNull<Self>) -> ObjectReference {
+        unsafe { ObjectReference::from_raw_address_unchecked(Address::from_ptr(data.as_ptr())) }
+    }
+}
+
+unsafe fn trace_erased<T: HeapObject>(object: ObjectReference, visitor: &mut Visitor) {
+    let data = unsafe { T::data_from_object_ref(object) };
+    unsafe { data.as_ref().trace(visitor) };
+}
+
+unsafe fn finalize_erased<T: HeapObject>(object: ObjectReference) {
+    let mut data = unsafe { T::data_from_object_ref(object) };
+    unsafe { data.as_mut().finalize() };
+}
+
+unsafe fn size_erased<T: HeapObject>(_object: ObjectReference) -> usize {
+    T::layout().size()
 }

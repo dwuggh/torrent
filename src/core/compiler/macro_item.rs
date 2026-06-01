@@ -1,4 +1,7 @@
-use crate::gc::Gc;
+use crate::{
+    core::tag::TAG_MACRO_ITEM,
+    gc::{Gc, HeaderedObject, Trace, Visitor},
+};
 
 #[derive(Clone, Debug)]
 pub struct MacroItem(Gc<MacroItemType>);
@@ -10,6 +13,16 @@ pub enum MacroItemType {
     // Vector(Vec<LispValue>),
     // ignored for now
     PrintedRep(String),
+}
+
+impl crate::gc::Tagged for MacroItemType {
+    const TAG: u8 = TAG_MACRO_ITEM;
+}
+
+unsafe impl HeaderedObject for MacroItemType {}
+
+unsafe impl Trace for MacroItemType {
+    unsafe fn trace(&self, _visitor: &mut Visitor) {}
 }
 
 // impl MacroItem {

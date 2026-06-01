@@ -1,7 +1,7 @@
 use mmtk::vm::Collection;
 
-use crate::thread::{THREAD_MANAGER, spawn_gc_worker};
-use crate::vm::MM;
+use super::thread::{spawn_gc_worker, MutatorThread, THREAD_MANAGER};
+use super::vm::MM;
 
 pub struct VMCollection;
 
@@ -19,7 +19,7 @@ impl Collection<MM> for VMCollection {
 
     fn block_for_gc(tls: mmtk::util::VMMutatorThread) {
         // Park this mutator if a GC request is in flight.
-        let thread = unsafe { crate::thread::MutatorThread::from_mutator_thread(tls) };
+        let thread = unsafe { MutatorThread::from_mutator_thread(tls) };
         thread.block();
     }
 

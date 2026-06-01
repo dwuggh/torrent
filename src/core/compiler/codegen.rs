@@ -10,7 +10,7 @@ use cranelift_module::Module;
 use rustc_hash::FxHashSet;
 
 use crate::core::compiler::error::{CodegenError, CodegenResult};
-use crate::core::compiler::stack_map::{append_func_metadata, FunctionMetadata};
+use crate::core::compiler::stack_map::{append_func_metadata, FunctionMetadata, StackMapSlot};
 use crate::core::function::FunctionSignature;
 use crate::core::function::LispFunction;
 use crate::core::ident::Ident;
@@ -19,7 +19,7 @@ use crate::core::object::TRUE;
 use crate::core::parser::expr::*;
 use crate::core::symbol::LispSymbol;
 use crate::core::symbol::Symbol;
-use crate::core::Tagged;
+use crate::core::Tag;
 
 #[derive(Debug)]
 pub struct UnresolvedClosure {
@@ -118,7 +118,11 @@ impl<'a> CodegenContext<'a> {
             .user_stack_maps()
             .into_iter()
             .map(|(offset, length, map)| {
-                let refs = map.entries().map(|val| val.1).collect::<Vec<_>>();
+                let refs = map
+                    .entries()
+                    .map(|(ty, offset)| StackMapSlot::new(ty, offset))
+                    .filter(StackMapSlot::is_tagged_object_word)
+                    .collect::<Vec<_>>();
                 (*offset, *length, refs)
             })
             .collect::<Vec<_>>();
@@ -372,11 +376,7 @@ impl<'a> Codegen<'a> {
         self.builder.declare_var_needs_stack_map(var);
         self.locals.push((arg.clone(), var));
 
-        let value = if arg.is_shared() {
-            self.call_internal("create_indirect_object", &[initial])[0]
-        } else {
-            initial
-        };
+        let value = initial;
 
         self.builder.def_var(var, value);
 
@@ -533,10 +533,10 @@ impl<'a> Codegen<'a> {
         Ok(result)
     }
 
-    fn translate_lispobj<T: Tagged>(&mut self, obj: &T) -> Value {
+    fn translate_lispobj<T: Tag + Clone>(&mut self, obj: &T) -> Value {
         self.builder
             .ins()
-            .iconst(types::I64, unsafe { obj.to_raw() } as i64)
+            .iconst(types::I64, obj.clone().tag().raw() as i64)
     }
 
     fn translate_arg_exprs<'s>(&mut self, exprs: &[Expr]) -> CodegenResult<Vec<Value>> {
@@ -714,7 +714,7 @@ impl<'a> Codegen<'a> {
                 self.builder.switch_to_block($block);
                 self.builder.seal_block($block);
 
-                let mut sig = self.ctx.module.make_signature();
+                let mut sig = self.cgctx.module.make_signature();
                 for _ in 0..$argc {
                     sig.params.push(AbiParam::new(types::I64));
                 }
@@ -1070,12 +1070,6 @@ impl<'a> Codegen<'a> {
             // Create the variable and add to locals
             let var = self.builder.declare_var(types::I64);
 
-            // Check value's type, if it is Indirect, then directly load it.
-            // If arg is shared and value is not Indirect, make it indirect.
-            if arg.is_shared() {
-                value = self.call_internal("create_indirect_object", &[value])[0];
-            }
-
             self.builder.def_var(var, value);
             new_vars.push((arg.clone(), var));
 
@@ -1146,7 +1140,9 @@ fn gen_funcall(module: &mut JITModule) -> CodegenResult<()> {
     let arg_cnt = params[1];
     let env = params[2];
 
-    let func = builder.ins().load(types::I64, MemFlags::trusted(), arg_ptr, 0);
+    let func = builder
+        .ins()
+        .load(types::I64, MemFlags::trusted(), arg_ptr, 0);
 
     todo!()
 }

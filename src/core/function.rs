@@ -2,14 +2,12 @@ use crate::core::error::{RuntimeError, RuntimeResult};
 use crate::core::ident::Ident;
 use crate::core::parser::expr::Args;
 use cranelift_module::FuncId;
-use proc_macros::Trace;
 use rustc_hash::FxHashMap;
 
 use crate::core::env::Environment;
 use crate::{
-    core::Tagged,
-    core::object::{LispType, Object},
-    gc::Gc,
+    core::{object::Object, tag::TAG_FUNCTION},
+    gc::{Gc, HeaderedObject, Trace, Visitor},
 };
 
 // ============================================================================
@@ -19,22 +17,19 @@ use crate::{
 /// Function pointer type - now just a raw pointer to allow varying signatures
 pub type FuncPtr = *const u8;
 
-#[derive(Debug, Clone, Trace)]
+#[derive(Debug, Clone)]
 pub struct LispFunction(pub(crate) Gc<Function>);
-impl_tagged_for_gc!(LispFunction, LispType::Function, Function);
+impl_tagged_for_gc!(LispFunction, Function);
 
-#[derive(Debug, Clone, Trace)]
+#[derive(Debug, Clone)]
 pub struct Function {
-    #[no_trace]
     pub func_type: FunctionType,
 
-    #[no_trace]
     pub signature: FunctionSignature,
 }
 
-#[derive(Debug, Clone, Trace)]
+#[derive(Debug, Clone)]
 pub enum FunctionType {
-    #[no_trace]
     Subr(SubrFn),
     Lambda(Closure),
 }
@@ -46,12 +41,10 @@ pub struct SubrFn {
     func_ptr: Option<FuncPtr>,
 }
 
-#[derive(Debug, Clone, Trace)]
+#[derive(Debug, Clone)]
 pub struct Closure {
     pub captures: FxHashMap<Ident, Object>,
-    #[no_trace]
     func_id: FuncId,
-    #[no_trace]
     func_ptr: Option<FuncPtr>,
 }
 
@@ -80,6 +73,24 @@ impl FunctionSignature {
         let optional = args.optional.as_ref().map_or(0, |args| args.len() as u8);
         let rest = args.rest.is_some();
         Self::new(normal, optional, rest)
+    }
+}
+
+impl crate::gc::Tagged for Function {
+    const TAG: u8 = TAG_FUNCTION;
+}
+
+unsafe impl HeaderedObject for Function {}
+
+unsafe impl Trace for Function {
+    unsafe fn trace(&self, visitor: &mut Visitor) {
+        if let FunctionType::Lambda(closure) = &self.func_type {
+            // Closure captures are tagged object slots stored in the function
+            // payload. MMTk may update each slot when moving objects.
+            for value in closure.captures.values() {
+                unsafe { value.trace(visitor) };
+            }
+        }
     }
 }
 
@@ -273,17 +284,19 @@ impl LispFunction {
 
     /// Get the function ID
     pub fn func_id(&self) -> FuncId {
-        self.0.get().func_id()
+        self.0.as_ref().func_id()
     }
 
     /// Get mutable reference to function type
     pub fn get_func_type_mut(&self) -> &mut FunctionType {
-        &mut self.0.get_mut().func_type
+        let mut inner = self.0.clone();
+        let ptr = &mut inner.as_mut().func_type as *mut FunctionType;
+        unsafe { &mut *ptr }
     }
 
     /// Get closure if this is a lambda function
     pub fn as_closure(&self) -> Option<&mut Closure> {
-        match &mut self.0.get_mut().func_type {
+        match self.get_func_type_mut() {
             FunctionType::Lambda(closure) => Some(closure),
             _ => None,
         }
@@ -291,27 +304,28 @@ impl LispFunction {
 
     /// Set the function pointer
     pub fn set_func_ptr(&self, func_ptr: FuncPtr) {
-        self.0.get_mut().set_func_ptr(func_ptr)
+        let mut inner = self.0.clone();
+        inner.as_mut().set_func_ptr(func_ptr)
     }
 
     /// Get the function pointer
     pub fn get_func_ptr(&self) -> Option<FuncPtr> {
-        self.0.get().get_func_ptr()
+        self.0.as_ref().get_func_ptr()
     }
 
     /// Check if argument count is valid and return calling convention info
     /// Returns: (is_valid, total_args, use_trampoline)
     pub fn check_args(&self, argc: usize) -> (bool, usize, bool) {
-        self.0.get().check_args(argc)
+        self.0.as_ref().check_args(argc)
     }
 
     /// Run the function with given arguments
     pub fn run(&self, args: &[Object], env: &Environment) -> RuntimeResult<Object> {
-        self.0.get().run(args, env)
+        self.0.as_ref().run(args, env)
     }
 
     /// Get the function signature
     pub fn signature(&self) -> FunctionSignature {
-        self.0.get().signature()
+        self.0.as_ref().signature()
     }
 }

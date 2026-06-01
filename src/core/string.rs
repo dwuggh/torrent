@@ -1,14 +1,11 @@
-use proc_macros::Trace;
-
-use crate::core::Tagged;
-use crate::core::object::LispType;
-use crate::gc::Gc;
+use crate::core::tag::TAG_STR;
+use crate::gc::{Gc, HeaderedObject, Trace, Visitor};
 
 #[repr(align(16))]
-#[derive(Debug, Clone, PartialEq, Eq, Trace)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LispStr(pub Gc<Str>);
 
-#[derive(Debug, Clone, PartialEq, Eq, Trace)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Str(String);
 
 impl std::fmt::Display for Str {
@@ -23,11 +20,21 @@ impl Str {
     }
 }
 
-impl_tagged_for_gc!(LispStr, LispType::Str, Str);
+impl crate::gc::Tagged for Str {
+    const TAG: u8 = TAG_STR;
+}
+
+unsafe impl HeaderedObject for Str {}
+
+unsafe impl Trace for Str {
+    unsafe fn trace(&self, _visitor: &mut Visitor) {}
+}
+
+impl_tagged_for_gc!(LispStr, Str);
 
 impl std::fmt::Display for LispStr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.get().fmt(f)
+        self.0.as_ref().fmt(f)
     }
 }
 
@@ -43,7 +50,7 @@ impl LispStr {
 
 impl AsRef<str> for LispStr {
     fn as_ref(&self) -> &str {
-        self.0.get().as_ref()
+        self.0.as_ref().as_ref()
     }
 }
 

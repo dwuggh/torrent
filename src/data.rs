@@ -45,8 +45,8 @@ fn null(obj: Object) -> Object {
 mod tests {
     use super::*;
     use crate::core::number::LispInteger;
-    use crate::core::tagged_ptr::TaggedObj;
     use crate::core::cons::LispCons;
+    use crate::core::Tag;
 
     #[test]
     fn test_eq_basic() {

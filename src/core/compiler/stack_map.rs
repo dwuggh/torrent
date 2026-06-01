@@ -1,8 +1,14 @@
 use std::{
     cell::Cell,
+    collections::HashMap,
     sync::{Arc, Mutex, MutexGuard},
 };
 
+use cranelift::codegen::ir::{types, Type};
+use crate::gc::{
+    mmtk::util::{Address, VMMutatorThread},
+    StackMapProvider, StackRootVisitor,
+};
 use proc_macros::internal_fn;
 
 use crate::core::{compiler::arch, object::Object};
@@ -50,7 +56,26 @@ pub struct FunctionMetadata {
 
     /// Each entry is an `(offset, span, stack_map)` triple. Entries are sorted
     /// by code offset, and each stack map covers `span` bytes on the stack.
-    pub stack_maps: Vec<(u32, u32, Arc<Vec<u32>>)>,
+    pub stack_maps: Vec<(u32, u32, Arc<Vec<StackMapSlot>>)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StackMapSlot {
+    /// Cranelift IR type for the value stored in this stack slot.
+    pub ty: Type,
+    /// Offset from the active stack pointer reported by Cranelift.
+    pub offset: u32,
+}
+
+impl StackMapSlot {
+    pub fn new(ty: Type, offset: u32) -> Self {
+        Self { ty, offset }
+    }
+
+    /// Torrent represents every Lisp `Object` as one tagged 64-bit machine word.
+    pub fn is_tagged_object_word(&self) -> bool {
+        self.ty == types::I64
+    }
 }
 
 impl std::fmt::Debug for FunctionMetadata {
@@ -61,8 +86,11 @@ impl std::fmt::Debug for FunctionMetadata {
             self.start as *const u8, self.end as *const u8
         )?;
         for (offset, span, sm) in self.stack_maps.iter() {
-            let offset = *offset;
-            // writeln!(f, "{:p} at {:p}, with span: {span}, stack map: {sm:?}", offset as *const u8, (offset as usize + self.start) as *const u8)?;
+            writeln!(
+                f,
+                "  stack map @ {:p}, span: {span}, slots: {sm:?}",
+                (*offset as usize + self.start) as *const u8
+            )?;
         }
         Ok(())
     }
@@ -72,7 +100,7 @@ impl FunctionMetadata {
     pub fn new(
         func_ptr: *const u8,
         func_size: usize,
-        stack_maps: Vec<(u32, u32, Vec<u32>)>,
+        stack_maps: Vec<(u32, u32, Vec<StackMapSlot>)>,
     ) -> Self {
         let start = func_ptr as usize;
         let end = start + func_size;
@@ -88,7 +116,7 @@ impl FunctionMetadata {
     }
 
     #[inline]
-    fn get(&self, ip: usize) -> Option<(u32, Arc<Vec<u32>>)> {
+    fn get(&self, ip: usize) -> Option<(u32, Arc<Vec<StackMapSlot>>)> {
         if self.start <= ip && ip < self.end {
             let off = (ip - self.start) as u32;
             let idx = self
@@ -117,7 +145,7 @@ pub struct StackMapIter<'s> {
 }
 
 impl<'s> Iterator for StackMapIter<'s> {
-    type Item = (usize, Arc<Vec<u32>>);
+    type Item = (usize, Arc<Vec<StackMapSlot>>);
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(frame) = self.current_frame {
@@ -127,11 +155,12 @@ impl<'s> Iterator for StackMapIter<'s> {
             }
             tracing::info!("iterating: {:?}", self.current_frame);
             let next_frame = frame.next();
-            let fp = parent_fp(frame.fp)?;
             for func_meta in self.func_metas.iter() {
                 tracing::info!("metadata: {func_meta:?}");
                 if let Some((span, stack_map)) = func_meta.get(frame.ip) {
-                    let sp = fp - span as usize;
+                    // Cranelift reports stack-map entries as offsets from the
+                    // active SP, and `span` is the active FP-to-SP distance.
+                    let sp = frame.fp - span as usize;
                     // Advance the frame before yielding, keeping the borrow scoped
                     // to this loop iteration so the returned reference remains valid.
                     self.current_frame = next_frame;
@@ -157,6 +186,64 @@ pub fn stack_map_lookup<'a>(start_fp: usize, stop_fp: usize) -> StackMapIter<'a>
     }
 }
 
+#[derive(Clone, Copy)]
+struct StackScanBounds {
+    start_fp: usize,
+    stop_fp: usize,
+}
+
+static STACK_SCAN_BOUNDS: std::sync::LazyLock<Mutex<HashMap<usize, StackScanBounds>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn mutator_key(tls: VMMutatorThread) -> usize {
+    let vmthread = tls.0;
+    vmthread.0.to_address().as_usize()
+}
+
+fn record_current_stack_scan_bounds(start_fp: usize, stop_fp: usize) {
+    let tls = crate::gc::current_mutator_tls();
+    STACK_SCAN_BOUNDS
+        .lock()
+        .unwrap()
+        .insert(mutator_key(tls), StackScanBounds { start_fp, stop_fp });
+}
+
+pub fn visit_stack_roots_from_frame(
+    start_fp: usize,
+    stop_fp: usize,
+    visitor: &mut dyn StackRootVisitor,
+) {
+    for (sp, slots) in stack_map_lookup(start_fp, stop_fp) {
+        for slot in slots.iter() {
+            let address = unsafe { Address::from_usize(sp + slot.offset as usize) };
+            visitor.visit_tagged_slot(address);
+        }
+    }
+}
+
+pub struct CraneliftStackMapProvider;
+
+impl StackMapProvider for CraneliftStackMapProvider {
+    fn visit_stack_roots(&self, tls: VMMutatorThread, visitor: &mut dyn StackRootVisitor) {
+        let Some(bounds) = STACK_SCAN_BOUNDS
+            .lock()
+            .unwrap()
+            .get(&mutator_key(tls))
+            .copied()
+        else {
+            return;
+        };
+
+        visit_stack_roots_from_frame(bounds.start_fp, bounds.stop_fp, visitor);
+    }
+}
+
+static CRANELIFT_STACK_MAP_PROVIDER: CraneliftStackMapProvider = CraneliftStackMapProvider;
+
+pub fn install_stack_map_provider() {
+    crate::gc::set_stackmap_provider(&CRANELIFT_STACK_MAP_PROVIDER);
+}
+
 thread_local! {
     static TRAMPOLINE_START_FP: Cell<usize> = Cell::new(0);
 }
@@ -174,14 +261,15 @@ fn gcroot_scan(start_fp: i64) {
     let iter = stack_map_lookup(start_fp as usize, stop_fp);
     for (sp, sm) in iter {
         tracing::info!("sp: {sp} {sm:?}");
-        for offset in sm.iter() {
-            let loc = sp + *offset as usize;
+        for slot in sm.iter() {
+            let loc = sp + slot.offset as usize;
             let val = unsafe { *(loc as *const u64) };
             let obj = Object(val);
             tracing::info!("{obj:?}");
             std::mem::forget(obj);
         }
     }
+    record_current_stack_scan_bounds(start_fp as usize, stop_fp);
 }
 
 #[internal_fn]
