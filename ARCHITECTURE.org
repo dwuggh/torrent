@@ -1,0 +1,285 @@
+#+title: Torrent Architecture
+#+startup: overview
+
+* Status
+
+This document describes the current architecture of Torrent as it exists in the
+repository, with special attention to the in-progress MMTk GC binding.
+
+The standalone =crates/gc= crate is the current source of truth for the new GC
+design. It compiles and has focused tests. The root =torrent= binary still has
+older integration code in =src/gc.rs= and runtime object wrappers that have not
+all been migrated to the new =HeapObject= API.
+
+* Top-Level Shape
+
+Torrent is a Lisp runtime with:
+
+- a parser and macro-expansion layer under =src/core/parser=
+- runtime objects and primitive operations under =src/core=
+- a Cranelift JIT under =src/core/compiler=
+- a GC binding crate under =crates/gc=
+- procedural macros under =crates/proc-macros=
+
+The intended dependency direction is:
+
+#+begin_example
+src/core runtime objects
+        |
+        v
+crates/gc typed heap API
+        |
+        v
+MMTk VM binding
+#+end_example
+
+Runtime object types own language semantics. The GC crate owns allocation,
+object-reference layout, tracing hooks, root scanning, thread coordination, and
+MMTk integration.
+
+* Object Representation
+
+Torrent values are represented as tagged machine words.
+
+- The primary tag is stored in the low three bits of a raw Lisp object word.
+- =GcTag::MASK= is =0b111=.
+- Heap references keep the object-reference address in the upper bits and put
+  the primary tag in the low bits.
+- Headered objects use the primary =SECONDARY= tag in the raw word and store the
+  logical object tag in a heap header.
+- Headerless objects, currently cons-like values, use their primary tag directly.
+
+The GC crate defines:
+
+- =Object=: raw tagged Lisp object word.
+- =Tag= and =Untag=: language-level conversion traits.
+- =Tagged=: trait for logical object tags.
+- =Gc<T>=: typed handle to a heap object.
+- =GcHeader=: one-word header for headered heap objects.
+- =Headered<T>=: physical representation for headered logical values.
+
+The current object-reference offset is fixed:
+
+#+begin_src rust
+OBJECT_REF_OFFSET = 8
+#+end_src
+
+That means the MMTk =ObjectReference= points one word after the allocation
+start. For headered values, this points at the logical payload after =GcHeader=.
+The same offset must be used for allocation, copy, object-start recovery, and
+MMTk object model callbacks.
+
+* HeapObject Contract
+
+=HeapObject= is the bridge between a logical runtime type and its physical heap
+representation.
+
+Each heap type provides:
+
+- =type Repr=: physical allocation representation
+- =PRIMARY_TAG=: raw object-word tag
+- =layout()=: allocation layout
+- =init(start, value)=: initialize a freshly allocated object
+- =object_ref_from_start(start)=: allocation start to MMTk object reference
+- =start_from_object_ref(object)=: MMTk object reference to allocation start
+- =data_from_object_ref(object)=: object reference to logical value pointer
+- =object_ref_from_data(data)=: logical value pointer to object reference
+
+The offset conversion methods have default inline implementations based on the
+global =OBJECT_REF_OFFSET=. Types should override them only when their physical
+layout genuinely differs from the default object-reference-is-data-pointer
+model.
+
+* Allocation
+
+Allocation happens through MMTk with:
+
+- alignment =8=
+- offset =OBJECT_REF_OFFSET=
+- default semantics unless a specific path chooses otherwise
+
+The expected allocation sequence for a typed object is:
+
+#+begin_example
+allocate bytes with MMTk
+initialize VM object representation
+compute ObjectReference at start + OBJECT_REF_OFFSET
+call post_alloc for MMTk per-space metadata
+return Gc<T>
+#+end_example
+
+=post_alloc= is metadata initialization, not a write barrier. It dispatches to
+the selected MMTk space's =initialize_object_metadata=. It is independent from
+SATB write barriers, including the unimplemented
+=SATBBarrier::object_reference_write_post= path.
+
+Low-level allocation helpers that return an object reference or tagged word must
+also run =post_alloc= before the object can be observed by a safepoint.
+
+* Tracing And Metadata
+
+The GC crate separates tracing from object metadata lookup.
+
+=Trace= is an unsafe trait for exposing child reference slots:
+
+- =trace(&self, visitor)= visits mutable slot addresses.
+- =finalize(&mut self)= is a local object cleanup hook before reclamation.
+
+=Trace::finalize= is not MMTk language-level finalization. MMTk finalization is
+a separate queue/scheduling mechanism and is not fully implemented in this
+binding yet.
+
+=MetaData= is an erased table entry registered per logical tag:
+
+- allocation layout
+- trace thunk
+- finalization thunk
+- dynamic size thunk
+
+When MMTk gives the VM only an =ObjectReference=, metadata lookup reads the word
+at =object - OBJECT_REF_OFFSET=. If it is a header word, the logical tag comes
+from =GcHeader=. Otherwise the object is currently treated as a headerless cons.
+
+* MMTk Object Model
+
+=crates/gc/src/object_model.rs= implements MMTk's =ObjectModel=.
+
+Current policy:
+
+- forwarding pointer is stored in the object header area
+- forwarding bits are side metadata
+- mark and LOS mark/nursery metadata are side metadata
+- object size is obtained from erased =MetaData=
+- copying copies from allocation start, not from the interior object reference
+- copied object references are always =copy_start + OBJECT_REF_OFFSET=
+- copied alignment offset is =OBJECT_REF_OFFSET=
+
+Forwarding bits are not stored in the low bits of Torrent object words. The
+primary tag bits remain exclusively Torrent's last three value bits.
+
+* Slots And Root Scanning
+
+=TaggedPtrSlot= is MMTk's slot type for Torrent.
+
+A =TaggedPtrSlot= points to a machine word that stores a raw tagged =Object=.
+It is not a pointer to an =ObjectReference=. On load, it inspects the low primary
+tag bits and returns =None= for immediate/non-reference values. On store, it
+preserves the existing low tag bits and replaces only the object-reference
+address bits.
+
+The root-scanning API is:
+
+#+begin_src rust
+pub trait StackMapProvider: Send + Sync {
+    fn visit_stack_roots(
+        &self,
+        tls: VMMutatorThread,
+        visitor: &mut dyn StackRootVisitor,
+    );
+}
+
+pub trait StackRootVisitor {
+    fn visit_tagged_slot(&mut self, slot: Address);
+}
+#+end_src
+
+Providers report addresses of tagged object slots. The MMTk scanning layer wraps
+those addresses as =TaggedPtrSlot= and gives them to MMTk root-processing work.
+
+* Cranelift Stack Maps
+
+The JIT uses Cranelift user stack maps.
+
+Compilation records function metadata:
+
+- finalized code range
+- code offset for each stack map
+- active frame span reported by Cranelift
+- typed stack-map slots as =StackMapSlot { ty, offset }=
+
+Only =I64= stack-map entries are treated as Torrent tagged object words. The
+stack-map offsets are SP-relative. The stack scanner computes:
+
+#+begin_example
+active_sp = frame_pointer - active_frame_span
+slot_address = active_sp + stack_map_offset
+#+end_example
+
+=CraneliftStackMapProvider= is installed when the JIT is created. It looks up
+the current mutator's recorded stack-scan bounds and visits all tagged stack
+slots in mapped JIT frames.
+
+The current implementation records scan bounds through the existing internal
+=gcroot_scan= hook. A more complete STW integration should record the parked
+mutator frame pointer at safepoint/block time so collection-time root scanning
+does not depend on an earlier debug scan.
+
+* Threads And Stop-The-World
+
+=crates/gc/src/thread.rs= owns VM thread state for the MMTk binding.
+
+Main states:
+
+- =Mutating=: normal execution
+- =RequestToBlock=: GC has requested this mutator to park
+- =Blocked=: mutator is parked for GC
+- =Immutable=: mutator is in native/immutable work
+- =BlockedInImmutable=: GC requested stop while the mutator was immutable
+- =New= and =Terminated=: represented but not currently constructed
+
+The intended flow is:
+
+#+begin_example
+Mutating --GC request--> RequestToBlock --safepoint/block--> Blocked
+Blocked --resume--> Mutating
+
+Mutating --enter_native--> Immutable --leave_native--> Mutating
+Immutable --GC request--> BlockedInImmutable --resume--> Immutable
+#+end_example
+
+Environment lookup is not immutable work. Looking up a symbol can return a
+tagged object pointing to a movable heap object, so it must be visible to GC as
+mutating/rooted work. Immutable/native code may keep running through a GC only if
+it does not load movable object references without rooting or otherwise making
+them visible.
+
+Known current inconsistency: =enter_native= transitions
+=RequestToBlock -> BlockedInImmutable= but does not yet park or return through a
+clean state. That state-machine path still needs tightening before native mode
+should be relied on.
+
+* Memory Slices
+
+The binding currently uses:
+
+#+begin_src rust
+UnimplementedMemorySlice<TaggedPtrSlot>
+#+end_src
+
+This matches the current no-memory-slice design. Bulk copy barriers or APIs that
+need memory slice iteration should not be introduced until the VM has a real
+memory-slice representation.
+
+* Current Gaps
+
+- Root crate integration is stale after the new =Gc<T: HeapObject>= design.
+  Runtime object types need =HeapObject= impls and old APIs like =GcInner=,
+  =Gc::get=, =Gc::get_mut=, =Gc::new_raw=, and =Gc::to_raw= need migration.
+- =src/gc.rs= still contains old compatibility code and compile errors.
+- MMTk reference/finalizer glue is skeletal.
+- Native/immutable thread-state behavior is not complete.
+- Stack-map scan bounds should be captured from real safepoint/block state, not
+  only from the current internal scan hook.
+- No memory-slice support exists.
+
+* Verification
+
+Current focused verification for the GC crate:
+
+#+begin_example
+cargo check --manifest-path crates/gc/Cargo.toml
+cargo test --manifest-path crates/gc/Cargo.toml
+#+end_example
+
+The full workspace check is expected to fail until the root runtime is migrated
+to the new heap-object API.
