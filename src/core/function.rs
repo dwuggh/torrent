@@ -1,13 +1,15 @@
 use crate::core::error::{RuntimeError, RuntimeResult};
+use std::cell::UnsafeCell;
+
 use crate::core::ident::Ident;
+use crate::core::lexical::LexicalBindings;
 use crate::core::parser::expr::Args;
 use cranelift_module::FuncId;
-use rustc_hash::FxHashMap;
 
 use crate::core::env::Environment;
 use crate::{
     core::{object::Object, tag::TAG_FUNCTION},
-    gc::{Gc, HeaderedObject, Trace, Visitor},
+    gc::{Gc, HeaderedObject, HeapObject, Trace, Visitor},
 };
 
 // ============================================================================
@@ -21,14 +23,14 @@ pub type FuncPtr = *const u8;
 pub struct LispFunction(pub(crate) Gc<Function>);
 impl_tagged_for_gc!(LispFunction, Function);
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Function {
     pub func_type: FunctionType,
 
     pub signature: FunctionSignature,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum FunctionType {
     Subr(SubrFn),
     Lambda(Closure),
@@ -41,11 +43,20 @@ pub struct SubrFn {
     func_ptr: Option<FuncPtr>,
 }
 
-#[derive(Debug, Clone)]
 pub struct Closure {
-    pub captures: FxHashMap<Ident, Object>,
+    captures: UnsafeCell<LexicalBindings>,
     func_id: FuncId,
     func_ptr: Option<FuncPtr>,
+}
+
+impl std::fmt::Debug for Closure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Closure")
+            .field("captures", self.captures())
+            .field("func_id", &self.func_id)
+            .field("func_ptr", &self.func_ptr)
+            .finish()
+    }
 }
 
 #[allow(unused)]
@@ -85,12 +96,40 @@ unsafe impl HeaderedObject for Function {}
 unsafe impl Trace for Function {
     unsafe fn trace(&self, visitor: &mut Visitor) {
         if let FunctionType::Lambda(closure) = &self.func_type {
-            // Closure captures are tagged object slots stored in the function
-            // payload. MMTk may update each slot when moving objects.
-            for value in closure.captures.values() {
-                unsafe { value.trace(visitor) };
-            }
+            unsafe { closure.trace(visitor) };
         }
+    }
+}
+
+unsafe impl Trace for Closure {
+    unsafe fn trace(&self, visitor: &mut Visitor) {
+        unsafe { self.captures().trace(visitor) };
+    }
+}
+
+impl Closure {
+    pub fn new(func_id: FuncId) -> Self {
+        Self {
+            captures: UnsafeCell::new(LexicalBindings::empty()),
+            func_id,
+            func_ptr: None,
+        }
+    }
+
+    pub fn captures(&self) -> &LexicalBindings {
+        unsafe { &*self.captures.get() }
+    }
+
+    pub fn captures_mut(&self) -> &mut LexicalBindings {
+        unsafe { &mut *self.captures.get() }
+    }
+
+    pub fn lexical_ptr(&self) -> *mut LexicalBindings {
+        self.captures.get()
+    }
+
+    pub fn reset_captures(&self, captures: LexicalBindings) {
+        unsafe { *self.captures.get() = captures };
     }
 }
 
@@ -101,11 +140,7 @@ unsafe impl Trace for Function {
 impl Function {
     /// Create a new closure function
     pub fn new_closure(func_id: FuncId, signature: FunctionSignature) -> Self {
-        let closure = Closure {
-            captures: FxHashMap::default(),
-            func_id,
-            func_ptr: None,
-        };
+        let closure = Closure::new(func_id);
         Self {
             func_type: FunctionType::Lambda(closure),
             signature,
@@ -155,6 +190,40 @@ impl Function {
         }
     }
 
+    pub fn lexical_ptr(&self) -> *mut LexicalBindings {
+        match &self.func_type {
+            FunctionType::Subr(_) => std::ptr::null_mut(),
+            FunctionType::Lambda(closure) => closure.lexical_ptr(),
+        }
+    }
+
+    pub fn load_lexical(&self, index: usize) -> RuntimeResult<Object> {
+        let FunctionType::Lambda(closure) = &self.func_type else {
+            return Err(RuntimeError::internal_error("subr has no lexical bindings"));
+        };
+        closure
+            .captures()
+            .load(index)
+            .ok_or_else(|| RuntimeError::internal_error("lexical binding index out of bounds"))
+    }
+
+    pub fn store_lexical(&mut self, index: usize, value: Object) -> RuntimeResult<()> {
+        let src = unsafe { Function::object_ref_from_data(std::ptr::NonNull::from(&mut *self)) };
+        let FunctionType::Lambda(closure) = &self.func_type else {
+            return Err(RuntimeError::internal_error("subr has no lexical bindings"));
+        };
+        closure.captures_mut().store_with_owner(src, index, value);
+        Ok(())
+    }
+
+    pub fn reset_lexical_bindings(&mut self, captures: LexicalBindings) -> RuntimeResult<()> {
+        let FunctionType::Lambda(closure) = &self.func_type else {
+            return Err(RuntimeError::internal_error("subr has no lexical bindings"));
+        };
+        closure.reset_captures(captures);
+        Ok(())
+    }
+
     /// Get the function signature
     pub fn signature(&self) -> FunctionSignature {
         self.signature
@@ -194,9 +263,13 @@ impl Function {
 
         if use_trampoline {
             // Use current trampoline style for >8 args
-            let func: unsafe extern "C" fn(*const Object, u64, *const Environment) -> Object =
-                unsafe { std::mem::transmute(func_ptr) };
-            let result = unsafe { func(args.as_ptr(), args.len() as u64, env) };
+            let func: unsafe extern "C" fn(
+                *const Object,
+                u64,
+                *const Environment,
+                *mut LexicalBindings,
+            ) -> Object = unsafe { std::mem::transmute(func_ptr) };
+            let result = unsafe { func(args.as_ptr(), args.len() as u64, env, self.lexical_ptr()) };
             Ok(result)
         } else {
             debug_assert!(total_args <= 8);
@@ -208,6 +281,7 @@ impl Function {
             }
 
             let env_raw = env as *const Environment as i64;
+            let lexical_raw = self.lexical_ptr() as i64;
 
             macro_rules! gen_func_type {
                 (@type $_:tt) => {
@@ -217,18 +291,18 @@ impl Function {
 
             macro_rules! call_direct_case {
                 ($($idx:tt),+) => {{
-                    type FnTy = unsafe extern "C" fn($(gen_func_type!(@type $idx)),+, i64) -> i64;
+                    type FnTy = unsafe extern "C" fn($(gen_func_type!(@type $idx)),+, i64, i64) -> i64;
                     let func: FnTy = unsafe { std::mem::transmute(func_ptr) };
-                    let value = unsafe { func($(args[$idx].0 as i64),+, env_raw) };
+                    let value = unsafe { func($(args[$idx].0 as i64),+, env_raw, lexical_raw) };
                     Ok(Object(value as u64))
                 }};
             }
 
             match total_args {
                 0 => {
-                    type FnTy = unsafe extern "C" fn(i64) -> i64;
+                    type FnTy = unsafe extern "C" fn(i64, i64) -> i64;
                     let func: FnTy = unsafe { std::mem::transmute(func_ptr) };
-                    let value = unsafe { func(env_raw) };
+                    let value = unsafe { func(env_raw, lexical_raw) };
                     Ok(Object(value as u64))
                 }
                 1 => call_direct_case!(0),
@@ -306,6 +380,11 @@ impl LispFunction {
     pub fn set_func_ptr(&self, func_ptr: FuncPtr) {
         let mut inner = self.0.clone();
         inner.as_mut().set_func_ptr(func_ptr)
+    }
+
+    pub fn reset_lexical_bindings(&self, captures: LexicalBindings) -> RuntimeResult<()> {
+        let mut inner = self.0.clone();
+        inner.as_mut().reset_lexical_bindings(captures)
     }
 
     /// Get the function pointer

@@ -283,3 +283,77 @@ cargo test --manifest-path crates/gc/Cargo.toml
 
 The full workspace check is expected to fail until the root runtime is migrated
 to the new heap-object API.
+
+* symbol map
+we want a global symbol map.
+for insertion and deletion, we may lock the whole map. but for in-cell mutation, we want a
+per-cell lock, or simply use atomic types.
+#+BEGIN_SRC rust
+struct SymbolCell {
+    /// a lock for mutation.
+    lock: Mutex<()>,
+    /// The symbol this cell represents
+    pub name: Ident,
+    /// Function binding (nil if unbound)
+    /// TODO should this and value be atomic type?
+    pub func: Object,
+    /// Value binding (nil if unbound)
+    pub value: Object,
+
+    /// is this a global symbol. if not, it can be thread local
+    global: bool,
+    /// Whether this is a special symbol, i.e. use dynamic binding
+    pub special: bool,
+
+}
+
+#[repr(C)]
+pub struct SymbolMap {
+    header: FastVec,
+    entries: Vec<SymbolCell>,
+    indices: FxHashMap<Symbol, usize>,
+
+    dirty_roots: DirtyRootSet,
+}
+
+#+END_SRC
+
+
+* rust-lisp interop
+a rust function can be called in lisp. We have 3 cases:
+1. Immutable/Native: will not access any lisp envrionment.
+   signature f() -> Object
+2. Readonly: can access lisp env, but not modify it.
+   signature f(arg: &Object, &Env) -> Object
+   &Object's semantic is "arg is immutable". no safepoint inside.
+   Object can also be Gc<LispObject> or immediate 
+3. Mutating: can access and modify lisp env.
+   signature f(arg: Handle, &mut Env) -> Object
+   Handle is a thread local Handle like v8. we need to use arg.get(env) to get a &'gc Object.
+   safepoints: allocation must be a safepoint. This is guranteed by separating readonly and mutating
+   functions:
+   1. from the signature we know readonly funcs cannot call mutating funcs.
+   2. readonly funcs cannot has rust-side stackmap. buf after readonly funcs return,
+      the stack is deallocated.
+   3. every argument is wrapped in a slot, so moving GC can safely update them.
+
+** mutating fields
+suppose we want to do equivalent of obj.x = y. now obj has type &Object, so rust's type check
+will refuse it. instead, we want:
+obj.set(|obj| obj.x, y, env)
+env has type &mut Env.
+** allocation
+we want allocation invalidate every previous lifetime. that is,
+let obj = arg.get(env); // obj: &'a Object
+let y = env.alloc(..); // y: &'b Object, obj is invalid
+obj.set(..) // will error
+
+** safepoint polling
+we add safepoint polling at start of a lisp function. so the whole routine is:
+- pre safepoint poll
+  - stackmap: only available through cranelift
+  - thread state transitions: for Immutable/Native func, we set thread state to it.
+    the other 2 types don't need to change state.
+- safepoint poll
+- funcall
+- post safepoint poll.

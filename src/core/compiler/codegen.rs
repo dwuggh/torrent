@@ -1,30 +1,31 @@
 use std::collections::HashMap;
 
-use cranelift::codegen::ir::{BlockCall, JumpTableData, TrapCode};
 use cranelift::codegen::Context;
+use cranelift::codegen::ir::{BlockCall, JumpTableData, TrapCode};
 use cranelift::prelude::*;
 use cranelift_jit::JITModule;
 use cranelift_module::DataDescription;
 use cranelift_module::FuncId;
 use cranelift_module::Module;
-use rustc_hash::FxHashSet;
 
+use crate::core::Tag;
 use crate::core::compiler::error::{CodegenError, CodegenResult};
-use crate::core::compiler::stack_map::{append_func_metadata, FunctionMetadata, StackMapSlot};
+use crate::core::compiler::stack_map::{FunctionMetadata, StackMapSlot, append_func_metadata};
 use crate::core::function::FunctionSignature;
 use crate::core::function::LispFunction;
 use crate::core::ident::Ident;
+use crate::core::lexical::LexicalBindings;
 use crate::core::object::NIL;
 use crate::core::object::TRUE;
 use crate::core::parser::expr::*;
 use crate::core::symbol::LispSymbol;
 use crate::core::symbol::Symbol;
-use crate::core::Tag;
+use crate::core::symbol::SymbolSemantics;
 
 #[derive(Debug)]
 pub struct UnresolvedClosure {
     func: LispFunction,
-    unresolved: FxHashSet<Arg>,
+    captures: Vec<Arg>,
 }
 
 #[allow(unused)]
@@ -39,35 +40,40 @@ enum IncomingArgs<'a> {
     Direct { args: &'a [Value] },
 }
 
-fn get_locals(locals: &Vec<(Arg, Variable)>, target: &Arg) -> Option<Variable> {
+fn get_local<'a>(locals: &'a [(Arg, Variable)], target: &Arg) -> Option<(&'a Arg, Variable)> {
     let mut i = locals.len();
     while i > 0 {
         i = i - 1;
         let (arg, var) = &locals[i];
         if arg == target {
-            return Some(*var);
+            return Some((arg, *var));
         }
     }
     None
 }
 
+fn get_locals(locals: &[(Arg, Variable)], target: &Arg) -> Option<Variable> {
+    get_local(locals, target).map(|(_, variable)| variable)
+}
+
 impl UnresolvedClosure {
     fn resolve(self, codegen: &mut Codegen) -> Closure {
-        let mut unresolved = FxHashSet::default();
-        // unresolved.into_iter().partition()
+        let mut unresolved = Vec::new();
 
-        for arg in self.unresolved {
+        for (index, arg) in self.captures.into_iter().enumerate() {
             // Try to resolve the argument to a Variable in the current codegen context
-            if let Some(variable) = get_locals(&codegen.locals, &arg) {
+            if let Some((local_arg, variable)) = get_local(&codegen.locals, &arg) {
                 // Get the current value of the variable
-                let value = codegen.builder.use_var(variable);
-                let symbol: Symbol = arg.ident.into();
-                let sym = codegen.translate_lispobj(&LispSymbol::from(symbol));
+                let mut value = codegen.builder.use_var(variable);
+                if local_arg.is_shared() {
+                    value = codegen.call_internal("create_indirect_object", &[value])[0];
+                }
+                let index = codegen.builder.ins().iconst(types::I64, index as i64);
                 let func_val = codegen.translate_lispobj(&self.func);
-                codegen.call_internal("store_captured", &[sym, value, func_val]);
+                codegen.call_internal("store_lexical", &[index, value, func_val]);
             } else {
                 // Still can't resolve this argument, keep it unresolved
-                unresolved.insert(arg);
+                unresolved.push(arg);
             }
         }
 
@@ -76,7 +82,7 @@ impl UnresolvedClosure {
         } else {
             Closure::Unresolved(Self {
                 func: self.func,
-                unresolved,
+                captures: unresolved,
             })
         }
     }
@@ -146,10 +152,11 @@ pub struct Codegen<'a> {
     builder: FunctionBuilder<'a>,
     func: LispFunction,
     locals: Vec<(Arg, Variable)>,
-
-    captures: FxHashSet<Arg>,
+    argument_slots: Vec<Variable>,
+    capture_slots: Vec<Arg>,
     pub func_id: FuncId,
     env: Value,
+    lexical: Value,
     defined_funcs: Vec<Closure>,
 }
 
@@ -186,15 +193,19 @@ impl<'a> Codegen<'a> {
         builder: FunctionBuilder<'a>,
         func: LispFunction,
         env: Value,
+        lexical: Value,
         func_id: FuncId,
+        capture_slots: Vec<Arg>,
     ) -> Self {
         Self {
             cgctx,
             builder,
             func,
             locals: Vec::new(),
-            captures: Default::default(),
+            argument_slots: Vec::new(),
+            capture_slots,
             env,
+            lexical,
             func_id,
             defined_funcs: Vec::new(),
         }
@@ -211,6 +222,8 @@ impl<'a> Codegen<'a> {
         let sig = &mut ctx.func.signature;
         // env arg
         sig.params.push(AbiParam::new(types::I64));
+        // lexical bindings arg
+        sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
 
         tracing::debug!(
@@ -223,10 +236,11 @@ impl<'a> Codegen<'a> {
         let cgctx = CodegenContext::from_parts(module, data_desc, builtin_funcs);
 
         let env = params[0];
+        let lexical = params[1];
 
         let func = LispFunction::new_closure(func_id, FunctionSignature::default());
 
-        let mut codegen = Self::assemble(cgctx, builder, func, env, func_id);
+        let mut codegen = Self::assemble(cgctx, builder, func, env, lexical, func_id, Vec::new());
 
         let fp = codegen.builder.ins().get_frame_pointer(types::I64);
         // let ra = codegen.builder.ins().get_return_address(types::I64);
@@ -271,15 +285,35 @@ impl<'a> Codegen<'a> {
                 .unwrap_or_else(|| panic!("expected env parameter for trampoline"))
         } else {
             params
-                .last()
+                .get(params.len().saturating_sub(2))
                 .copied()
                 .unwrap_or_else(|| panic!("expected env parameter for direct call"))
+        };
+        let lexical = if use_trampoline {
+            params
+                .get(3)
+                .copied()
+                .unwrap_or_else(|| panic!("expected lexical parameter for trampoline"))
+        } else {
+            params
+                .last()
+                .copied()
+                .unwrap_or_else(|| panic!("expected lexical parameter for direct call"))
         };
 
         let signature = FunctionSignature::from_args(&lambda.args);
         let func = LispFunction::new_closure(func_id, signature);
+        let capture_slots = lambda
+            .captures
+            .borrow()
+            .iter()
+            .map(|capture| Arg::new_uncap(Ident::from(*capture)))
+            .collect::<Vec<_>>();
+        let capture_len = capture_slots.len();
+        let _ = func.reset_lexical_bindings(LexicalBindings::with_len(capture_len));
 
-        let mut codegen = Self::assemble(cgctx, builder, func, env, func_id);
+        let mut codegen =
+            Self::assemble(cgctx, builder, func, env, lexical, func_id, capture_slots);
 
         let fp = codegen.builder.ins().get_frame_pointer(types::I64);
         let ra = codegen.builder.ins().get_return_address(types::I64);
@@ -295,7 +329,7 @@ impl<'a> Codegen<'a> {
                 IncomingArgs::Trampoline { args_ptr, args_cnt },
             )?;
         } else {
-            let env_index = params.len().saturating_sub(1);
+            let env_index = params.len().saturating_sub(2);
             let direct_args = &params[..env_index];
             codegen.setup_locals(&lambda.args, IncomingArgs::Direct { args: direct_args })?;
         }
@@ -337,7 +371,7 @@ impl<'a> Codegen<'a> {
         let collections = self.defined_funcs;
         let this = UnresolvedClosure {
             func: self.func,
-            unresolved: self.captures,
+            captures: self.capture_slots,
         };
 
         (this, collections)
@@ -375,6 +409,7 @@ impl<'a> Codegen<'a> {
         let var = self.builder.declare_var(types::I64);
         self.builder.declare_var_needs_stack_map(var);
         self.locals.push((arg.clone(), var));
+        self.argument_slots.push(var);
 
         let value = initial;
 
@@ -399,6 +434,28 @@ impl<'a> Codegen<'a> {
             let ident = Ident::from(*capture);
             let arg = Arg::new_uncap(ident);
             self.locals.push((arg, var));
+        }
+    }
+
+    fn load_indexed_symbol(&mut self, symbol: Symbol) -> CodegenResult<Value> {
+        match symbol.semantics() {
+            SymbolSemantics::Global => self.load_symbol(symbol, false),
+            SymbolSemantics::Argument => {
+                let index = symbol.data();
+                let variable = self
+                    .argument_slots
+                    .get(index)
+                    .copied()
+                    .ok_or_else(|| CodegenError::SymbolNotFound(symbol))?;
+                Ok(self.builder.use_var(variable))
+            }
+            SymbolSemantics::Lexical => {
+                let index = self.builder.ins().iconst(types::I64, symbol.data() as i64);
+                let func = self.func.clone();
+                let func_val = self.translate_lispobj(&func);
+                Ok(self.call_internal("load_lexical", &[index, func_val])[0])
+            }
+            SymbolSemantics::Unresolved => self.load_symbol(symbol, false),
         }
     }
 
@@ -548,6 +605,7 @@ impl<'a> Codegen<'a> {
             ExprType::Nil => Ok(self.nil()),
             ExprType::Symbol(var) => {
                 match var.get() {
+                    Var::Resolved(symbol) => self.load_indexed_symbol(symbol),
                     Var::Global(symbol) => {
                         let val = self.load_symbol(symbol, false)?;
                         Ok(val)
@@ -562,9 +620,7 @@ impl<'a> Codegen<'a> {
                             Err(CodegenError::SymbolNotFound(ident.into()))
                         }
                     }
-                    Var::Unresolved(_) => {
-                        unreachable!("Unresolved variable should not reach codegen")
-                    }
+                    Var::Unresolved(ident) => self.load_symbol(ident.into(), false),
                 }
             }
             ExprType::Literal(literal) => self.translate_literal(literal),
@@ -683,6 +739,9 @@ impl<'a> Codegen<'a> {
         let func_ptr = self.call_internal("get_func_ptr", &[func, self.env])[0];
         let func_ptr_var = self.builder.declare_var(types::I64);
         self.builder.def_var(func_ptr_var, func_ptr);
+        let lexical = self.call_internal("get_lexical_bindings", &[func])[0];
+        let lexical_var = self.builder.declare_var(types::I64);
+        self.builder.def_var(lexical_var, lexical);
 
         // Prepare jump-table targets for argument counts 0..=8.
         let mut blocks = Vec::with_capacity(9);
@@ -719,12 +778,14 @@ impl<'a> Codegen<'a> {
                     sig.params.push(AbiParam::new(types::I64));
                 }
                 sig.params.push(AbiParam::new(types::I64)); // env
+                sig.params.push(AbiParam::new(types::I64)); // lexical
                 sig.returns.push(AbiParam::new(types::I64));
 
                 let sig_ref = self.builder.import_signature(sig);
                 let func_ptr = self.builder.use_var(func_ptr_var);
+                let lexical = self.builder.use_var(lexical_var);
 
-                let mut call_args = Vec::with_capacity($argc + 1);
+                let mut call_args = Vec::with_capacity($argc + 2);
                 let actual_len = args.len();
                 for idx in 0..$argc {
                     let val = if idx < actual_len {
@@ -735,6 +796,7 @@ impl<'a> Codegen<'a> {
                     call_args.push(val);
                 }
                 call_args.push(self.env);
+                call_args.push(lexical);
 
                 let inst = self
                     .builder
@@ -788,20 +850,23 @@ impl<'a> Codegen<'a> {
         let args_ptr = self.builder.ins().stack_addr(types::I64, slot, 0);
         let args_cnt = self.builder.ins().iconst(types::I64, argc as i64);
 
-        // Create trampoline signature (args_ptr, args_cnt, env)
+        // Create trampoline signature (args_ptr, args_cnt, env, lexical)
         let mut sig = self.cgctx.module.make_signature();
         sig.params.push(AbiParam::new(types::I64)); // args_ptr
         sig.params.push(AbiParam::new(types::I64)); // args_cnt
         sig.params.push(AbiParam::new(types::I64)); // env
+        sig.params.push(AbiParam::new(types::I64)); // lexical
         sig.returns.push(AbiParam::new(types::I64));
 
         let sig_ref = self.builder.import_signature(sig);
         let func_ptr = self.call_internal("get_func_ptr", &[func, self.env])[0];
+        let lexical = self.call_internal("get_lexical_bindings", &[func])[0];
 
-        let inst =
-            self.builder
-                .ins()
-                .call_indirect(sig_ref, func_ptr, &[args_ptr, args_cnt, self.env]);
+        let inst = self.builder.ins().call_indirect(
+            sig_ref,
+            func_ptr,
+            &[args_ptr, args_cnt, self.env, lexical],
+        );
         let result = self.builder.inst_results(inst)[0];
 
         Ok(result)
@@ -1155,6 +1220,8 @@ fn prepare_signature(args: &Args, sig: &mut Signature) {
         sig.params.push(AbiParam::new(types::I64));
         // env arg
         sig.params.push(AbiParam::new(types::I64));
+        // lexical bindings arg
+        sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
     } else {
         let argc = args.total();
@@ -1163,6 +1230,8 @@ fn prepare_signature(args: &Args, sig: &mut Signature) {
         }
 
         // env arg
+        sig.params.push(AbiParam::new(types::I64));
+        // lexical bindings arg
         sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
     }
@@ -1176,9 +1245,23 @@ fn identify_env(params: &[Value], use_trampoline: bool) -> Value {
             .unwrap_or_else(|| panic!("expected env parameter for trampoline"))
     } else {
         params
-            .last()
+            .get(params.len().saturating_sub(2))
             .copied()
             .unwrap_or_else(|| panic!("expected env parameter for direct call"))
+    }
+}
+
+fn identify_lexical(params: &[Value], use_trampoline: bool) -> Value {
+    if use_trampoline {
+        params
+            .get(3)
+            .copied()
+            .unwrap_or_else(|| panic!("expected lexical parameter for trampoline"))
+    } else {
+        params
+            .last()
+            .copied()
+            .unwrap_or_else(|| panic!("expected lexical parameter for direct call"))
     }
 }
 
@@ -1195,6 +1278,10 @@ impl CodegenBuilder {
         identify_env(params, self.args.use_trampoline())
     }
 
+    fn identify_lexical(&self, params: &[Value]) -> Value {
+        identify_lexical(params, self.args.use_trampoline())
+    }
+
     /// setup local bindings and return the special value binding for envrionment
     fn setup_locals(&self, params: &[Value], codegen: &mut Codegen) -> CodegenResult<()> {
         if self.args.use_trampoline() {
@@ -1202,7 +1289,7 @@ impl CodegenBuilder {
             let args_cnt = params[1];
             codegen.setup_locals(&self.args, IncomingArgs::Trampoline { args_ptr, args_cnt })?;
         } else {
-            let env_index = params.len().saturating_sub(1);
+            let env_index = params.len().saturating_sub(2);
             let direct_args = &params[..env_index];
             codegen.setup_locals(&self.args, IncomingArgs::Direct { args: direct_args })?;
         }
@@ -1223,9 +1310,11 @@ impl CodegenBuilder {
         let (builder, func_id, params) = Codegen::create_function_prologue(module, fctx, ctx)?;
         let cgctx = CodegenContext::from_parts(module, data_desc, builtin_funcs);
         let env = self.identify_env(&params);
+        let lexical = self.identify_lexical(&params);
 
         let func = LispFunction::new_closure(func_id, FunctionSignature::from_args(&self.args));
-        let mut codegen = Codegen::assemble(cgctx, builder, func, env, func_id);
+        let mut codegen =
+            Codegen::assemble(cgctx, builder, func, env, lexical, func_id, Vec::new());
         self.setup_locals(&params, &mut codegen)?;
         Ok(codegen)
     }

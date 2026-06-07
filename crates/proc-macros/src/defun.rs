@@ -30,11 +30,13 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
                 quote! { args_ptr: i64 },
                 quote! { args_cnt: i64 },
                 quote! { env: i64 },
+                quote! { _lexical: i64 },
             ],
             vec![
                 format_ident!("args_ptr"),
                 format_ident!("args_cnt"),
                 format_ident!("env"),
+                format_ident!("_lexical"),
             ],
         )
     };
@@ -141,6 +143,9 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
             quote! {
                 sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // env
             },
+            quote! {
+                sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // lexical
+            },
         ]
     };
 
@@ -205,6 +210,8 @@ fn get_direct_c_signature(args: &[Arg]) -> (Vec<TokenStream>, Vec<proc_macro2::I
     // Always add env at the end
     c_params.push(quote! { env: i64 });
     c_param_idents.push(format_ident!("env"));
+    c_params.push(quote! { _lexical: i64 });
+    c_param_idents.push(format_ident!("_lexical"));
 
     (c_params, c_param_idents)
 }
@@ -237,6 +244,9 @@ fn get_direct_signatures(args: &[Arg]) -> Vec<TokenStream> {
     // Always add env at the end
     signatures.push(quote! {
         sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // env
+    });
+    signatures.push(quote! {
+        sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // lexical
     });
 
     signatures

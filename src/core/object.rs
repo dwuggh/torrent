@@ -189,36 +189,6 @@ impl Object {
             _ => ObjectRef::Unknown,
         }
     }
-
-    pub fn as_mut(&mut self) -> ObjectMut<'_> {
-        match self.get_tag() {
-            gc::GcTag::NIL => ObjectMut::Nil,
-            tag if tag == TRUE as u8 => ObjectMut::True,
-            gc::GcTag::INT => {
-                ObjectMut::Int(LispInteger::untag(Object::from_raw(self.0)).unwrap().0)
-            }
-            Float::TAG => {
-                ObjectMut::Float(unsafe { self.heap_mut::<Float>() })
-            }
-            gc::GcTag::CHAR => {
-                ObjectMut::Character(LispCharacter::untag(Object::from_raw(self.0)).unwrap().0)
-            }
-            Str::TAG => {
-                ObjectMut::Str(unsafe { self.heap_mut::<Str>() })
-            }
-            gc::GcTag::SYMBOL => {
-                ObjectMut::Symbol(LispSymbol::untag(Object::from_raw(self.0)).unwrap().0)
-            }
-            Vector::TAG => {
-                ObjectMut::Vector(unsafe { self.heap_mut::<Vector>() })
-            }
-            gc::GcTag::CONS => ObjectMut::Cons(unsafe { self.heap_mut::<Cons>() }),
-            Function::TAG => {
-                ObjectMut::Function(unsafe { self.heap_mut::<Function>() })
-            }
-            _ => ObjectMut::Unknown,
-        }
-    }
 }
 
 unsafe impl Trace for Object {
@@ -263,22 +233,6 @@ pub enum ObjectRef<'a> {
     Unknown,
 }
 
-#[derive(Debug, Default)]
-pub enum ObjectMut<'a> {
-    #[default]
-    Nil,
-    True,
-    Int(Integer),
-    Float(&'a mut Float),
-    Character(Character),
-    Symbol(Symbol),
-    Str(&'a mut Str),
-    Vector(&'a mut Vector),
-    Cons(&'a mut Cons),
-    Function(&'a mut Function),
-    Unknown,
-}
-
 impl LispObject {
     pub fn tag(self) -> Object {
         match self {
@@ -314,7 +268,7 @@ pub trait HeapSlotUpdate: HeapObject {
 
 impl<T: HeapObject> HeapSlotUpdate for T {}
 
-/// Store `value` into a tagged object slot after running MMTk's pre-barrier.
+/// Store `value` into a tagged object slot after running MMTk's write barriers.
 pub fn write_object_slot(
     src: gc::mmtk::util::ObjectReference,
     slot: &mut Object,
@@ -323,6 +277,7 @@ pub fn write_object_slot(
     let slot_addr = gc::mmtk::util::Address::from_ptr(slot as *mut Object);
     gc::object_slot_write_pre(src, slot_addr);
     *slot = value;
+    gc::object_slot_write_post(src, slot_addr);
 }
 
 macro_rules! impl_try_from_for_object {
@@ -397,6 +352,7 @@ pub fn init_gc_types() {
     gc::register_heap_object::<Vector>();
     gc::register_heap_object::<Cons>();
     gc::register_heap_object::<Function>();
+    gc::register_heap_object::<crate::core::indirect::Indirect>();
     gc::register_heap_object::<SymbolMap>();
     gc::register_heap_object::<crate::core::env::SpecStack>();
     gc::register_heap_object::<crate::core::compiler::macro_item::MacroItemType>();

@@ -6,6 +6,7 @@ pub mod fns;
 use crate::core::{
     compiler::jit::JIT,
     env::Environment,
+    lexical::LexicalBindings,
     object::Object,
     object::init_gc_types,
     parser::{macro_expansion::expand_and_resolve_everything, parse_src},
@@ -52,9 +53,12 @@ unsafe fn run_code(
                     .into_iter()
                     .map(|expr| {
                         let f = jit.compile_expr(&expr).unwrap();
-                        let code_fn = std::mem::transmute::<_, fn(*const Environment) -> Object>(f);
+                        let code_fn = std::mem::transmute::<
+                            _,
+                            fn(*const Environment, *mut LexicalBindings) -> Object,
+                        >(f);
                         // And now we can call it!
-                        let value = code_fn(env_ptr);
+                        let value = code_fn(env_ptr, std::ptr::null_mut());
                         let result = value;
                         println!("result: {result:?}");
                         Ok(result)

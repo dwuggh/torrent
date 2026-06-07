@@ -65,6 +65,7 @@ pub fn new_box(expr: Expr) -> BoxExpr {
 
 #[derive(Clone, Debug, Copy)]
 pub enum Var {
+    Resolved(Symbol),
     Global(Symbol),
     Local(Ident),
     Captured(Ident),
@@ -75,6 +76,7 @@ pub enum Var {
 impl From<Var> for Ident {
     fn from(var: Var) -> Self {
         match var {
+            Var::Resolved(symbol) => symbol.into(),
             Var::Global(symbol) => symbol.into(),
             Var::Local(ident) => ident,
             Var::Captured(cap) => cap,
@@ -87,6 +89,7 @@ impl From<Var> for Ident {
 impl From<Var> for Symbol {
     fn from(var: Var) -> Self {
         match var {
+            Var::Resolved(symbol) => symbol,
             Var::Global(symbol) => symbol,
             Var::Local(ident) => ident.into(),
             Var::Captured(ident) => ident.into(),
@@ -397,6 +400,7 @@ impl From<Literal> for LispObject {
 impl From<Var> for LispObject {
     fn from(var: Var) -> Self {
         match var {
+            Var::Resolved(symbol) => LispObject::Symbol(LispSymbol(symbol)),
             Var::Global(symbol) => LispObject::Symbol(LispSymbol(symbol)),
             Var::Local(ident) => LispObject::Symbol(LispSymbol(ident.into())),
             Var::Captured(ident) => LispObject::Symbol(LispSymbol(ident.into())),

@@ -1,3 +1,4 @@
+pub mod closure_conversion;
 pub mod expr;
 pub mod expr_parser;
 pub mod macro_expansion;

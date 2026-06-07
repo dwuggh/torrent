@@ -20,6 +20,8 @@ pub const TAG_SYMBOL_MAP: u8 = 0b1110;
 pub const TAG_SPEC_STACK: u8 = 0b1111;
 /// Logical metadata tag for compiler macro items.
 pub const TAG_MACRO_ITEM: u8 = 0b1_0000;
+/// Logical metadata tag for internal mutable lexical cells.
+pub const TAG_INDIRECT: u8 = 0b1_0001;
 
 #[derive(Error, Debug, Clone)]
 pub enum TaggedPtrError {

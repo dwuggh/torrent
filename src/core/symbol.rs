@@ -11,21 +11,20 @@ use std::ptr::NonNull;
 
 use crate::core::error::RuntimeResult;
 use crate::core::ident::Ident;
-use crate::core::object::{nil, write_object_slot, Object};
-use crate::core::tag::{Tag, TaggedPtrError, Untag, TAG_SYMBOL_MAP};
+use crate::core::object::{Object, nil, write_object_slot};
+use crate::core::tag::{TAG_SYMBOL_MAP, Tag, TaggedPtrError, Untag};
 use crate::gc::{HeaderedObject, HeapObject, Trace, Visitor};
 
 // =============================================================================
 // Type Aliases and Constants
 // =============================================================================
 
-/// Maximum index value used to indicate ident-only symbols
-const IDENT_ONLY_INDEX: u32 = 0xFFFFFFFF;
-const INDEXED_SYMBOL_TAG: u64 = 0b0001;
-const IDENT_ONLY_SYMBOL_TAG: u64 = 0b1001;
-const SYMBOL_TAG_MASK: u64 = 0b1111;
-const SYMBOL_PAYLOAD_SHIFT: u32 = 4;
-const SYMBOL_PAYLOAD_MASK: u64 = u64::MAX >> SYMBOL_PAYLOAD_SHIFT;
+const SYMBOL_TAG: u64 = crate::gc::GcTag::SYMBOL as u64;
+const SYMBOL_TAG_BITS: u32 = 3;
+const SYMBOL_SEMANTICS_BITS: usize = 2;
+const SYMBOL_SEMANTICS_MASK: usize = (1 << SYMBOL_SEMANTICS_BITS) - 1;
+const SYMBOL_DATA_BITS: u32 = 59;
+const SYMBOL_DATA_MASK: usize = (u64::MAX >> (64 - SYMBOL_DATA_BITS)) as usize;
 
 // =============================================================================
 // Core Symbol Types
@@ -33,9 +32,9 @@ const SYMBOL_PAYLOAD_MASK: u64 = u64::MAX >> SYMBOL_PAYLOAD_SHIFT;
 
 /// A symbol in the Lisp system.
 ///
-/// Symbols are represented as packed 64-bit values containing:
-/// - Upper 32 bits: index in the symbol table (or IDENT_ONLY_INDEX)
-/// - Lower 32 bits: identifier key
+/// Symbols are represented as a 61-bit payload: 59 bits of data plus 2 bits of
+/// compile-time semantics. The tagged object form appends the low 3-bit symbol
+/// tag (`001`).
 ///
 /// # Examples
 ///
@@ -45,7 +44,16 @@ const SYMBOL_PAYLOAD_MASK: u64 = u64::MAX >> SYMBOL_PAYLOAD_SHIFT;
 /// ```
 #[repr(transparent)]
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
-pub struct Symbol(pub u64);
+pub struct Symbol(pub usize);
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum SymbolSemantics {
+    Global = 0,
+    Argument = 1,
+    Lexical = 2,
+    Unresolved = 3,
+}
 
 /// Tagged wrapper for Symbol used in the object system.
 ///
@@ -54,17 +62,6 @@ pub struct Symbol(pub u64);
 #[repr(C)]
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
 pub struct LispSymbol(pub Symbol);
-
-/// Unpacked representation of a symbol for easier manipulation.
-///
-/// This separates the index and identifier components for direct access.
-#[derive(Clone, Copy, Hash, PartialEq, Eq)]
-pub struct UnpackedLispSymbol {
-    /// Index in the symbol table (IDENT_ONLY_INDEX if not interned)
-    pub index: u32,
-    /// The identifier key
-    pub ident: Ident,
-}
 
 // =============================================================================
 // Symbol Storage and Management
@@ -83,7 +80,7 @@ type Map = IndexMap<Ident, SymbolCell, rustc_hash::FxBuildHasher>;
 /// ```rust
 /// let map = SymbolMap::default();
 /// let sym = map.intern(Ident::from("test"), false);
-/// assert_eq!(sym.0.name(), "test");
+/// assert_eq!(sym.0.index(), Some(0));
 /// ```
 #[derive(Debug)]
 pub struct SymbolMap {
@@ -123,30 +120,16 @@ pub struct SpecialSymbols {
 // =============================================================================
 
 impl Symbol {
-    /// Create a new symbol with the given index and identifier.
-    ///
-    /// # Arguments
-    /// * `index` - Position in the symbol table
-    /// * `ident` - The identifier key
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// let ident = Ident::from("test");
-    /// let sym = Symbol::new(0, ident);
-    /// ```
-    pub fn new(index: usize, ident: Ident) -> Self {
-        UnpackedLispSymbol::new(index, ident).into()
+    pub fn new(data: usize, semantics: SymbolSemantics) -> Self {
+        assert!(
+            data <= SYMBOL_DATA_MASK,
+            "symbol data exceeds 59-bit immediate symbol encoding"
+        );
+        Self((data << SYMBOL_SEMANTICS_BITS) | semantics as usize)
     }
 
-    /// Create a symbol that is only identified by its identifier.
-    ///
-    /// These symbols are not interned and have no fixed index.
-    ///
-    /// # Arguments
-    /// * `ident` - The identifier key
-    pub fn new_ident(ident: Ident) -> Self {
-        UnpackedLispSymbol::new_ident(ident).into()
+    pub fn new_global(index: usize) -> Self {
+        Self::new(index, SymbolSemantics::Global)
     }
 
     /// Convert this symbol to a tagged Object.
@@ -170,15 +153,11 @@ impl Symbol {
     /// assert_eq!(sym.name(), "hello");
     /// ```
     pub fn name<'a>(&self) -> &'a str {
-        self.ident().text()
-    }
-
-    /// Unpack this symbol into its components.
-    ///
-    /// # Returns
-    /// An UnpackedLispSymbol with separate index and ident fields.
-    pub fn unpack(&self) -> UnpackedLispSymbol {
-        UnpackedLispSymbol::from(*self)
+        if self.semantics() == SymbolSemantics::Unresolved {
+            self.ident().text()
+        } else {
+            "<indexed-symbol>"
+        }
     }
 
     /// Get the identifier component of this symbol.
@@ -186,77 +165,38 @@ impl Symbol {
     /// # Returns
     /// The Ident used to create this symbol.
     pub fn ident(&self) -> Ident {
-        let unpacked = self.unpack();
-        unpacked.ident
+        if self.semantics() == SymbolSemantics::Unresolved {
+            Ident::from_raw(self.data() as u32)
+        } else {
+            Ident::from_raw(0)
+        }
     }
 
-    /// Get the index of this symbol in the symbol table.
-    ///
-    /// # Returns
-    /// Some(index) if the symbol is interned, None if it's ident-only.
     pub fn index(&self) -> Option<usize> {
-        let unpacked = self.unpack();
-        if unpacked.is_ident_only() {
+        if self.semantics() == SymbolSemantics::Unresolved {
             None
         } else {
-            Some(unpacked.index as usize)
+            Some(self.data())
+        }
+    }
+
+    pub fn data(&self) -> usize {
+        self.0 >> SYMBOL_SEMANTICS_BITS
+    }
+
+    pub fn semantics(&self) -> SymbolSemantics {
+        match self.0 & SYMBOL_SEMANTICS_MASK {
+            0 => SymbolSemantics::Global,
+            1 => SymbolSemantics::Argument,
+            2 => SymbolSemantics::Lexical,
+            3 => SymbolSemantics::Unresolved,
+            _ => unreachable!(),
         }
     }
 
     /// Return true if this symbol has a fixed symbol-table index.
     pub fn is_indexed(&self) -> bool {
         self.index().is_some()
-    }
-
-    /// Return true if this symbol only carries its interned string identifier.
-    pub fn is_ident_only(&self) -> bool {
-        self.index().is_none()
-    }
-}
-
-// =============================================================================
-// UnpackedLispSymbol Implementation
-// =============================================================================
-
-impl UnpackedLispSymbol {
-    /// Create a new unpacked symbol with index and identifier.
-    fn new(index: usize, ident: Ident) -> Self {
-        Self {
-            index: index as u32,
-            ident,
-        }
-    }
-
-    /// Create an ident-only unpacked symbol.
-    fn new_ident(ident: Ident) -> Self {
-        Self {
-            index: IDENT_ONLY_INDEX,
-            ident,
-        }
-    }
-
-    /// Create from raw u64 representation.
-    ///
-    /// The format is: [32-bit index][32-bit ident]
-    pub fn from_raw_unpacked(value: u64) -> UnpackedLispSymbol {
-        let index = (value >> 32) as u32;
-        let ident = Ident((value & 0xFFFFFFFF) as u32);
-        UnpackedLispSymbol { index, ident }
-    }
-
-    /// Convert to raw u64 representation.
-    ///
-    /// The format is: [32-bit index][32-bit ident]
-    pub fn to_raw_packed(&self) -> u64 {
-        (self.index as u64) << 32 | (self.ident.0 as u64)
-    }
-
-    /// Check if this symbol is ident-only (not interned).
-    ///
-    /// # Returns
-    /// true if the symbol has no fixed index.
-    pub fn is_ident_only(&self) -> bool {
-        self.index == IDENT_ONLY_INDEX
     }
 }
 
@@ -292,12 +232,11 @@ impl SymbolMap {
         match map.entry(ident) {
             indexmap::map::Entry::Occupied(occupied_entry) => {
                 let index = occupied_entry.index();
-                LispSymbol::from(UnpackedLispSymbol::new(index, ident))
+                LispSymbol::from(Symbol::new_global(index))
             }
             indexmap::map::Entry::Vacant(vacant_entry) => {
                 let index = vacant_entry.index();
-                let unpacked = UnpackedLispSymbol::new(index, ident);
-                let symbol = Symbol::from(unpacked);
+                let symbol = Symbol::new_global(index);
                 vacant_entry.insert(SymbolCell::new(symbol, special));
                 LispSymbol(symbol)
             }
@@ -312,9 +251,7 @@ impl SymbolMap {
     /// # Returns
     /// Some(Symbol) if found, None otherwise.
     pub fn get(&self, ident: Ident) -> Option<Symbol> {
-        self.map
-            .get_index_of(&ident)
-            .map(|index| Symbol::new(index, ident))
+        self.map.get_index_of(&ident).map(Symbol::new_global)
     }
 
     /// Get a symbol cell and apply a function to it.
@@ -394,14 +331,14 @@ impl SymbolMap {
                 let special = symbol.name().starts_with(':');
                 match self.map.entry(ident) {
                     indexmap::map::Entry::Occupied(mut occupied_entry) => {
-                        let symbol = Symbol::new(occupied_entry.index(), ident);
+                        let symbol = Symbol::new_global(occupied_entry.index());
                         let cell = occupied_entry.get_mut();
                         cell.name = symbol;
                         write_object_slot(src, &mut cell.value, value);
                         symbol
                     }
                     indexmap::map::Entry::Vacant(vacant_entry) => {
-                        let symbol = Symbol::new(vacant_entry.index(), ident);
+                        let symbol = Symbol::new_global(vacant_entry.index());
                         let cell = vacant_entry.insert(SymbolCell::new(symbol, special));
                         write_object_slot(src, &mut cell.value, value);
                         symbol
@@ -428,14 +365,14 @@ impl SymbolMap {
                 let special = symbol.name().starts_with(':');
                 match self.map.entry(ident) {
                     indexmap::map::Entry::Occupied(mut occupied_entry) => {
-                        let symbol = Symbol::new(occupied_entry.index(), ident);
+                        let symbol = Symbol::new_global(occupied_entry.index());
                         let cell = occupied_entry.get_mut();
                         cell.name = symbol;
                         write_object_slot(src, &mut cell.func, func);
                         symbol
                     }
                     indexmap::map::Entry::Vacant(vacant_entry) => {
-                        let symbol = Symbol::new(vacant_entry.index(), ident);
+                        let symbol = Symbol::new_global(vacant_entry.index());
                         let cell = vacant_entry.insert(SymbolCell::new(symbol, special));
                         write_object_slot(src, &mut cell.func, func);
                         symbol
@@ -484,15 +421,7 @@ impl SymbolCell {
 impl Tag for LispSymbol {
     fn tag(self) -> Object {
         let symbol = self.0;
-        let raw = if symbol.is_ident_only() {
-            ((symbol.ident().0 as u64) << SYMBOL_PAYLOAD_SHIFT) | IDENT_ONLY_SYMBOL_TAG
-        } else {
-            assert!(
-                symbol.0 <= SYMBOL_PAYLOAD_MASK,
-                "indexed symbol payload exceeds immediate symbol encoding"
-            );
-            (symbol.0 << SYMBOL_PAYLOAD_SHIFT) | INDEXED_SYMBOL_TAG
-        };
+        let raw = ((symbol.0 as u64) << SYMBOL_TAG_BITS) | SYMBOL_TAG;
         Object::from_raw(raw)
     }
 }
@@ -500,14 +429,8 @@ impl Tag for LispSymbol {
 impl Untag for LispSymbol {
     fn untag(object: Object) -> Result<Self, TaggedPtrError> {
         if object.get_tag() == crate::gc::GcTag::SYMBOL {
-            let payload = object.raw() >> SYMBOL_PAYLOAD_SHIFT;
-            match object.raw() & SYMBOL_TAG_MASK {
-                INDEXED_SYMBOL_TAG => Ok(Self(Symbol(payload))),
-                IDENT_ONLY_SYMBOL_TAG => {
-                    Ok(Self(Symbol::new_ident(Ident::from_raw(payload as u32))))
-                }
-                _ => Err(TaggedPtrError::TypeMisMatch),
-            }
+            let payload = object.raw() >> SYMBOL_TAG_BITS;
+            Ok(Self(Symbol(payload as usize)))
         } else {
             Err(TaggedPtrError::TypeMisMatch)
         }
@@ -546,53 +469,35 @@ impl From<Symbol> for LispSymbol {
     }
 }
 
-impl From<Symbol> for UnpackedLispSymbol {
-    fn from(value: Symbol) -> Self {
-        Self::from_raw_unpacked(value.0)
-    }
-}
-
-impl From<UnpackedLispSymbol> for Symbol {
-    fn from(value: UnpackedLispSymbol) -> Self {
-        Self(value.to_raw_packed())
-    }
-}
-
 impl From<&str> for LispSymbol {
     fn from(data: &str) -> Self {
         Self(Symbol::from(data))
     }
 }
 
-impl From<UnpackedLispSymbol> for LispSymbol {
-    fn from(data: UnpackedLispSymbol) -> Self {
-        Self::from(Symbol::from(data))
-    }
-}
-
 impl From<Ident> for Symbol {
     fn from(ident: Ident) -> Self {
-        Symbol::new_ident(ident)
+        Symbol::new(ident.0 as usize, SymbolSemantics::Unresolved)
     }
 }
 
 impl From<&Ident> for Symbol {
     fn from(ident: &Ident) -> Self {
-        Symbol::new_ident(*ident)
+        Symbol::new(ident.0 as usize, SymbolSemantics::Unresolved)
     }
 }
 
 impl From<&str> for Symbol {
     fn from(value: &str) -> Self {
         let ident = Ident::from(value);
-        Symbol::new_ident(ident)
+        Symbol::from(ident)
     }
 }
 
 impl From<String> for Symbol {
     fn from(value: String) -> Self {
         let ident = Ident::from(value);
-        Symbol::new_ident(ident)
+        Symbol::from(ident)
     }
 }
 
@@ -605,6 +510,7 @@ impl std::fmt::Debug for Symbol {
         f.debug_struct("Symbol")
             .field("name", &self.name())
             .field("index", &self.index())
+            .field("semantics", &self.semantics())
             .finish()
     }
 }
@@ -628,13 +534,18 @@ impl Default for SymbolMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::error::RuntimeError;
+
+    fn raw_symbol_tag(object: &Object) -> u64 {
+        object.raw() & crate::gc::GcTag::MASK as u64
+    }
 
     #[test]
     fn test_symbol_creation() {
         let sym = Symbol::from("test");
         assert_eq!(sym.name(), "test");
         assert!(sym.index().is_none()); // Not interned yet
-        assert!(sym.is_ident_only());
+        assert_eq!(sym.semantics(), SymbolSemantics::Unresolved);
     }
 
     #[test]
@@ -645,7 +556,7 @@ mod tests {
 
         // Should be the same symbol
         assert_eq!(sym1.0, sym2.0);
-        assert_eq!(sym1.0.name(), "test");
+        assert_eq!(sym1.0.name(), "<indexed-symbol>");
         assert!(sym1.0.is_indexed());
     }
 
@@ -658,25 +569,17 @@ mod tests {
     }
 
     #[test]
-    fn test_symbol_packing() {
+    fn test_unresolved_symbol_layout() {
         let ident = Ident::from("test");
-        let unpacked = UnpackedLispSymbol::new(42, ident);
-        let packed = unpacked.to_raw_packed();
-        let unpacked2 = UnpackedLispSymbol::from_raw_unpacked(packed);
+        let symbol = Symbol::from(ident);
+        let raw = LispSymbol(symbol).tag();
+        let restored = LispSymbol::untag(raw.clone()).unwrap().0;
 
-        assert_eq!(unpacked.index, unpacked2.index);
-        assert_eq!(unpacked.ident, unpacked2.ident);
-    }
-
-    #[test]
-    fn test_ident_only_symbol() {
-        let ident = Ident::from("test");
-        let unpacked = UnpackedLispSymbol::new_ident(ident);
-        assert!(unpacked.is_ident_only());
-
-        let symbol = Symbol::from(unpacked);
-        assert!(symbol.index().is_none());
-        assert!(symbol.is_ident_only());
+        assert_eq!(raw_symbol_tag(&raw), SYMBOL_TAG);
+        assert_eq!(symbol.data(), ident.0 as usize);
+        assert_eq!(symbol.semantics(), SymbolSemantics::Unresolved);
+        assert_eq!(restored, symbol);
+        assert_eq!(restored.ident(), ident);
     }
 
     #[test]
@@ -690,51 +593,32 @@ mod tests {
     }
 
     #[test]
-    fn test_ident_only_symbol_tag() {
-        let sym = Symbol::from("test");
-        let lisp_sym = LispSymbol(sym);
+    fn test_symbol_layout_round_trip_all_semantics() {
+        for semantics in [
+            SymbolSemantics::Global,
+            SymbolSemantics::Argument,
+            SymbolSemantics::Lexical,
+            SymbolSemantics::Unresolved,
+        ] {
+            let symbol = Symbol::new(42, semantics);
+            let raw = LispSymbol(symbol).tag();
+            let restored = LispSymbol::untag(raw.clone()).unwrap().0;
 
-        let raw = lisp_sym.tag();
-        let raw_tag = raw.raw() & SYMBOL_TAG_MASK;
-        let logical_tag = raw.get_tag();
-        let restored = LispSymbol::untag(raw).unwrap();
-
-        assert_eq!(raw_tag, IDENT_ONLY_SYMBOL_TAG);
-        assert_eq!(logical_tag, crate::gc::GcTag::SYMBOL);
-        assert_eq!(lisp_sym.0.name(), restored.0.name());
-        assert!(restored.0.is_ident_only());
+            assert_eq!(raw_symbol_tag(&raw), SYMBOL_TAG);
+            assert_eq!(raw.raw() >> SYMBOL_TAG_BITS, symbol.0 as u64);
+            assert_eq!(restored, symbol);
+            assert_eq!(restored.data(), 42);
+            assert_eq!(restored.semantics(), semantics);
+        }
     }
 
     #[test]
-    fn test_indexed_symbol_tag() {
-        let ident = Ident::from("test");
-        let sym = Symbol::new(42, ident);
-        let lisp_sym = LispSymbol(sym);
+    fn test_unresolved_lookup_failure_is_unbound_symbol() {
+        let map = SymbolMap::default();
+        let symbol = Symbol::from("missing");
+        let err = map.get_symbol_cell_with(symbol, |_| Ok(())).unwrap_err();
 
-        let raw = lisp_sym.tag();
-        let raw_tag = raw.raw() & SYMBOL_TAG_MASK;
-        let logical_tag = raw.get_tag();
-        let restored = LispSymbol::untag(raw).unwrap();
-
-        assert_eq!(raw_tag, INDEXED_SYMBOL_TAG);
-        assert_eq!(logical_tag, crate::gc::GcTag::SYMBOL);
-        assert_eq!(restored.0, sym);
-        assert!(restored.0.is_indexed());
-    }
-
-    #[test]
-    fn test_indexed_symbol_with_odd_payload_stays_indexed() {
-        let sym = Symbol::new(3, Ident::from_raw(1));
-
-        let raw = LispSymbol(sym).tag();
-        let raw_tag = raw.raw() & SYMBOL_TAG_MASK;
-        let restored = LispSymbol::untag(raw).unwrap();
-
-        assert_eq!(sym.0 & 1, 1);
-        assert_eq!(raw_tag, INDEXED_SYMBOL_TAG);
-        assert_eq!(restored.0.index(), Some(3));
-        assert_eq!(restored.0.ident().0, 1);
-        assert!(restored.0.is_indexed());
+        assert!(matches!(err, RuntimeError::UnboundSymbol { symbol: s } if s == symbol));
     }
 
     #[test]

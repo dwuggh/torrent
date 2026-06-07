@@ -6,10 +6,12 @@ use crate::core::{
     error::{RuntimeError, RuntimeResult},
     object::{LispObject, ObjectRef},
     parser::{
+        closure_conversion::convert_closures,
         expr::{Call, Expr, ExprType, SpecialForm, Var},
         scope::Scope,
         token::Token,
     },
+    symbol::SymbolSemantics,
 };
 use chumsky::{
     Parser,
@@ -19,7 +21,9 @@ use chumsky::{
 /// the main function
 pub fn expand_and_resolve_everything(expr: &Expr, env: &Environment) -> RuntimeResult<()> {
     let scope = Scope::Global(env);
-    expand_and_resolve_everything_inner(expr, &scope, env)
+    expand_and_resolve_everything_inner(expr, &scope, env)?;
+    convert_closures(expr, env);
+    Ok(())
 }
 
 fn expand_and_resolve_everything_inner(
@@ -209,6 +213,7 @@ pub fn try_expand_macro_call(
 ) -> RuntimeResult<Option<ExprType>> {
     let symbol = match resolved_var {
         Var::Global(symbol) => symbol,
+        Var::Resolved(symbol) if symbol.semantics() == SymbolSemantics::Global => symbol,
         _ => return Ok(None), // Only global symbols can be macros
     };
 

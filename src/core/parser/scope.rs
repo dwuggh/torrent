@@ -4,6 +4,20 @@ use crate::core::env::Environment;
 use crate::core::ident::Ident;
 use crate::core::parser::expr::{Arg, Args, Bindings, Captures, Var};
 
+fn push_capture_once(captures: &Captures, var: Var) -> bool {
+    let ident = Ident::from(var);
+    let mut captures = captures.borrow_mut();
+    if captures
+        .iter()
+        .any(|captured| Ident::from(*captured) == ident)
+    {
+        false
+    } else {
+        captures.push(var);
+        true
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Scope<'a> {
     Global(&'a Environment),
@@ -46,8 +60,14 @@ impl<'a> Scope<'a> {
                 parent,
             } => {
                 // Check if this is a function argument
-                if args.contains(ident) {
-                    // Function arguments are directly accessible, no capture needed
+                if let Some(arg) = args.find(ident) {
+                    if let Some(captures) = current_captures {
+                        if push_capture_once(&captures, Var::Argument(ident)) {
+                            arg.captured.update(|c| c + 1);
+                        }
+                        return Var::Captured(ident);
+                    }
+                    arg.captured.update(|c| if c >= 1 { c + 1 } else { c });
                     return Var::Argument(ident);
                 }
 
@@ -92,8 +112,9 @@ impl<'a> Scope<'a> {
                     if arg.ident == ident {
                         if let Some(captures) = current_captures {
                             // If we're in a function that needs to capture, add to captures
-                            captures.borrow_mut().push(Var::Local(ident.into()));
-                            arg.captured.update(|c| c + 1);
+                            if push_capture_once(&captures, Var::Local(ident)) {
+                                arg.captured.update(|c| c + 1);
+                            }
                             return Var::Captured(ident);
                         } else {
                             // if it is captured before, then we must have a shared state here
@@ -115,14 +136,17 @@ impl<'a> Scope<'a> {
 }
 
 impl Args {
+    fn find(&self, ident: Ident) -> Option<&Arg> {
+        let target = Arg::new_uncap(ident);
+        self.normal
+            .iter()
+            .chain(self.optional.as_deref().unwrap_or(&[]).iter())
+            .chain(self.rest.as_ref())
+            .find(|arg| **arg == target)
+    }
+
     fn contains(&self, ident: Ident) -> bool {
-        let arg = Arg::new_uncap(ident);
-        self.normal.contains(&arg)
-            || self
-                .optional
-                .as_ref()
-                .is_some_and(|op_args| op_args.contains(&arg))
-            || self.rest.as_ref().is_some_and(|rest| rest.ident == ident)
+        self.find(ident).is_some()
     }
 }
 

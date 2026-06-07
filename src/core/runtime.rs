@@ -1,19 +1,16 @@
-use std::ptr::NonNull;
-
 use super::env::Environment;
 use crate::{
     core::{
         cons::LispCons,
         env::FuncCellType,
         error::{RuntimeError, RuntimeResult},
-        function::{Function, FunctionType},
-        ident::Ident,
+        function::Function,
+        indirect::Indirect,
         number::LispInteger,
-        object::{Object, ObjectRef, nil, tru, write_object_slot},
+        object::{Object, ObjectRef, nil, tru},
         symbol::{LispSymbol, Symbol},
         tag::Tag,
     },
-    gc::HeapObject,
     runtime_bail,
 };
 type Result<T> = RuntimeResult<T>;
@@ -120,31 +117,50 @@ fn defvar(name: i64, len: usize, value: Object, env: &Environment) -> Result<Obj
 }
 
 #[internal_fn]
-fn store_captured(ident: Ident, object: Object, func: &mut Function) {
-    tracing::debug!("calling store_captured");
-    let src = unsafe { Function::object_ref_from_data(NonNull::from(&mut *func)) };
-    let FunctionType::Lambda(func) = func.get_func_type_mut() else {
-        return;
-    };
-    if let Some(slot) = func.captures.get_mut(&ident) {
-        write_object_slot(src, slot, object);
-    } else {
-        func.captures.insert(ident, object);
-    }
+fn create_indirect_object(object: Object) -> Object {
+    Indirect::new_object(object)
 }
 
 #[internal_fn]
-fn load_captured(ident: Ident, func: &mut Function) -> Result<Object> {
-    tracing::debug!("calling load_captured");
-    let Some(closure) = func.get_func_type_mut().as_closure_mut() else {
-        return Err(RuntimeError::internal_error("wrong type of function"));
-    };
-    if let Some(v) = closure.captures.get(&ident) {
-        // HACK we don't want to clone here every time the captured value is loaded
-        // TODO maybe just return Result<i64>, so we will not need this hack
-        return Ok(Object(v.0));
+fn load_indirect(object: Object) -> Result<Object> {
+    if !Indirect::is_object(object.clone()) {
+        return Err(RuntimeError::internal_error(
+            "object is not an indirect cell",
+        ));
     }
-    runtime_bail!(UnboundSymbol, symbol: ident.into())
+    Ok(unsafe { Indirect::from_object(object) }.load())
+}
+
+#[internal_fn]
+fn store_indirect(object: Object, value: Object) -> Result<Object> {
+    if !Indirect::is_object(object.clone()) {
+        return Err(RuntimeError::internal_error(
+            "object is not an indirect cell",
+        ));
+    }
+    unsafe { Indirect::from_object_mut(object) }.store(value.clone());
+    Ok(value)
+}
+
+#[internal_fn]
+fn store_lexical(index: usize, object: Object, func: &mut Function) -> Result<Object> {
+    tracing::debug!("calling store_lexical");
+    func.store_lexical(index, object.clone())?;
+    Ok(object)
+}
+
+#[internal_fn]
+fn load_lexical(index: usize, func: &Function) -> Result<Object> {
+    tracing::debug!("calling load_lexical");
+    func.load_lexical(index)
+}
+
+#[internal_fn]
+fn get_lexical_bindings(func: &Object) -> Result<i64> {
+    match func.as_ref() {
+        ObjectRef::Function(func) => Ok(func.lexical_ptr() as i64),
+        _ => runtime_bail!(WrongType, expected: "function", actual: func.get_tag()),
+    }
 }
 
 #[internal_fn]

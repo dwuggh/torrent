@@ -9,11 +9,13 @@ use mmtk::{
 
 use self::thread::{current_thread, AllocFastPath, THREAD_MANAGER};
 
+mod types;
+pub use types::*;
+
 mod active_plan;
 mod collection;
 mod lab;
 mod object_model;
-mod object;
 mod reference_glue;
 mod scanning;
 mod slot;
@@ -127,6 +129,19 @@ pub fn object_reference_write_pre(
     mmtk::memory_manager::object_reference_write_pre(thread.mutator(), src, slot, target);
 }
 
+/// Run MMTk's post-write barrier for a tagged object slot.
+#[inline(always)]
+pub fn object_reference_write_post(
+    src: ObjectReference,
+    slot: TaggedPtrSlot,
+    target: Option<ObjectReference>,
+) {
+    // we don't need post write barrier currently; it is `unimplemented!()` inside mmtk
+    // for GC plans that don't use it.
+    // let thread = current_thread();
+    // mmtk::memory_manager::object_reference_write_post(thread.mutator(), src, slot, target);
+}
+
 /// Run the pre-write barrier for a raw slot address.
 ///
 /// This helper is used by runtime heap setters: it wraps the address as a
@@ -137,6 +152,14 @@ pub fn object_slot_write_pre(src: ObjectReference, slot_addr: Address) {
     let slot = TaggedPtrSlot::from_address(slot_addr);
     let old_target = slot.load();
     object_reference_write_pre(src, slot, old_target);
+}
+
+/// Run the post-write barrier for a raw slot address.
+#[inline(always)]
+pub fn object_slot_write_post(src: ObjectReference, slot_addr: Address) {
+    let slot = TaggedPtrSlot::from_address(slot_addr);
+    let new_target = slot.load();
+    object_reference_write_post(src, slot, new_target);
 }
 
 /// Allocate an object by logical metadata tag and return its object-reference address.
@@ -176,7 +199,6 @@ pub fn destroy_mutator() {
 }
 
 pub use mmtk;
-pub use object::*;
 pub use scanning::{set_stackmap_provider, StackMapProvider, StackRootVisitor};
 pub use slot::TaggedPtrSlot;
 pub use vm::MM;
