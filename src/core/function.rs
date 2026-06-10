@@ -1,4 +1,5 @@
 use crate::core::error::{RuntimeError, RuntimeResult};
+use smallvec::SmallVec;
 use std::cell::UnsafeCell;
 
 use crate::core::ident::Ident;
@@ -247,8 +248,20 @@ impl Function {
         (is_valid, total_args, use_trampoline)
     }
 
-    /// Run the function with given arguments
     pub fn run(&self, args: &[Object], env: &Environment) -> RuntimeResult<Object> {
+        if matches!(&self.func_type, FunctionType::Lambda(_)) {
+            let thread = crate::gc::current_thread();
+            let mut frame = crate::gc::NativeRootFrame::<8>::new(SmallVec::from_slice(args));
+            let _guard = unsafe { crate::gc::push_native_root_frame(&thread, &mut frame) };
+            return self.run_unrooted(frame.slots.as_slice(), env);
+        }
+
+        self.run_unrooted(args, env)
+    }
+
+    /// Run the function with given arguments after the caller has handled any
+    /// root publication required by the current Rust/JIT boundary.
+    fn run_unrooted(&self, args: &[Object], env: &Environment) -> RuntimeResult<Object> {
         let func_ptr = self
             .get_func_ptr()
             .ok_or(RuntimeError::internal_error("no function pointer"))?;

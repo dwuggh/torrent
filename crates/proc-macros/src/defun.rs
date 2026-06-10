@@ -6,23 +6,22 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::function::{
-    Arg, ArgKind, Function, RetKind, calculate_signature, construct_return, construct_return_nodrop,
+    calculate_signature, construct_return, construct_return_nodrop, Arg, ArgKind, Function,
+    RetKind,
 };
 
 pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
+    let args = function.args;
     let body = function.body;
     let subr = function.name;
     let subr_name = subr.to_string();
     let lisp_name = spec.name.unwrap_or_else(|| map_function_name(&subr_name));
     let func_name = format_ident!("__wrapper_fn_{}", &subr_name);
-    let rust_wrapper_name = format_ident!("__rust_wrapper_{}", &subr_name);
-
-    let args = function.args;
 
     let (use_trampoline, arg_conversion, arg_finish) = get_args(&args);
 
     // Generate the extern "C" function signature
-    let (c_params, c_param_idents) = if !use_trampoline {
+    let (c_params, _c_param_idents) = if !use_trampoline {
         get_direct_c_signature(&args)
     } else {
         (
@@ -50,9 +49,6 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let nil = quote! {
         crate::core::object::NIL
     };
-
-    // let ret_is_unit = matches!(function.ret_kind, RetKind::Unit);
-    let wrapper_ret_ty = quote! { ::std::result::Result<i64, &'static str> };
 
     // let forget_args = forget_args(&args);
 
@@ -120,7 +116,33 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         #[automatically_derived]
         #[doc(hidden)]
         unsafe extern "C" fn #func_name(#(#c_params),*) -> i64 {
-            match #rust_wrapper_name(#(#c_param_idents),*) {
+            macro_rules! __unwrap_or_nil {
+                ($expr:expr) => {
+                    match $expr {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::error!("error: {e:?}");
+                            return #nil as i64;
+                        }
+                    }
+                };
+            }
+
+            if cfg!(debug_assertions) {
+                tracing::trace!("[DEBUG] Calling defun function: {}", #lisp_name);
+            }
+            #(#arg_conversion)*
+            let result = #subr(#(#call_args),*);
+            if cfg!(debug_assertions) {
+                tracing::trace!("[DEBUG] Rust function {} returned", stringify!(#subr));
+            }
+
+            #(#arg_finish)*
+
+            let __wrapper_result: ::std::result::Result<i64, &'static str> = {
+                #wrapper_result
+            };
+            match __wrapper_result {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::error!("error: {e:?}");
@@ -154,26 +176,6 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     quote! {
 
         #inventory
-
-        #[automatically_derived]
-        #[doc(hidden)]
-        #[inline(always)]
-        unsafe fn #rust_wrapper_name(
-            #(#c_params),*
-        ) -> #wrapper_ret_ty {
-            if cfg!(debug_assertions) {
-                tracing::trace!("[DEBUG] Calling defun function: {}", #lisp_name);
-            }
-            #(#arg_conversion)*
-            let result = #subr(#(#call_args),*);
-            if cfg!(debug_assertions) {
-                tracing::trace!("[DEBUG] Rust function {} returned", stringify!(#subr));
-            }
-
-            #(#arg_finish)*
-
-            #wrapper_result
-        }
 
         #extern_fn
 
@@ -259,6 +261,7 @@ fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
     let use_trampoline = rest || { normal + optional + (rest as u8 * 2) > 8 };
 
     let object = quote! { crate::core::object::Object };
+    let object_slot = quote! { crate::core::object::ObjectSlot };
     let nil = quote! {
         crate::core::object::NIL
     };
@@ -274,7 +277,7 @@ fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
 
     let env_init = quote! {
         let env = env as *const crate::core::env::Environment;
-        let env = env.as_ref().ok_or("failed to convert env")?;
+        let env = __unwrap_or_nil!(env.as_ref().ok_or("failed to convert env"));
     };
     init_args.push(env_init);
 
@@ -323,6 +326,17 @@ fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
                 finish_args.push(post);
                 init_args.push(init);
             }
+            ArgKind::ObjectSlot => {
+                // The extern ABI still passes a tagged word. The wrapper only
+                // gives Rust code interior mutability; safepoints spill live
+                // objects into NativeRootFrame separately.
+                let init = quote! {
+                    #load_arg
+                    let #ident = #object_slot::new(#object(arg_val as u64));
+                };
+                init_args.push(init);
+                finish_args.push(quote! {});
+            }
             ArgKind::ObjectRef(ty) => {
                 let mut_val = if arg.info.is_mut {
                     quote! {mut}
@@ -333,7 +347,7 @@ fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
                     #load_arg
                     let #tmp = #object(arg_val as u64);
                     env.stack_map.push(&#tmp);
-                    let #ident: &#mut_val #ty = (&#tmp).try_into()?;
+                    let #ident: &#mut_val #ty = __unwrap_or_nil!((&#tmp).try_into());
                 };
                 init_args.push(init);
                 let post = quote! {
@@ -348,14 +362,14 @@ fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
                         quote! {
                             #load_arg
                             let #tmp = #object(arg_val as u64);
-                            let #ident: #ty = (&#tmp).try_into()?;
+                            let #ident: #ty = __unwrap_or_nil!((&#tmp).try_into());
                         }
                     }
                     "i64" | "u64" => {
                         quote! {
                             #load_arg
                             let #tmp = #object(arg_val as u64);
-                            let #ident: crate::core::number::Integer = (&#tmp).try_into()?;
+                            let #ident: crate::core::number::Integer = __unwrap_or_nil!((&#tmp).try_into());
                             let #ident: #ty = #ident as #ty;
                         }
                     }
@@ -363,7 +377,7 @@ fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
                         quote! {
                             #load_arg
                             let #tmp = #object(arg_val as u64);
-                            let #ident: crate::core::number::Float = (&#tmp).try_into()?;
+                            let #ident: crate::core::number::Float = __unwrap_or_nil!((&#tmp).try_into());
                             let #ident: #ty = #ident as #ty;
                         }
                     }
@@ -371,7 +385,7 @@ fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
                         quote! {
                             #load_arg
                             let #tmp = #object(arg_val as u64);
-                            let #ident: crate::core::number::Character = (&#tmp).try_into()?;
+                            let #ident: crate::core::number::Character = __unwrap_or_nil!((&#tmp).try_into());
                             let #ident: #ty = #ident as #ty;
                         }
                     }
@@ -441,24 +455,20 @@ fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
                                 let #tmp = (args_cnt > i).then(|| {
                                     #inner
                                 });
-                                let #ident = #tmp.as_ref().map(|val| {
-                                    let res: &#mut_val #ty = val.try_into();
-                                    res
-                                }).transpose()?;
+                                let #ident: Option<&#mut_val #ty> =
+                                    __unwrap_or_nil!(#tmp.as_ref().map(|val| val.try_into()).transpose());
                             }
                         } else {
                             quote! {
                                 let #tmp = if #ident == #nil {
                                     None
                                 } else {
-                                    let #tmp = #object(#ident as u64);
-                                    env.stack_map.push(&#tmp);
-                                    #tmp
+                                    let value = #object(#ident as u64);
+                                    env.stack_map.push(&value);
+                                    Some(value)
                                 };
-                                let #ident = #tmp.as_ref().map(|val| {
-                                    let res: &#mut_val #ty = val.try_into();
-                                    res
-                                }).transpose()?;
+                                let #ident: Option<&#mut_val #ty> =
+                                    __unwrap_or_nil!(#tmp.as_ref().map(|val| val.try_into()).transpose());
                             }
                         }
                     }

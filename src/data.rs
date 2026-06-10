@@ -56,6 +56,8 @@ mod tests {
 
     #[test]
     fn test_equal_lists() {
+        let _mutator = crate::gc::test_support::bind_nogc_mutator();
+
         let l1 = LispCons::from_iter(vec![LispInteger(1).tag(), LispInteger(2).tag()].into_iter()).unwrap().tag();
         let l2 = LispCons::from_iter(vec![LispInteger(1).tag(), LispInteger(2).tag()].into_iter()).unwrap().tag();
         assert!(matches!(equal(l1.clone(), l2.clone()).as_ref(), ObjectRef::True));

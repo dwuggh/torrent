@@ -36,8 +36,7 @@ impl mmtk::vm::ObjectModel<MM> for VMObjectModel {
         unsafe {
             std::ptr::copy(from_start.to_ptr::<u8>(), c.to_mut_ptr::<u8>(), bytes);
         }
-        let to =
-            unsafe { ObjectReference::from_raw_address_unchecked(c + OBJECT_REF_OFFSET) };
+        let to = unsafe { ObjectReference::from_raw_address_unchecked(c + OBJECT_REF_OFFSET) };
         copy_context.post_copy(to, bytes, semantics);
         to
     }

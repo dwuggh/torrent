@@ -4,22 +4,22 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::function::{
-    Arg, ArgKind, Function, RetKind, construct_objectref, construct_return, construct_return_nodrop,
+    construct_objectref, construct_return, construct_return_nodrop, Arg, ArgKind, Function,
+    RetKind,
 };
 
 pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
+    let args = function.args;
     let body = function.body;
     let subr = function.name;
     let subr_name = subr.to_string();
     let lisp_name = spec.name.unwrap_or_else(|| subr_name.clone());
     let func_name = format_ident!("__wrapper_fn_{}", &subr_name);
-    let rust_wrapper_name = format_ident!("__rust_wrapper_{}", &subr_name);
 
-    let args = function.args;
     let (arg_conversion, arg_finish) = get_args(&args);
 
     // Generate the extern "C" function signature and parameters
-    let (c_params, c_param_idents) = get_c_signature(&args);
+    let (c_params, _c_param_idents) = get_c_signature(&args);
 
     // Generate the actual function call
     let call_args = args.iter().map(|arg| {
@@ -30,9 +30,6 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let nil = quote! {
         crate::core::object::NIL
     };
-
-    // let ret_is_unit = matches!(function.ret_kind, RetKind::Unit);
-    let wrapper_ret_ty = quote! { ::std::result::Result<i64, &'static str> };
 
     let wrapper_result = match &function.ret_kind {
         RetKind::Unit => construct_return(
@@ -133,7 +130,33 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         #[automatically_derived]
         #[doc(hidden)]
         unsafe extern "C" fn #func_name(#(#c_params),*) -> i64 {
-            match #rust_wrapper_name(#(#c_param_idents),*) {
+            macro_rules! __unwrap_or_nil {
+                ($expr:expr) => {
+                    match $expr {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::error!("error: {e:?}");
+                            return #nil as i64;
+                        }
+                    }
+                };
+            }
+
+            if cfg!(debug_assertions) {
+                tracing::trace!("[DEBUG] Calling internal function: {}", #lisp_name);
+            }
+            #(#arg_conversion)*
+            let result = #subr(#(#call_args),*);
+            if cfg!(debug_assertions) {
+                tracing::trace!("[DEBUG] Internal Rust function {} returned", stringify!(#subr));
+            }
+
+            #(#arg_finish)*
+
+            let __wrapper_result: ::std::result::Result<i64, &'static str> = {
+                #wrapper_result
+            };
+            match __wrapper_result {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::error!("error: {e:?}");
@@ -149,25 +172,6 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     quote! {
 
         #inventory
-
-        #[automatically_derived]
-        #[doc(hidden)]
-        #[inline(always)]
-        unsafe fn #rust_wrapper_name(
-            #(#c_params),*
-        ) -> #wrapper_ret_ty {
-            if cfg!(debug_assertions) {
-                tracing::trace!("[DEBUG] Calling internal function: {}", #lisp_name);
-            }
-            #(#arg_conversion)*
-            let result = #subr(#(#call_args),*);
-            if cfg!(debug_assertions) {
-                tracing::trace!("[DEBUG] Internal Rust function {} returned", stringify!(#subr));
-            }
-
-            #(#arg_finish)*
-            #wrapper_result
-        }
 
         #extern_fn
 
@@ -210,6 +214,7 @@ fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
     let mut finish_args: Vec<TokenStream> = Vec::new();
 
     let object = quote! { crate::core::object::Object };
+    let object_slot = quote! { crate::core::object::ObjectSlot };
 
     // Convert each argument directly from i64 parameter
     for (i, arg) in args.iter().enumerate() {
@@ -219,7 +224,7 @@ fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
             ArgKind::Env => {
                 quote! {
                     let #ident = env as *const crate::core::env::Environment;
-                    let #ident = #ident.as_ref().ok_or("failed to convert env")?;
+                    let #ident = __unwrap_or_nil!(#ident.as_ref().ok_or("failed to convert env"));
                 }
             }
             ArgKind::Slice(inner_kind) => {
@@ -264,12 +269,20 @@ fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
                     }
                 }
             }
+            ArgKind::ObjectSlot => {
+                // Internal helpers use the same raw-word ABI as defuns. Build a
+                // local interior-mutable slot; safepoints spill live objects
+                // into NativeRootFrame separately.
+                quote! {
+                    let #ident = #object_slot::new(#object(#ident as u64));
+                }
+            }
             ArgKind::ObjectRef(ty) => construct_objectref(arg.info.is_mut, i, ident, ty),
             ArgKind::Primitive(ty) => {
                 if ty.to_string() == "Symbol" {
                     quote! {
                         let #tmp = #object(#ident as u64);
-                        let #ident: #ty = (&#tmp).try_into()?;
+                        let #ident: #ty = __unwrap_or_nil!((&#tmp).try_into());
                     }
                 } else {
                     quote! {

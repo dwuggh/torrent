@@ -39,6 +39,7 @@ scc = "3.0.6"
 # rapidhash = "4.1.0"
 rustc-hash = "2.1.1"
 logos = "0.15.1"
+smallvec = { version = "1.15.1", features = ["const_generics"] }
 
 [build-dependencies]
 syn = { workspace = true }

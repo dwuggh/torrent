@@ -3,9 +3,7 @@ use std::sync::OnceLock;
 use mmtk::util::{Address, VMMutatorThread};
 use mmtk::vm::Scanning;
 
-use super::{
-    metadata_for_object, mmtk_instance, vm::MM, TaggedPtrSlot, Visitor, VisitorImpl,
-};
+use super::{metadata_for_object, mmtk_instance, vm::MM, TaggedPtrSlot, Visitor, VisitorImpl};
 
 pub trait StackMapProvider: Send + Sync {
     /// Visit precise stack roots for the given mutator thread.

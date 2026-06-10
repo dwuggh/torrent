@@ -8,7 +8,9 @@ use cranelift_module::FuncId;
 use cranelift_module::Module;
 
 use crate::core::compiler::codegen::Codegen;
-use crate::core::compiler::stack_map::install_stack_map_provider;
+use crate::core::compiler::stack_map::{
+    declare_jit_runtime_imports, install_stack_map_provider, register_jit_runtime_symbols,
+};
 use crate::core::compiler::{BuiltinFnPlugin, InternalFnPlugin};
 use crate::core::env::Environment;
 use crate::core::function::LispFunction;
@@ -50,6 +52,7 @@ impl JIT {
         for func in inventory::iter::<InternalFnPlugin> {
             (func.decl_jit_sym)(&mut builder);
         }
+        register_jit_runtime_symbols(&mut builder);
 
         let mut module = JITModule::new(builder);
         let mut builtin_funcs = HashMap::new();
@@ -69,6 +72,8 @@ impl JIT {
             tracing::debug!("loading internal function {name:?}...");
             builtin_funcs.insert(name, id);
         }
+        declare_jit_runtime_imports(&mut module, &mut builtin_funcs)
+            .expect("failed to declare JIT runtime imports");
         Self {
             data_desc: DataDescription::new(),
             builtin_funcs,

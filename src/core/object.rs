@@ -1,4 +1,4 @@
-use std::ptr::NonNull;
+use std::{cell::Cell, ptr::NonNull};
 
 use crate::{
     core::{
@@ -7,7 +7,7 @@ use crate::{
         number::{Character, Float, Integer, LispCharacter, LispFloat, LispInteger},
         string::{LispStr, Str},
         symbol::{LispSymbol, Symbol, SymbolMap},
-        tag::{TAG_TRUE, Tag, Untag},
+        tag::{Tag, Untag, TAG_TRUE},
         vector::{LispVector, Vector},
     },
     gc::{self, HeapObject, Tagged, Trace},
@@ -19,12 +19,45 @@ pub const NIL: i64 = gc::GcTag::NIL as i64;
 pub const TRUE: i64 = TAG_TRUE as i64;
 
 #[repr(transparent)]
-#[derive(PartialEq, PartialOrd, Eq, Hash)]
+#[derive(PartialEq, PartialOrd, Eq, Hash, Copy)]
 pub struct Object(pub u64);
+
+/// One mutable Rust-side slot holding a raw Lisp object word.
+///
+/// `ObjectSlot` is only for interior mutability at Rust interop boundaries.
+/// Safepoints must spill values into a `NativeRootFrame`; the slot itself is
+/// not a GC root.
+#[repr(transparent)]
+#[derive(PartialEq, PartialOrd, Eq)]
+pub struct ObjectSlot(Cell<Object>);
+
+/// Typed slot for a GC pointer.
+///
+/// This mirrors `ObjectSlot` for typed heap references. The physical storage is
+/// still a single word, so it can be rooted through the same raw-slot machinery.
+#[repr(transparent)]
+pub struct GcSlot<T: HeapObject>(Cell<gc::Gc<T>>);
 
 impl Clone for Object {
     fn clone(&self) -> Self {
         Self(self.0)
+    }
+}
+
+impl ObjectSlot {
+    #[inline(always)]
+    pub fn new(value: Object) -> Self {
+        Self(Cell::new(value))
+    }
+
+    #[inline(always)]
+    pub fn get(&self) -> Object {
+        self.0.get()
+    }
+
+    #[inline(always)]
+    pub fn set(&self, value: Object) {
+        self.0.set(value);
     }
 }
 
@@ -94,10 +127,7 @@ impl Object {
     /// Return true if this word can hold an object reference.
     #[inline(always)]
     pub fn is_reference(&self) -> bool {
-        matches!(
-            self.primary_tag(),
-            gc::GcTag::SECONDARY | gc::GcTag::CONS
-        )
+        matches!(self.primary_tag(), gc::GcTag::SECONDARY | gc::GcTag::CONS)
     }
 
     /// Return true for immediate, non-reference values.
@@ -141,21 +171,13 @@ impl Object {
             gc::GcTag::NIL => LispObject::Nil,
             tag if tag == TRUE as u8 => LispObject::True,
             gc::GcTag::INT => LispObject::Int(LispInteger::untag(self).unwrap()),
-            Float::TAG => {
-                LispObject::Float(LispFloat::untag(self).unwrap())
-            }
+            Float::TAG => LispObject::Float(LispFloat::untag(self).unwrap()),
             gc::GcTag::CHAR => LispObject::Character(LispCharacter::untag(self).unwrap()),
-            Str::TAG => {
-                LispObject::Str(LispStr::untag(self).unwrap())
-            }
+            Str::TAG => LispObject::Str(LispStr::untag(self).unwrap()),
             gc::GcTag::SYMBOL => LispObject::Symbol(LispSymbol::untag(self).unwrap()),
-            Vector::TAG => {
-                LispObject::Vector(LispVector::untag(self).unwrap())
-            }
+            Vector::TAG => LispObject::Vector(LispVector::untag(self).unwrap()),
             gc::GcTag::CONS => LispObject::Cons(LispCons::untag(self).unwrap()),
-            Function::TAG => {
-                LispObject::Function(LispFunction::untag(self).unwrap())
-            }
+            Function::TAG => LispObject::Function(LispFunction::untag(self).unwrap()),
             _ => panic!("cannot untag internal object tag {}", self.get_tag()),
         }
     }
@@ -167,25 +189,17 @@ impl Object {
             gc::GcTag::INT => {
                 ObjectRef::Int(LispInteger::untag(Object::from_raw(self.0)).unwrap().0)
             }
-            Float::TAG => {
-                ObjectRef::Float(unsafe { self.heap_ref::<Float>() })
-            }
+            Float::TAG => ObjectRef::Float(unsafe { self.heap_ref::<Float>() }),
             gc::GcTag::CHAR => {
                 ObjectRef::Character(LispCharacter::untag(Object::from_raw(self.0)).unwrap().0)
             }
-            Str::TAG => {
-                ObjectRef::Str(unsafe { self.heap_ref::<Str>() })
-            }
+            Str::TAG => ObjectRef::Str(unsafe { self.heap_ref::<Str>() }),
             gc::GcTag::SYMBOL => {
                 ObjectRef::Symbol(LispSymbol::untag(Object::from_raw(self.0)).unwrap().0)
             }
-            Vector::TAG => {
-                ObjectRef::Vector(unsafe { self.heap_ref::<Vector>() })
-            }
+            Vector::TAG => ObjectRef::Vector(unsafe { self.heap_ref::<Vector>() }),
             gc::GcTag::CONS => ObjectRef::Cons(unsafe { self.heap_ref::<Cons>() }),
-            Function::TAG => {
-                ObjectRef::Function(unsafe { self.heap_ref::<Function>() })
-            }
+            Function::TAG => ObjectRef::Function(unsafe { self.heap_ref::<Function>() }),
             _ => ObjectRef::Unknown,
         }
     }
@@ -269,11 +283,7 @@ pub trait HeapSlotUpdate: HeapObject {
 impl<T: HeapObject> HeapSlotUpdate for T {}
 
 /// Store `value` into a tagged object slot after running MMTk's write barriers.
-pub fn write_object_slot(
-    src: gc::mmtk::util::ObjectReference,
-    slot: &mut Object,
-    value: Object,
-) {
+pub fn write_object_slot(src: gc::mmtk::util::ObjectReference, slot: &mut Object, value: Object) {
     let slot_addr = gc::mmtk::util::Address::from_ptr(slot as *mut Object);
     gc::object_slot_write_pre(src, slot_addr);
     *slot = value;
@@ -361,46 +371,16 @@ pub fn init_gc_types() {
 #[cfg(test)]
 mod tests {
     use crate::core::{
-        cons::{Cons, LispCons},
+        cons::LispCons,
         number::{Float, LispFloat, LispInteger},
         Tag,
     };
 
-    use super::{ObjectRef, gc};
-
-    /// Keeps the current thread bound to MMTk for the duration of an allocation test.
-    struct MutatorGuard;
-
-    impl Drop for MutatorGuard {
-        fn drop(&mut self) {
-            gc::destroy_mutator();
-        }
-    }
-
-    fn bind_nogc_mutator() -> MutatorGuard {
-        let mmtk = *gc::MMTK.get_or_init(|| {
-            let mut builder = gc::mmtk::MMTKBuilder::new_no_env_vars();
-            assert!(builder.set_option("plan", "NoGC"));
-            assert!(builder.set_option("threads", "1"));
-
-            // The root crate owns the global MMTk instance; this test chooses
-            // NoGC as the first concrete plan used by that instance.
-            let mmtk = Box::leak(gc::mmtk::memory_manager::mmtk_init::<gc::MM>(&builder));
-            gc::initialize_collection(mmtk);
-            mmtk
-        });
-
-        gc::bind_mutator(mmtk);
-        MutatorGuard
-    }
+    use super::{gc, ObjectRef};
 
     #[test]
     fn nogc_allocates_integer_float_and_cons() {
-        let _mutator = bind_nogc_mutator();
-
-        gc::register_headerless_metadata_tag(gc::GcTag::CONS);
-        gc::register_heap_object::<Float>();
-        gc::register_heap_object::<Cons>();
+        let _mutator = gc::test_support::bind_nogc_mutator();
 
         let integer = LispInteger(42).tag();
         assert_eq!(integer.get_tag(), gc::GcTag::INT);

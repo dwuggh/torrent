@@ -4,7 +4,7 @@ use crate::{
         cons::LispCons,
         env::FuncCellType,
         error::{RuntimeError, RuntimeResult},
-        function::Function,
+        function::{Function, FunctionType},
         indirect::Indirect,
         number::LispInteger,
         object::{Object, ObjectRef, nil, tru},
@@ -199,6 +199,24 @@ fn get_func_ptr(func: &Object, env: &Environment) -> Result<i64> {
         _ => runtime_bail!(WrongType, expected: "function", actual: func.get_tag()),
     }?;
     Ok(func as i64)
+}
+
+#[internal_fn]
+fn is_native_function(func: &Object, env: &Environment) -> Result<i64> {
+    let is_native = match func.as_ref() {
+        ObjectRef::Symbol(symbol) => {
+            let guard = env.load_symbol_guard(symbol, Some(FuncCellType::Function))?;
+            let obj = guard.as_ref();
+            let ObjectRef::Function(func) = obj.as_ref() else {
+                runtime_bail!(WrongType, expected: "function", actual: obj.get_tag());
+            };
+            matches!(&func.func_type, FunctionType::Subr(_))
+        }
+        ObjectRef::Function(func) => matches!(&func.func_type, FunctionType::Subr(_)),
+        _ => runtime_bail!(WrongType, expected: "function", actual: func.get_tag()),
+    };
+
+    Ok(is_native as i64)
 }
 
 #[internal_fn]

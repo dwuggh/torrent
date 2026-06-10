@@ -431,8 +431,13 @@ mod tests {
     use crate::core::object::{ObjectRef, nil};
     use crate::core::symbol::Symbol;
 
+    fn bind_test_mutator() -> crate::gc::test_support::MutatorGuard {
+        crate::gc::test_support::bind_nogc_mutator()
+    }
+
     #[test]
     fn test_cons_basic() {
+        let _mutator = bind_test_mutator();
         let car = LispInteger(42).tag();
         let cdr = nil();
         let pair = super::cons(car.clone(), cdr.clone());
@@ -455,6 +460,7 @@ mod tests {
 
     #[test]
     fn test_list_multiple() {
+        let _mutator = bind_test_mutator();
         let vals = vec![LispInteger(1).tag(), LispInteger(2).tag(), LispInteger(3).tag()];
         let lst = super::list(&vals);
         match lst.as_ref() {
@@ -476,9 +482,10 @@ mod tests {
 
     #[test]
     fn test_car_cdr() {
+        let _mutator = bind_test_mutator();
         let pair = super::cons(LispInteger(10).tag(), LispInteger(20).tag());
-        let car = super::car(pair.clone()).unwrap();
-        let cdr = super::cdr(pair.clone()).unwrap();
+        let car = super::car(pair).unwrap();
+        let cdr = super::cdr(pair).unwrap();
         let ObjectRef::Int(v1) = car.as_ref() else { panic!("car not int") };
         assert_eq!(v1, 10);
         let ObjectRef::Int(v2) = cdr.as_ref() else { panic!("cdr not int") };
@@ -491,6 +498,7 @@ mod tests {
 
     #[test]
     fn test_setcar_setcdr() {
+        let _mutator = bind_test_mutator();
         let mut cell = LispCons::new(LispInteger(1).tag(), LispInteger(2).tag());
         super::setcar(cell.0.as_mut(), LispInteger(3).tag());
         super::setcdr(cell.0.as_mut(), LispInteger(4).tag());
@@ -508,6 +516,7 @@ mod tests {
 
     #[test]
     fn test_predicates() {
+        let _mutator = bind_test_mutator();
         let lst = super::list(&[LispInteger(1).tag()]);
         assert!(matches!(super::consp(lst.clone()).as_ref(), ObjectRef::True));
         assert!(matches!(super::listp(lst.clone()).as_ref(), ObjectRef::True));
@@ -518,6 +527,7 @@ mod tests {
 
     #[test]
     fn test_length_nth_nthcdr() {
+        let _mutator = bind_test_mutator();
         let lst = super::list(&[LispInteger(1).tag(), LispInteger(2).tag(), LispInteger(3).tag()]);
         let len = super::length(lst.clone()).unwrap();
         let ObjectRef::Int(l) = len.as_ref() else { panic!("len not int") };
@@ -539,6 +549,7 @@ mod tests {
 
     #[test]
     fn test_append_reverse() {
+        let _mutator = bind_test_mutator();
         let a = super::list(&[LispInteger(1).tag(), LispInteger(2).tag()]);
         let b = super::list(&[LispInteger(3).tag(), LispInteger(4).tag()]);
         let app = super::append(a, b).unwrap();
@@ -568,6 +579,7 @@ mod tests {
 
     #[test]
     fn test_memq_assoc() {
+        let _mutator = bind_test_mutator();
         // memq
         let lst = super::list(&[LispInteger(1).tag(), LispInteger(2).tag(), LispInteger(3).tag()]);
         let m = super::memq(LispInteger(2).tag(), lst).unwrap();

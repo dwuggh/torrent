@@ -62,7 +62,7 @@ use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Environment {
     /// the obarray
     pub symbol_map: Gc<SymbolMap>,
@@ -70,6 +70,30 @@ pub struct Environment {
     pub spec_stack: Gc<SpecStack>,
 
     pub stack_map: StackMap,
+
+    /// Cached mutator pointer used by generated code for fast safepoint polls.
+    ///
+    /// The pointer comes from the thread manager/TLS-owned `Arc<MutatorThread>`.
+    /// JIT code treats this field as an opaque address and loads fields through
+    /// the offset constants on `MutatorThread`.
+    pub thread: *const crate::gc::MutatorThread,
+}
+
+impl Environment {
+    /// Offset consumed by generated code; keep this in sync with `Environment`.
+    pub const THREAD_OFFSET: usize = std::mem::offset_of!(Self, thread);
+}
+
+impl Default for Environment {
+    fn default() -> Self {
+        let thread = crate::gc::current_thread();
+        Self {
+            symbol_map: Gc::default(),
+            spec_stack: Gc::default(),
+            stack_map: StackMap::default(),
+            thread: std::sync::Arc::as_ptr(&thread),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

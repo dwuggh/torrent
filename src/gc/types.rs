@@ -269,6 +269,7 @@ impl GcHeader {
 /// `ptr` is the same address as a raw [`Object`] after clearing the low tag
 /// bits. It is also the MMTk [`ObjectReference`] address. It may be an interior
 /// pointer, so it must not be interpreted directly as `*mut T`.
+#[repr(transparent)]
 pub struct Gc<T: HeapObject> {
     /// Untagged Lisp object pointer / MMTk object-reference address.
     ptr: NonNull<()>,

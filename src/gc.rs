@@ -7,7 +7,8 @@ use mmtk::{
     AllocationSemantics, Mutator,
 };
 
-use self::thread::{current_thread, AllocFastPath, THREAD_MANAGER};
+pub use self::thread::{current_thread, MutatorThread};
+use self::thread::{AllocFastPath, THREAD_MANAGER};
 
 mod types;
 pub use types::*;
@@ -17,6 +18,7 @@ mod collection;
 mod lab;
 mod object_model;
 mod reference_glue;
+mod roots;
 mod scanning;
 mod slot;
 mod thread;
@@ -138,8 +140,6 @@ pub fn object_reference_write_post(
 ) {
     // we don't need post write barrier currently; it is `unimplemented!()` inside mmtk
     // for GC plans that don't use it.
-    // let thread = current_thread();
-    // mmtk::memory_manager::object_reference_write_post(thread.mutator(), src, slot, target);
 }
 
 /// Run the pre-write barrier for a raw slot address.
@@ -198,7 +198,63 @@ pub fn destroy_mutator() {
     mmtk::memory_manager::destroy_mutator(&mut mutator);
 }
 
+#[cfg(test)]
+pub mod test_support {
+    use std::sync::OnceLock;
+
+    use super::THREAD_MANAGER;
+
+    static GC_TYPES: OnceLock<()> = OnceLock::new();
+
+    /// Keeps the current test thread bound to MMTk while allocation-capable
+    /// parser/core tests are running.
+    pub struct MutatorGuard {
+        destroy_on_drop: bool,
+    }
+
+    impl Drop for MutatorGuard {
+        fn drop(&mut self) {
+            if self.destroy_on_drop {
+                super::destroy_mutator();
+            }
+        }
+    }
+
+    /// Initialize the process-wide NoGC test runtime and bind this test thread.
+    pub fn bind_nogc_mutator() -> MutatorGuard {
+        let mmtk = *super::MMTK.get_or_init(|| {
+            let mut builder = super::mmtk::MMTKBuilder::new_no_env_vars();
+            assert!(builder.set_option("plan", "NoGC"));
+            assert!(builder.set_option("threads", "1"));
+
+            let mmtk = Box::leak(super::mmtk::memory_manager::mmtk_init::<super::MM>(
+                &builder,
+            ));
+            super::initialize_collection(mmtk);
+            mmtk
+        });
+
+        GC_TYPES.get_or_init(crate::core::object::init_gc_types);
+
+        let thread = THREAD_MANAGER.add_or_get_current_thread();
+        if thread.guard_mutator().is_some() {
+            return MutatorGuard {
+                destroy_on_drop: false,
+            };
+        }
+
+        super::bind_mutator(mmtk);
+        MutatorGuard {
+            destroy_on_drop: true,
+        }
+    }
+}
+
 pub use mmtk;
+pub use roots::{
+    push_jit_root_frame, push_native_root_frame, scan_native_root_frame, scan_root_chain,
+    JitRootFrame, NativeRootFrame, NativeRootFrameHeader, RootFrameGuard, RootLink,
+};
 pub use scanning::{set_stackmap_provider, StackMapProvider, StackRootVisitor};
 pub use slot::TaggedPtrSlot;
 pub use vm::MM;

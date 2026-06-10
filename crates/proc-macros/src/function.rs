@@ -20,6 +20,12 @@ pub(crate) enum ArgKind {
     /// an Object. can be referenced, but should not be mut refed.
     /// don't accept LispObject for now, because the methods for object is convenient enough.
     Object,
+    /// A local slot holding one `Object` word.
+    ///
+    /// Lisp still passes the argument as a raw ABI word. The generated wrapper
+    /// builds an `ObjectSlot` for interior mutability; safepoints must spill
+    /// live values into a `NativeRootFrame`.
+    ObjectSlot,
     /// i64, f64, etc. This will behave differently between defun and internal_fn.
     /// This is converted to Number types in defun, and is loaded directly in internal_fn.
     Primitive(Ident),
@@ -205,6 +211,13 @@ fn is_object_name(ident: &str) -> bool {
     }
 }
 
+fn is_object_slot_name(ident: &str) -> bool {
+    match ident {
+        "ObjectSlot" => true,
+        _ => false,
+    }
+}
+
 // TODO move types to another crate so we can reuse function there
 fn is_object_ref_name(ident: &str) -> bool {
     match ident {
@@ -226,6 +239,8 @@ fn get_object_kind(type_path: &syn::TypePath) -> Option<ArgKind> {
     let ident = outer_type.ident.to_string();
     if is_object_name(&ident) {
         Some(ArgKind::Object)
+    } else if is_object_slot_name(&ident) {
+        Some(ArgKind::ObjectSlot)
     } else if is_object_ref_name(&ident) {
         Some(ArgKind::ObjectRef(outer_type.ident.to_owned()))
     } else if is_primitive_name(&ident) {
@@ -285,7 +300,7 @@ pub fn construct_objectref(is_mut: bool, cnt: usize, ident: &Ident, ty: &Ident) 
     let tmp = format_ident!("__arg_val_{}", cnt);
     quote! {
         let #tmp = #object(#ident as u64);
-        let #ident: &#mut_val #ty = (&#tmp).try_into()?;
+        let #ident: &#mut_val #ty = __unwrap_or_nil!((&#tmp).try_into());
     }
 }
 
@@ -308,7 +323,10 @@ pub fn calculate_signature(args: &[Arg]) -> (u8, u8, bool) {
             ArgKind::Env => {
                 break; // Slice must be last
             }
-            ArgKind::Object | ArgKind::ObjectRef(_) | ArgKind::Primitive(_) => {
+            ArgKind::Object
+            | ArgKind::ObjectSlot
+            | ArgKind::ObjectRef(_)
+            | ArgKind::Primitive(_) => {
                 normal += 1;
             }
             ArgKind::Option(_) => {

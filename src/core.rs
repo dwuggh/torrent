@@ -15,7 +15,6 @@ pub mod parser;
 pub mod runtime;
 pub mod string;
 pub mod symbol;
-pub mod symbol_map;
 pub mod vector;
 
 pub use tag::{Tag, TaggedPtrError, Untag};

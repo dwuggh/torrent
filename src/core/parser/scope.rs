@@ -156,10 +156,28 @@ mod tests {
     use crate::core::env::Environment;
     use crate::core::ident::Ident;
     use std::cell::RefCell;
+    use std::ops::Deref;
     use std::rc::Rc;
 
-    fn create_test_env() -> Environment {
-        Environment::default()
+    struct TestEnv {
+        env: Environment,
+        _mutator: crate::gc::test_support::MutatorGuard,
+    }
+
+    impl Deref for TestEnv {
+        type Target = Environment;
+
+        fn deref(&self) -> &Self::Target {
+            &self.env
+        }
+    }
+
+    fn create_test_env() -> TestEnv {
+        let mutator = crate::gc::test_support::bind_nogc_mutator();
+        TestEnv {
+            env: Environment::default(),
+            _mutator: mutator,
+        }
     }
 
     fn create_test_args(

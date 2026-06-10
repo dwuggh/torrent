@@ -496,6 +496,7 @@ mod tests {
     use logos::Logos;
 
     fn parse_src<'s>(src: &'s str) -> Result<Expr, Vec<Rich<'s, Token, Span>>> {
+        let _mutator = crate::gc::test_support::bind_nogc_mutator();
         let tokens = Token::lexer(src).spanned().map(|(tok, span)| match tok {
             Ok(tok) => (tok, span.into()),
             Err(_) => (Token::Error, span.into()),

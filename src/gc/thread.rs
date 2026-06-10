@@ -57,6 +57,12 @@ pub(crate) struct ThreadHeader {
 pub struct MutatorThread {
     pub header: ThreadHeader,
     pub block_requested: AtomicBool,
+    /// Head of the explicit root chain for this mutator.
+    ///
+    /// Only the owner mutator updates this field. GC workers read it only after
+    /// the mutator is parked at a safepoint, so the parking protocol supplies
+    /// the synchronization rather than this field being atomic.
+    pub root_head: Cell<usize>,
     /// JIT fast path for allocation.
     pub lab: Cell<LocalAllocationBuffer>,
     pub alloc_fastpath: AtomicU8,
@@ -106,6 +112,12 @@ thread_local! {
 }
 
 impl MutatorThread {
+    /// Offset used by JIT-generated safepoint polling code.
+    #[allow(dead_code)]
+    pub const BLOCK_REQUESTED_OFFSET: usize = std::mem::offset_of!(Self, block_requested);
+    /// Offset used by root-chain aware generated/runtime code.
+    #[allow(dead_code)]
+    pub const ROOT_HEAD_OFFSET: usize = std::mem::offset_of!(Self, root_head);
     #[allow(dead_code)]
     pub const LAB_OFFSET: usize = std::mem::offset_of!(Self, lab);
     #[allow(dead_code)]
@@ -125,6 +137,7 @@ impl MutatorThread {
                 id,
             },
             block_requested: AtomicBool::new(false),
+            root_head: Cell::new(0),
             lab: Cell::new(LocalAllocationBuffer::new()),
             alloc_fastpath: AtomicU8::new(AllocFastPath::None as u8),
             mutator: UnsafeCell::new(None),
@@ -186,12 +199,8 @@ impl MutatorThread {
     }
 
     fn alloc_default(&self, size: usize) -> Address {
-        self.mutator().alloc(
-            size,
-            8,
-            OBJECT_REF_OFFSET,
-            AllocationSemantics::Default,
-        )
+        self.mutator()
+            .alloc(size, 8, OBJECT_REF_OFFSET, AllocationSemantics::Default)
     }
 
     fn alloc_slow_default(&self, size: usize) -> Address {

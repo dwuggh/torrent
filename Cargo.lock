@@ -1592,6 +1592,7 @@ dependencies = [
  "rand",
  "rustc-hash",
  "scc",
+ "smallvec",
  "syn 2.0.117",
  "thiserror",
  "tokio",

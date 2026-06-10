@@ -242,11 +242,7 @@ impl<'a> Codegen<'a> {
 
         let mut codegen = Self::assemble(cgctx, builder, func, env, lexical, func_id, Vec::new());
 
-        let fp = codegen.builder.ins().get_frame_pointer(types::I64);
-        // let ra = codegen.builder.ins().get_return_address(types::I64);
-
-        // codegen.call_internal("sm_dbg", &[ra]);
-        codegen.call_internal("set_trampoline_start_fp", &[fp]);
+        codegen.emit_gc_poll();
 
         Ok(codegen)
     }
@@ -315,11 +311,7 @@ impl<'a> Codegen<'a> {
         let mut codegen =
             Self::assemble(cgctx, builder, func, env, lexical, func_id, capture_slots);
 
-        let fp = codegen.builder.ins().get_frame_pointer(types::I64);
-        let ra = codegen.builder.ins().get_return_address(types::I64);
-
-        codegen.call_internal("sm_dbg", &[ra]);
-        codegen.call_internal("gcroot_scan", &[fp]);
+        codegen.emit_gc_poll();
 
         if use_trampoline {
             let args_ptr = params[0];
@@ -377,7 +369,7 @@ impl<'a> Codegen<'a> {
         (this, collections)
     }
 
-    fn call_internal(&mut self, func_name: &str, args: &[Value]) -> &[Value] {
+    fn call_import_direct(&mut self, func_name: &str, args: &[Value]) -> &[Value] {
         tracing::debug!("calling function: {}", func_name);
         tracing::debug!("function args count: {}", args.len());
 
@@ -403,6 +395,77 @@ impl<'a> Codegen<'a> {
         );
 
         results
+    }
+
+    fn call_native_transition(&mut self, func_ptr: Value, args: &[Value]) -> &[Value] {
+        let stub_name = format!("jit_call_native_{}", args.len());
+        let thread = self.load_mutator_thread();
+        let mut stub_args = Vec::with_capacity(args.len() + 2);
+        stub_args.push(func_ptr);
+        stub_args.push(thread);
+        stub_args.extend_from_slice(args);
+        self.call_import_direct(&stub_name, &stub_args)
+    }
+
+    fn call_internal(&mut self, func_name: &str, args: &[Value]) -> &[Value] {
+        tracing::debug!("calling native helper through transition: {}", func_name);
+
+        let func_id = *self
+            .cgctx
+            .builtin_funcs
+            .get(func_name)
+            .unwrap_or_else(|| panic!("Function '{}' not found in builtin_funcs", func_name));
+        let func_ref = self
+            .cgctx
+            .module
+            .declare_func_in_func(func_id, self.builder.func);
+        let func_ptr = self.builder.ins().func_addr(types::I64, func_ref);
+
+        self.call_native_transition(func_ptr, args)
+    }
+
+    /// Load the cached `MutatorThread` pointer from the runtime environment.
+    ///
+    /// Generated functions use this instead of calling back into TLS on the
+    /// fast path. The pointer is installed when `Environment` is created.
+    fn load_mutator_thread(&mut self) -> Value {
+        self.builder.ins().load(
+            types::I64,
+            MemFlags::trusted(),
+            self.env,
+            crate::core::env::Environment::THREAD_OFFSET as i32,
+        )
+    }
+
+    /// Emit the function-entry safepoint poll.
+    ///
+    /// The hot path is a single byte load from `MutatorThread::block_requested`
+    /// plus a branch. Only the slow path calls into Rust, where a JIT root frame
+    /// is registered before the thread actually blocks for GC.
+    fn emit_gc_poll(&mut self) {
+        let thread = self.load_mutator_thread();
+        let requested = self.builder.ins().load(
+            types::I8,
+            MemFlags::trusted(),
+            thread,
+            crate::gc::MutatorThread::BLOCK_REQUESTED_OFFSET as i32,
+        );
+        let zero = self.builder.ins().iconst(types::I8, 0);
+        let needs_poll = self.builder.ins().icmp(IntCC::NotEqual, requested, zero);
+
+        let slow_block = self.builder.create_block();
+        let done_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(needs_poll, slow_block, &[], done_block, &[]);
+
+        self.builder.switch_to_block(slow_block);
+        self.builder.seal_block(slow_block);
+        self.call_import_direct("jit_safepoint_poll_slow", &[thread]);
+        self.builder.ins().jump(done_block, &[]);
+
+        self.builder.switch_to_block(done_block);
+        self.builder.seal_block(done_block);
     }
 
     fn bind_argument(&mut self, arg: &Arg, initial: Value) -> Value {
@@ -742,6 +805,9 @@ impl<'a> Codegen<'a> {
         let lexical = self.call_internal("get_lexical_bindings", &[func])[0];
         let lexical_var = self.builder.declare_var(types::I64);
         self.builder.def_var(lexical_var, lexical);
+        let is_native = self.call_internal("is_native_function", &[func, self.env])[0];
+        let is_native_var = self.builder.declare_var(types::I64);
+        self.builder.def_var(is_native_var, is_native);
 
         // Prepare jump-table targets for argument counts 0..=8.
         let mut blocks = Vec::with_capacity(9);
@@ -798,6 +864,26 @@ impl<'a> Codegen<'a> {
                 call_args.push(self.env);
                 call_args.push(lexical);
 
+                let is_native = self.builder.use_var(is_native_var);
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                let call_native = self
+                    .builder
+                    .ins()
+                    .icmp(IntCC::NotEqual, is_native, zero);
+                let native_block = self.builder.create_block();
+                let jit_block = self.builder.create_block();
+
+                self.builder
+                    .ins()
+                    .brif(call_native, native_block, &[], jit_block, &[]);
+
+                self.builder.switch_to_block(native_block);
+                self.builder.seal_block(native_block);
+                let result = self.call_native_transition(func_ptr, &call_args)[0];
+                self.builder.ins().jump(merge_block, &[result.into()]);
+
+                self.builder.switch_to_block(jit_block);
+                self.builder.seal_block(jit_block);
                 let inst = self
                     .builder
                     .ins()
@@ -861,13 +947,41 @@ impl<'a> Codegen<'a> {
         let sig_ref = self.builder.import_signature(sig);
         let func_ptr = self.call_internal("get_func_ptr", &[func, self.env])[0];
         let lexical = self.call_internal("get_lexical_bindings", &[func])[0];
+        let is_native = self.call_internal("is_native_function", &[func, self.env])[0];
 
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        let call_native = self
+            .builder
+            .ins()
+            .icmp(IntCC::NotEqual, is_native, zero);
+        let native_block = self.builder.create_block();
+        let jit_block = self.builder.create_block();
+        let merge_block = self.builder.create_block();
+        self.builder.append_block_param(merge_block, types::I64);
+
+        self.builder
+            .ins()
+            .brif(call_native, native_block, &[], jit_block, &[]);
+
+        self.builder.switch_to_block(native_block);
+        self.builder.seal_block(native_block);
+        let call_args = [args_ptr, args_cnt, self.env, lexical];
+        let result = self.call_native_transition(func_ptr, &call_args)[0];
+        self.builder.ins().jump(merge_block, &[result.into()]);
+
+        self.builder.switch_to_block(jit_block);
+        self.builder.seal_block(jit_block);
         let inst = self.builder.ins().call_indirect(
             sig_ref,
             func_ptr,
             &[args_ptr, args_cnt, self.env, lexical],
         );
         let result = self.builder.inst_results(inst)[0];
+        self.builder.ins().jump(merge_block, &[result.into()]);
+
+        self.builder.switch_to_block(merge_block);
+        self.builder.seal_block(merge_block);
+        let result = self.builder.block_params(merge_block)[0];
 
         Ok(result)
     }
