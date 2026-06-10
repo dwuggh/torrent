@@ -1,6 +1,6 @@
 use mmtk::vm::ActivePlan;
 
-use super::thread::{is_mutator, MutatorThread, THREAD_MANAGER};
+use super::thread::{MutatorThread, THREAD_MANAGER, is_mutator};
 use super::vm::MM;
 
 pub struct VMActivePlan;

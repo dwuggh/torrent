@@ -1,6 +1,6 @@
 use mmtk::vm::Collection;
 
-use super::thread::{spawn_gc_worker, MutatorThread, THREAD_MANAGER};
+use super::thread::{MutatorThread, THREAD_MANAGER, spawn_gc_worker};
 use super::vm::MM;
 
 pub struct VMCollection;

@@ -1,4 +1,4 @@
-use std::{cell::Cell, ptr::NonNull};
+use std::{cell::Cell, marker::PhantomData, ptr::NonNull};
 
 use crate::{
     core::{
@@ -7,7 +7,7 @@ use crate::{
         number::{Character, Float, Integer, LispCharacter, LispFloat, LispInteger},
         string::{LispStr, Str},
         symbol::{LispSymbol, Symbol, SymbolMap},
-        tag::{Tag, Untag, TAG_TRUE},
+        tag::{TAG_TRUE, Tag, Untag},
         vector::{LispVector, Vector},
     },
     gc::{self, HeapObject, Tagged, Trace},
@@ -61,6 +61,36 @@ impl ObjectSlot {
     }
 }
 
+/// Short-lived mutable entry for one heap object field.
+///
+/// The `owner` is the containing heap object and is used only as the write
+/// barrier source. The raw slot address must not outlive the mutable borrow
+/// that created this entry.
+pub struct ObjectEntry<'a> {
+    owner: Object,
+    slot: NonNull<Object>,
+    _marker: PhantomData<&'a mut Object>,
+}
+
+impl<'a> ObjectEntry<'a> {
+    pub fn new(owner: Object, slot: &'a mut Object) -> Self {
+        Self {
+            owner,
+            slot: NonNull::from(slot),
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn get(&self) -> Object {
+        unsafe { *self.slot.as_ref() }
+    }
+
+    pub fn set(&mut self, value: Object) {
+        let slot = unsafe { self.slot.as_mut() };
+        write_object_slot(self.owner, slot, value);
+    }
+}
+
 impl std::fmt::Debug for Object {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.as_ref().fmt(f)
@@ -86,6 +116,15 @@ impl Object {
     #[inline(always)]
     pub fn from_raw(raw: u64) -> Self {
         Self(raw)
+    }
+
+    /// Reconstruct the tagged owner word for a borrowed heap object.
+    ///
+    /// This is used by generated entry accessors. The MMTk conversion stays
+    /// inside the `gc` facade; this method only returns the Lisp `Object` word.
+    #[inline(always)]
+    pub fn from_heap_ref<T: HeapObject>(value: &T) -> Self {
+        Self::from_raw(gc::tagged_word_from_heap_data(NonNull::from(value)))
     }
 
     /// Return the raw tagged word.
@@ -264,30 +303,9 @@ impl LispObject {
     }
 }
 
-/// Shared helper for storing a tagged object into a heap field.
-///
-/// The owner computes its object reference before selecting the field slot.
-/// The selector is monomorphized and should optimize to direct field-address
-/// code, while keeping the MMTk pre-barrier sequence in one place.
-pub trait HeapSlotUpdate: HeapObject {
-    fn update_slot<F>(&mut self, select: F, value: Object)
-    where
-        F: FnOnce(&mut Self) -> &mut Object,
-    {
-        let src = unsafe { Self::object_ref_from_data(NonNull::from(&mut *self)) };
-        let slot = select(self);
-        write_object_slot(src, slot, value);
-    }
-}
-
-impl<T: HeapObject> HeapSlotUpdate for T {}
-
 /// Store `value` into a tagged object slot after running MMTk's write barriers.
-pub fn write_object_slot(src: gc::mmtk::util::ObjectReference, slot: &mut Object, value: Object) {
-    let slot_addr = gc::mmtk::util::Address::from_ptr(slot as *mut Object);
-    gc::object_slot_write_pre(src, slot_addr);
-    *slot = value;
-    gc::object_slot_write_post(src, slot_addr);
+pub fn write_object_slot(owner: Object, slot: &mut Object, value: Object) {
+    gc::write_object_slot(owner, slot, value);
 }
 
 macro_rules! impl_try_from_for_object {
@@ -371,12 +389,12 @@ pub fn init_gc_types() {
 #[cfg(test)]
 mod tests {
     use crate::core::{
+        Tag,
         cons::LispCons,
         number::{Float, LispFloat, LispInteger},
-        Tag,
     };
 
-    use super::{gc, ObjectRef};
+    use super::{ObjectRef, gc};
 
     #[test]
     fn nogc_allocates_integer_float_and_cons() {

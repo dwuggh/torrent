@@ -7,6 +7,7 @@ use smallvec::SmallVec;
 
 use mmtk::util::Address;
 
+use crate::core::env::{DynamicBinding, DynamicEnv};
 use crate::core::object::Object;
 use crate::gc::scanning::StackRootVisitor;
 use crate::gc::thread::MutatorThread;
@@ -113,6 +114,7 @@ pub struct JitRootFrame {
     pub stop_frame_pointer: *const usize,
     pub stack_pointer: *const usize,
     pub return_pc: *const u8,
+    pub dynamic_env: *const DynamicEnv,
 }
 
 impl JitRootFrame {
@@ -121,6 +123,7 @@ impl JitRootFrame {
         frame_pointer: *const usize,
         stack_pointer: *const usize,
         return_pc: *const u8,
+        dynamic_env: *const DynamicEnv,
     ) -> Self {
         Self {
             prev: RootLink::NULL,
@@ -128,6 +131,7 @@ impl JitRootFrame {
             stop_frame_pointer: std::ptr::null(),
             stack_pointer,
             return_pc,
+            dynamic_env,
         }
     }
 }
@@ -248,6 +252,7 @@ pub unsafe fn scan_root_chain(
             ROOT_LINK_JIT => {
                 let frame = unsafe { &*link.ptr::<JitRootFrame>() };
                 unsafe { scan_jit_frame(frame, visitor) };
+                unsafe { scan_dynamic_env(frame.dynamic_env, visitor) };
                 link = frame.prev;
             }
             other => panic!("bad root-link tag: {other:#x}"),
@@ -278,6 +283,21 @@ unsafe fn scan_native_root_frame_impl<const N: usize>(
     }
 }
 
+unsafe fn scan_dynamic_env(mut env: *const DynamicEnv, visitor: &mut dyn StackRootVisitor) {
+    while !env.is_null() {
+        let current = unsafe { &*env };
+        let bindings = current.bindings.as_ptr();
+
+        for index in 0..current.len {
+            let binding = unsafe { bindings.add(index) as *mut DynamicBinding };
+            let obj = unsafe { &mut (*binding).obj };
+            visitor.visit_tagged_slot(Address::from_ptr(obj as *mut Object));
+        }
+
+        env = current.parent;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::ptr;
@@ -300,6 +320,8 @@ mod tests {
         visitor.visit_tagged_slot(Address::from_ptr(frame.stack_pointer as *mut Object));
     }
 
+    unsafe fn empty_jit_scan(_frame: &JitRootFrame, _visitor: &mut dyn StackRootVisitor) {}
+
     #[test]
     fn native_root_frame_reports_registered_slot_addresses() {
         let mut frame = NativeRootFrame::<2>::new(smallvec::smallvec![Object(1), Object(2)]);
@@ -320,12 +342,34 @@ mod tests {
     }
 
     #[test]
+    fn native_root_frame_zero_inline_capacity_scans_owned_slots() {
+        let mut frame =
+            NativeRootFrame::<0>::new(SmallVec::from_slice(&[Object(1), Object(2), Object(3)]));
+        let mut visitor = CollectingVisitor(Vec::new());
+
+        unsafe {
+            scan_native_root_frame(&mut frame.header, &mut visitor);
+        }
+
+        let base = frame.slots.as_mut_ptr();
+        assert_eq!(
+            visitor.0,
+            vec![
+                Address::from_ptr(base),
+                Address::from_ptr(unsafe { base.add(1) }),
+                Address::from_ptr(unsafe { base.add(2) }),
+            ]
+        );
+    }
+
+    #[test]
     fn root_chain_scans_jit_and_native_frames() {
         let mut native = NativeRootFrame::<1>::new(smallvec::smallvec![Object(1)]);
         let mut jit_value = Object(2);
         let mut jit = JitRootFrame::new(
             ptr::null(),
             &mut jit_value as *mut Object as *const usize,
+            ptr::null(),
             ptr::null(),
         );
         jit.prev = RootLink::native(&mut native.header);
@@ -342,6 +386,40 @@ mod tests {
                 Address::from_ptr(&mut jit_value as *mut Object),
                 Address::from_ptr(native_base),
             ]
+        );
+    }
+
+    #[repr(C)]
+    struct DynamicEnv1 {
+        header: DynamicEnv,
+        bindings: [DynamicBinding; 1],
+    }
+
+    #[test]
+    fn root_chain_scans_dynamic_env_from_jit_frame() {
+        let mut dynamic = DynamicEnv1 {
+            header: DynamicEnv {
+                len: 1,
+                parent: ptr::null_mut(),
+                bindings: [],
+            },
+            bindings: [DynamicBinding {
+                index: 7,
+                obj: Object(3),
+            }],
+        };
+        let mut jit = JitRootFrame::new(ptr::null(), ptr::null(), ptr::null(), &mut dynamic.header);
+        let mut visitor = CollectingVisitor(Vec::new());
+
+        unsafe {
+            scan_root_chain(RootLink::jit(&mut jit), &mut visitor, empty_jit_scan);
+        }
+
+        assert_eq!(
+            visitor.0,
+            vec![Address::from_ptr(
+                &mut dynamic.bindings[0].obj as *mut Object
+            )]
         );
     }
 

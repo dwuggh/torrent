@@ -3,14 +3,14 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use cranelift::codegen::ir::{types, AbiParam, Type};
+use crate::gc::{
+    JitRootFrame, MutatorThread, RootLink, StackMapProvider, StackRootVisitor,
+    mmtk::util::{Address, VMMutatorThread},
+    push_jit_root_frame, scan_root_chain,
+};
+use cranelift::codegen::ir::{AbiParam, Type, types};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
-use crate::gc::{
-    mmtk::util::{Address, VMMutatorThread},
-    push_jit_root_frame, scan_root_chain, JitRootFrame, MutatorThread, RootLink,
-    StackMapProvider, StackRootVisitor,
-};
 
 use crate::core::compiler::arch;
 
@@ -272,13 +272,13 @@ pub fn install_stack_map_provider() {
 }
 
 const JIT_NATIVE_CALL_STUB_PREFIX: &str = "jit_call_native_";
-const MAX_JIT_NATIVE_CALL_ARGS: usize = 10;
+const MAX_JIT_NATIVE_CALL_ARGS: usize = 11;
 
 macro_rules! define_jit_native_call_stub {
     ($name:ident, []) => {
-        unsafe extern "C" fn $name(func: i64, thread: i64) -> i64 {
+        unsafe extern "C" fn $name(func: i64, thread: i64, dynamic: i64) -> i64 {
             unsafe {
-                with_current_jit_root(thread, || {
+                with_current_jit_root(thread, dynamic, || {
                     let func: unsafe extern "C" fn() -> i64 =
                         std::mem::transmute(func as *const u8);
                     func()
@@ -287,9 +287,9 @@ macro_rules! define_jit_native_call_stub {
         }
     };
     ($name:ident, [$($arg:ident),+]) => {
-        unsafe extern "C" fn $name(func: i64, thread: i64, $($arg: i64),+) -> i64 {
+        unsafe extern "C" fn $name(func: i64, thread: i64, dynamic: i64, $($arg: i64),+) -> i64 {
             unsafe {
-                with_current_jit_root(thread, || {
+                with_current_jit_root(thread, dynamic, || {
                     let func: unsafe extern "C" fn($($arg: i64),+) -> i64 =
                         std::mem::transmute(func as *const u8);
                     func($($arg),+)
@@ -310,10 +310,14 @@ define_jit_native_call_stub!(jit_call_native_7, [a0, a1, a2, a3, a4, a5, a6]);
 define_jit_native_call_stub!(jit_call_native_8, [a0, a1, a2, a3, a4, a5, a6, a7]);
 define_jit_native_call_stub!(jit_call_native_9, [a0, a1, a2, a3, a4, a5, a6, a7, a8]);
 define_jit_native_call_stub!(jit_call_native_10, [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9]);
+define_jit_native_call_stub!(
+    jit_call_native_11,
+    [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10]
+);
 
-unsafe extern "C" fn jit_safepoint_poll_slow(thread: i64) -> i64 {
+unsafe extern "C" fn jit_safepoint_poll_slow(thread: i64, dynamic: i64) -> i64 {
     unsafe {
-        with_current_jit_root(thread, || {
+        with_current_jit_root(thread, dynamic, || {
             let thread = &*(thread as *const crate::gc::MutatorThread);
             thread.safepoint_poll_slow();
             crate::core::object::NIL
@@ -321,7 +325,7 @@ unsafe extern "C" fn jit_safepoint_poll_slow(thread: i64) -> i64 {
     }
 }
 
-unsafe fn with_current_jit_root(thread: i64, body: impl FnOnce() -> i64) -> i64 {
+unsafe fn with_current_jit_root(thread: i64, dynamic: i64, body: impl FnOnce() -> i64) -> i64 {
     let thread = unsafe { &*(thread as *const crate::gc::MutatorThread) };
 
     // Transition stubs are called directly from generated code. Their native
@@ -330,7 +334,8 @@ unsafe fn with_current_jit_root(thread: i64, body: impl FnOnce() -> i64) -> i64 
     let native_fp = unsafe { arch::current_frame_pointer() };
     let frame_pointer = unsafe { arch::parent_frame_pointer(native_fp) } as *const usize;
     let return_pc = unsafe { arch::return_addr_of_frame(native_fp) };
-    let mut frame = JitRootFrame::new(frame_pointer, std::ptr::null(), return_pc);
+    let dynamic = dynamic as *const crate::core::env::DynamicEnv;
+    let mut frame = JitRootFrame::new(frame_pointer, std::ptr::null(), return_pc, dynamic);
     let _guard = unsafe { push_jit_root_frame(thread, &mut frame) };
 
     body()
@@ -353,15 +358,12 @@ fn native_call_stub_ptr(arity: usize) -> *const u8 {
         8 => jit_call_native_8 as *const u8,
         9 => jit_call_native_9 as *const u8,
         10 => jit_call_native_10 as *const u8,
+        11 => jit_call_native_11 as *const u8,
         _ => panic!("unsupported JIT native call arity: {arity}"),
     }
 }
 
-fn declare_i64_import(
-    module: &mut JITModule,
-    name: &str,
-    arity: usize,
-) -> anyhow::Result<FuncId> {
+fn declare_i64_import(module: &mut JITModule, name: &str, arity: usize) -> anyhow::Result<FuncId> {
     let mut sig = module.make_signature();
     for _ in 0..arity {
         sig.params.push(AbiParam::new(types::I64));
@@ -371,7 +373,10 @@ fn declare_i64_import(
 }
 
 pub fn register_jit_runtime_symbols(builder: &mut JITBuilder) {
-    builder.symbol("jit_safepoint_poll_slow", jit_safepoint_poll_slow as *const u8);
+    builder.symbol(
+        "jit_safepoint_poll_slow",
+        jit_safepoint_poll_slow as *const u8,
+    );
     for arity in 0..=MAX_JIT_NATIVE_CALL_ARGS {
         let name = native_call_stub_name(arity);
         builder.symbol(&name, native_call_stub_ptr(arity));
@@ -382,12 +387,12 @@ pub fn declare_jit_runtime_imports(
     module: &mut JITModule,
     builtin_funcs: &mut HashMap<String, FuncId>,
 ) -> anyhow::Result<()> {
-    let safepoint = declare_i64_import(module, "jit_safepoint_poll_slow", 1)?;
+    let safepoint = declare_i64_import(module, "jit_safepoint_poll_slow", 2)?;
     builtin_funcs.insert("jit_safepoint_poll_slow".to_string(), safepoint);
 
     for arity in 0..=MAX_JIT_NATIVE_CALL_ARGS {
         let name = native_call_stub_name(arity);
-        let func_id = declare_i64_import(module, &name, arity + 2)?;
+        let func_id = declare_i64_import(module, &name, arity + 3)?;
         builtin_funcs.insert(name, func_id);
     }
 

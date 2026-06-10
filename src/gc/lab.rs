@@ -1,4 +1,4 @@
-use mmtk::util::{conversions::raw_align_up, Address};
+use mmtk::util::{Address, conversions::raw_align_up};
 
 #[repr(C)]
 #[derive(Clone, Copy)]

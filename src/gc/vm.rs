@@ -1,6 +1,6 @@
 use super::{
-    active_plan::VMActivePlan, collection::VMCollection, object_model::VMObjectModel,
-    reference_glue::VMReferenceGlue, scanning::VMScanning, TaggedPtrSlot,
+    TaggedPtrSlot, active_plan::VMActivePlan, collection::VMCollection,
+    object_model::VMObjectModel, reference_glue::VMReferenceGlue, scanning::VMScanning,
 };
 
 pub struct MM;

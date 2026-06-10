@@ -58,9 +58,9 @@ unsafe impl Trace for SpecStack {
     }
 }
 
-use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
+use std::{cell::RefCell, ptr::NonNull};
 
 #[derive(Debug)]
 pub struct Environment {
@@ -77,6 +77,68 @@ pub struct Environment {
     /// JIT code treats this field as an opaque address and loads fields through
     /// the offset constants on `MutatorThread`.
     pub thread: *const crate::gc::MutatorThread,
+}
+
+/// Dynamic binding entry for one global special variable.
+///
+/// `index` is the global symbol-map index. `obj` is the dynamically bound
+/// value that should shadow the global value while the binding record is live.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DynamicBinding {
+    pub index: usize,
+    pub obj: Object,
+}
+
+/// Header for a caller-owned dynamic binding segment.
+///
+/// JIT code will place this header and `len` following `DynamicBinding` records
+/// in its own stack frame. The zero-length array keeps the Rust type aligned
+/// with the intended tail payload without making `&DynamicEnv` a fat pointer.
+#[repr(C)]
+#[derive(Debug)]
+pub struct DynamicEnv {
+    pub len: usize,
+    pub parent: *mut DynamicEnv,
+    pub bindings: [DynamicBinding; 0],
+}
+
+/// Runtime environment view passed through Lisp calls.
+///
+/// `global` owns process/thread runtime state such as the symbol map, while
+/// `dynamic` points at the caller's current special-binding chain.
+#[derive(Clone, Copy)]
+pub struct Env<'a> {
+    pub global: &'a Environment,
+    pub dynamic: &'a DynamicEnv,
+}
+
+impl DynamicEnv {
+    /// Walk this dynamic environment chain looking for the newest binding of a
+    /// global special-variable index.
+    ///
+    /// # Safety
+    ///
+    /// Every `DynamicEnv` in the parent chain must point at a live stack record
+    /// with at least `len` trailing `DynamicBinding` entries.
+    pub unsafe fn lookup(&self, index: usize) -> Option<Object> {
+        let mut env = self as *const DynamicEnv;
+        while !env.is_null() {
+            let current = unsafe { &*env };
+            let bindings = current.bindings.as_ptr();
+
+            for offset in (0..current.len).rev() {
+                let binding = unsafe { *bindings.add(offset) };
+                if binding.index == index {
+                    return Some(binding.obj);
+                }
+            }
+
+            env = current.parent;
+        }
+
+        None
+    }
 }
 
 impl Environment {
@@ -134,9 +196,9 @@ struct BindNode {
 }
 
 fn tls_lookup(symbol: Symbol) -> Option<Object> {
-    DYN_TOP.with(|top| top.borrow().get(&symbol).copied()).and_then(|idx| {
-        DYN_STACK.with(|stack| stack.borrow().get(idx).map(|n| n.value.clone()))
-    })
+    DYN_TOP
+        .with(|top| top.borrow().get(&symbol).copied())
+        .and_then(|idx| DYN_STACK.with(|stack| stack.borrow().get(idx).map(|n| n.value.clone())))
 }
 
 fn tls_bind(symbol: Symbol, value: Object) {
@@ -144,7 +206,11 @@ fn tls_bind(symbol: Symbol, value: Object) {
     let idx = DYN_STACK.with(|s| {
         let mut s = s.borrow_mut();
         let idx = s.len();
-        s.push(BindNode { symbol, value, prev });
+        s.push(BindNode {
+            symbol,
+            value,
+            prev,
+        });
         idx
     });
     DYN_TOP.with(|m| {
@@ -160,7 +226,9 @@ fn tls_mark() {
 
 fn tls_unbind_to_mark(env: &Environment) {
     let mark = DYN_MARKS.with(|marks| marks.borrow_mut().pop());
-    let Some(mark) = mark else { return; };
+    let Some(mark) = mark else {
+        return;
+    };
     DYN_STACK.with(|s| {
         let mut s = s.borrow_mut();
         while s.len() > mark {
@@ -170,7 +238,11 @@ fn tls_unbind_to_mark(env: &Environment) {
                 // Restore top index
                 DYN_TOP.with(|m| {
                     let mut m = m.borrow_mut();
-                    if let Some(prev) = node.prev { m.insert(node.symbol, prev); } else { m.remove(&node.symbol); }
+                    if let Some(prev) = node.prev {
+                        m.insert(node.symbol, prev);
+                    } else {
+                        m.remove(&node.symbol);
+                    }
                 });
             }
         }
@@ -189,8 +261,12 @@ pub struct EnvValueGuard<'a> {
 }
 
 impl<'a> EnvValueGuard<'a> {
-    pub fn as_ref(&self) -> &Object { &self.value }
-    pub fn raw_i64(&self) -> i64 { self.value.0 as i64 }
+    pub fn as_ref(&self) -> &Object {
+        &self.value
+    }
+    pub fn raw_i64(&self) -> i64 {
+        self.value.0 as i64
+    }
 }
 
 impl Environment {
@@ -215,8 +291,9 @@ impl Environment {
         }
 
         // Fall back to global environment
-        self.symbol_map.as_ref().get_symbol_cell_with(symbol, |cell| {
-            match load_function_cell {
+        self.symbol_map
+            .as_ref()
+            .get_symbol_cell_with(symbol, |cell| match load_function_cell {
                 Some(ty) => {
                     let ObjectRef::Cons(cons) = cell.func.as_ref() else {
                         return Err(RuntimeError::wrong_type("cons", cell.func.get_tag()));
@@ -236,8 +313,7 @@ impl Environment {
                     tracing::debug!("loaded value from global: {:?}", cell.value);
                     return job(&cell.value);
                 }
-            }
-        })
+            })
     }
 
     /// Load a symbol's binding and return a guard that views the value without
@@ -251,8 +327,13 @@ impl Environment {
         // Fast-path: thread-local dynamic binding lookup for values
         if load_function_cell.is_none() {
             if let Some(idx) = DYN_TOP.with(|top| top.borrow().get(&symbol).copied()) {
-                if let Some(raw) = DYN_STACK.with(|stack| stack.borrow().get(idx).map(|n| n.value.0)) {
-                    return Ok(EnvValueGuard { value: ManuallyDrop::new(Object(raw)), _marker: PhantomData });
+                if let Some(raw) =
+                    DYN_STACK.with(|stack| stack.borrow().get(idx).map(|n| n.value.0))
+                {
+                    return Ok(EnvValueGuard {
+                        value: ManuallyDrop::new(Object(raw)),
+                        _marker: PhantomData,
+                    });
                 }
             }
         }
@@ -274,11 +355,70 @@ impl Environment {
                     return Err(RuntimeError::internal_error("not a function"));
                 }
                 let val = cons.cdr();
-                Ok(EnvValueGuard { value: ManuallyDrop::new(Object(val.0)), _marker: PhantomData })
+                Ok(EnvValueGuard {
+                    value: ManuallyDrop::new(Object(val.0)),
+                    _marker: PhantomData,
+                })
             }
             None => {
                 tracing::debug!("loaded value from global(ref): {:?}", cell_ref.value);
-                Ok(EnvValueGuard { value: ManuallyDrop::new(Object(cell_ref.value.0)), _marker: PhantomData })
+                Ok(EnvValueGuard {
+                    value: ManuallyDrop::new(Object(cell_ref.value.0)),
+                    _marker: PhantomData,
+                })
+            }
+        }
+    }
+
+    /// Load a symbol through an explicit dynamic environment.
+    ///
+    /// Function cells ignore dynamic binding. Value cells consult `dynamic`
+    /// only after the global symbol cell is known to be special.
+    pub fn load_symbol_guard_with_dynamic<'a>(
+        &'a self,
+        symbol: Symbol,
+        load_function_cell: Option<FuncCellType>,
+        dynamic: Option<&DynamicEnv>,
+    ) -> RuntimeResult<EnvValueGuard<'a>> {
+        let cell_ref = match self.symbol_map.as_ref().get_symbol_cell_ref(symbol) {
+            Some(cell) => cell,
+            None => return Err(RuntimeError::unbound_symbol(symbol)),
+        };
+
+        match load_function_cell {
+            Some(ty) => {
+                let ObjectRef::Cons(cons) = cell_ref.func.as_ref() else {
+                    return Err(RuntimeError::wrong_type("cons", cell_ref.func.get_tag()));
+                };
+                let ObjectRef::Symbol(marker) = cons.car().as_ref() else {
+                    return Err(RuntimeError::wrong_type("symbol", cons.car().get_tag()));
+                };
+                if marker.ident() != ty.ident() {
+                    return Err(RuntimeError::internal_error("not a function"));
+                }
+                let val = cons.cdr();
+                Ok(EnvValueGuard {
+                    value: ManuallyDrop::new(Object(val.0)),
+                    _marker: PhantomData,
+                })
+            }
+            None => {
+                if cell_ref.special {
+                    if let Some(dynamic) = dynamic {
+                        if let Some(value) = unsafe { dynamic.lookup(cell_ref.name.data()) } {
+                            return Ok(EnvValueGuard {
+                                value: ManuallyDrop::new(value),
+                                _marker: PhantomData,
+                            });
+                        }
+                    }
+                }
+
+                tracing::debug!("loaded value from global(ref): {:?}", cell_ref.value);
+                Ok(EnvValueGuard {
+                    value: ManuallyDrop::new(Object(cell_ref.value.0)),
+                    _marker: PhantomData,
+                })
             }
         }
     }
@@ -384,5 +524,69 @@ impl StackMap {
 impl Default for StackMap {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::number::LispInteger;
+    use crate::core::tag::Tag;
+
+    #[repr(C)]
+    struct DynamicEnv1 {
+        header: DynamicEnv,
+        bindings: [DynamicBinding; 1],
+    }
+
+    #[test]
+    fn dynamic_env_shadows_only_special_value_cells() {
+        let _mutator = crate::gc::test_support::bind_nogc_mutator();
+        let env = Environment::default();
+        let mut symbol_map = env.symbol_map.clone();
+
+        let special = symbol_map.as_mut().intern(Ident::from("special"), true).0;
+        let normal = symbol_map.as_mut().intern(Ident::from("normal"), false).0;
+        let global_special = LispInteger(10).tag();
+        let dynamic_special = LispInteger(20).tag();
+        let global_normal = LispInteger(30).tag();
+        let dynamic_normal = LispInteger(40).tag();
+
+        symbol_map.as_mut().set_value(special, global_special);
+        symbol_map.as_mut().set_value(normal, global_normal);
+
+        let dynamic = DynamicEnv1 {
+            header: DynamicEnv {
+                len: 1,
+                parent: std::ptr::null_mut(),
+                bindings: [],
+            },
+            bindings: [DynamicBinding {
+                index: special.data(),
+                obj: dynamic_special,
+            }],
+        };
+
+        let special_value = env
+            .load_symbol_guard_with_dynamic(special, None, Some(&dynamic.header))
+            .unwrap();
+        assert_eq!(*special_value.as_ref(), dynamic_special);
+
+        let normal_dynamic = DynamicEnv1 {
+            header: DynamicEnv {
+                len: 1,
+                parent: std::ptr::null_mut(),
+                bindings: [],
+            },
+            bindings: [DynamicBinding {
+                index: normal.data(),
+                obj: dynamic_normal,
+            }],
+        };
+
+        let normal_value = env
+            .load_symbol_guard_with_dynamic(normal, None, Some(&normal_dynamic.header))
+            .unwrap();
+        assert_eq!(*normal_value.as_ref(), global_normal);
     }
 }

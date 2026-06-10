@@ -3,7 +3,7 @@ use crate::{
         indirect::Indirect,
         object::{Object, nil, write_object_slot},
     },
-    gc::{self, Trace, Visitor},
+    gc::{Trace, Visitor},
 };
 
 #[repr(C)]
@@ -72,12 +72,7 @@ impl LexicalBindings {
         self.refresh_header();
     }
 
-    pub fn store_with_owner(
-        &mut self,
-        owner: gc::mmtk::util::ObjectReference,
-        index: usize,
-        value: Object,
-    ) {
+    pub fn store_with_owner(&mut self, owner: Object, index: usize, value: Object) {
         let slot = &mut self.variables[index];
         if Indirect::is_object(slot.clone()) {
             unsafe { Indirect::from_object_mut(slot.clone()) }.store(value);

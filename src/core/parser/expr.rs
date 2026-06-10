@@ -170,14 +170,13 @@ pub struct Args {
 }
 
 impl Args {
-    pub fn total(&self) -> usize {
-        let rest = self.rest.is_some() as usize;
+    pub fn fixed_param_count(&self) -> usize {
         let optional = self.optional.as_ref().map_or(0, |args| args.len());
-        self.normal.len() + optional + rest * 2
+        self.normal.len() + optional
     }
 
-    pub fn use_trampoline(&self) -> bool {
-        self.rest.is_some() || self.total() > 8
+    pub fn use_argv_abi(&self) -> bool {
+        self.rest.is_some() || self.fixed_param_count() > 8
     }
 }
 

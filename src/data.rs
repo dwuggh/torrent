@@ -17,9 +17,13 @@ fn equal_deep(a: &Object, b: &Object) -> bool {
         (Symbol(x), Symbol(y)) => x == y,
         (Str(x), Str(y)) => x == y,
         (Vector(xs), Vector(ys)) => {
-            if xs.len() != ys.len() { return false; }
+            if xs.len() != ys.len() {
+                return false;
+            }
             for (vx, vy) in xs.iter().zip(ys.iter()) {
-                if !equal_deep(vx, vy) { return false; }
+                if !equal_deep(vx, vy) {
+                    return false;
+                }
             }
             true
         }
@@ -44,23 +48,36 @@ fn null(obj: Object) -> Object {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::number::LispInteger;
-    use crate::core::cons::LispCons;
     use crate::core::Tag;
+    use crate::core::cons::LispCons;
+    use crate::core::number::LispInteger;
 
     #[test]
     fn test_eq_basic() {
-        assert!(matches!(eq(LispInteger(1).tag(), LispInteger(1).tag()).as_ref(), ObjectRef::True));
-        assert!(matches!(eq(LispInteger(1).tag(), LispInteger(2).tag()).as_ref(), ObjectRef::Nil));
+        assert!(matches!(
+            eq(LispInteger(1).tag(), LispInteger(1).tag()).as_ref(),
+            ObjectRef::True
+        ));
+        assert!(matches!(
+            eq(LispInteger(1).tag(), LispInteger(2).tag()).as_ref(),
+            ObjectRef::Nil
+        ));
     }
 
     #[test]
     fn test_equal_lists() {
         let _mutator = crate::gc::test_support::bind_nogc_mutator();
 
-        let l1 = LispCons::from_iter(vec![LispInteger(1).tag(), LispInteger(2).tag()].into_iter()).unwrap().tag();
-        let l2 = LispCons::from_iter(vec![LispInteger(1).tag(), LispInteger(2).tag()].into_iter()).unwrap().tag();
-        assert!(matches!(equal(l1.clone(), l2.clone()).as_ref(), ObjectRef::True));
+        let l1 = LispCons::from_iter(vec![LispInteger(1).tag(), LispInteger(2).tag()].into_iter())
+            .unwrap()
+            .tag();
+        let l2 = LispCons::from_iter(vec![LispInteger(1).tag(), LispInteger(2).tag()].into_iter())
+            .unwrap()
+            .tag();
+        assert!(matches!(
+            equal(l1.clone(), l2.clone()).as_ref(),
+            ObjectRef::True
+        ));
     }
 
     #[test]

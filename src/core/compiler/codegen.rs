@@ -11,8 +11,9 @@ use cranelift_module::Module;
 use crate::core::Tag;
 use crate::core::compiler::error::{CodegenError, CodegenResult};
 use crate::core::compiler::stack_map::{FunctionMetadata, StackMapSlot, append_func_metadata};
-use crate::core::function::FunctionSignature;
+use crate::core::env::{DynamicBinding, DynamicEnv};
 use crate::core::function::LispFunction;
+use crate::core::function::{ARGV_ABI_MARKER, FunctionSignature};
 use crate::core::ident::Ident;
 use crate::core::lexical::LexicalBindings;
 use crate::core::object::NIL;
@@ -36,7 +37,7 @@ pub enum Closure {
 }
 
 enum IncomingArgs<'a> {
-    Trampoline { args_ptr: Value, args_cnt: Value },
+    Argv { args_ptr: Value, args_cnt: Value },
     Direct { args: &'a [Value] },
 }
 
@@ -156,6 +157,7 @@ pub struct Codegen<'a> {
     capture_slots: Vec<Arg>,
     pub func_id: FuncId,
     env: Value,
+    dynamic: Value,
     lexical: Value,
     defined_funcs: Vec<Closure>,
 }
@@ -193,6 +195,7 @@ impl<'a> Codegen<'a> {
         builder: FunctionBuilder<'a>,
         func: LispFunction,
         env: Value,
+        dynamic: Value,
         lexical: Value,
         func_id: FuncId,
         capture_slots: Vec<Arg>,
@@ -205,6 +208,7 @@ impl<'a> Codegen<'a> {
             argument_slots: Vec::new(),
             capture_slots,
             env,
+            dynamic,
             lexical,
             func_id,
             defined_funcs: Vec::new(),
@@ -222,6 +226,8 @@ impl<'a> Codegen<'a> {
         let sig = &mut ctx.func.signature;
         // env arg
         sig.params.push(AbiParam::new(types::I64));
+        // dynamic bindings arg
+        sig.params.push(AbiParam::new(types::I64));
         // lexical bindings arg
         sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
@@ -236,11 +242,21 @@ impl<'a> Codegen<'a> {
         let cgctx = CodegenContext::from_parts(module, data_desc, builtin_funcs);
 
         let env = params[0];
-        let lexical = params[1];
+        let dynamic = params[1];
+        let lexical = params[2];
 
         let func = LispFunction::new_closure(func_id, FunctionSignature::default());
 
-        let mut codegen = Self::assemble(cgctx, builder, func, env, lexical, func_id, Vec::new());
+        let mut codegen = Self::assemble(
+            cgctx,
+            builder,
+            func,
+            env,
+            dynamic,
+            lexical,
+            func_id,
+            Vec::new(),
+        );
 
         codegen.emit_gc_poll();
 
@@ -257,7 +273,7 @@ impl<'a> Codegen<'a> {
     ) -> CodegenResult<Self> {
         tracing::debug!("Creating new codegen with config: {:?}", lambda);
 
-        let use_trampoline = lambda.args.use_trampoline();
+        let use_argv_abi = lambda.args.use_argv_abi();
 
         // make signature
         let sig = &mut ctx.func.signature;
@@ -265,7 +281,7 @@ impl<'a> Codegen<'a> {
         prepare_signature(&lambda.args, sig);
 
         tracing::debug!(
-            "Function signature created with {} params, {} returns(use trampoline: {use_trampoline})",
+            "Function signature created with {} params, {} returns(use argv ABI: {use_argv_abi})",
             sig.params.len(),
             sig.returns.len()
         );
@@ -274,27 +290,36 @@ impl<'a> Codegen<'a> {
         let (builder, func_id, params) = Self::create_function_prologue(module, fctx, ctx)?;
         let cgctx = CodegenContext::from_parts(module, data_desc, builtin_funcs);
 
-        let env = if use_trampoline {
-            params
-                .get(2)
-                .copied()
-                .unwrap_or_else(|| panic!("expected env parameter for trampoline"))
+        let (env, dynamic, lexical) = if use_argv_abi {
+            (
+                params
+                    .get(2)
+                    .copied()
+                    .unwrap_or_else(|| panic!("expected env parameter for argv ABI")),
+                params
+                    .get(3)
+                    .copied()
+                    .unwrap_or_else(|| panic!("expected dynamic parameter for argv ABI")),
+                params
+                    .get(4)
+                    .copied()
+                    .unwrap_or_else(|| panic!("expected lexical parameter for argv ABI")),
+            )
         } else {
-            params
-                .get(params.len().saturating_sub(2))
-                .copied()
-                .unwrap_or_else(|| panic!("expected env parameter for direct call"))
-        };
-        let lexical = if use_trampoline {
-            params
-                .get(3)
-                .copied()
-                .unwrap_or_else(|| panic!("expected lexical parameter for trampoline"))
-        } else {
-            params
-                .last()
-                .copied()
-                .unwrap_or_else(|| panic!("expected lexical parameter for direct call"))
+            (
+                params
+                    .get(params.len().saturating_sub(3))
+                    .copied()
+                    .unwrap_or_else(|| panic!("expected env parameter for direct call")),
+                params
+                    .get(params.len().saturating_sub(2))
+                    .copied()
+                    .unwrap_or_else(|| panic!("expected dynamic parameter for direct call")),
+                params
+                    .last()
+                    .copied()
+                    .unwrap_or_else(|| panic!("expected lexical parameter for direct call")),
+            )
         };
 
         let signature = FunctionSignature::from_args(&lambda.args);
@@ -308,20 +333,25 @@ impl<'a> Codegen<'a> {
         let capture_len = capture_slots.len();
         let _ = func.reset_lexical_bindings(LexicalBindings::with_len(capture_len));
 
-        let mut codegen =
-            Self::assemble(cgctx, builder, func, env, lexical, func_id, capture_slots);
+        let mut codegen = Self::assemble(
+            cgctx,
+            builder,
+            func,
+            env,
+            dynamic,
+            lexical,
+            func_id,
+            capture_slots,
+        );
 
         codegen.emit_gc_poll();
 
-        if use_trampoline {
+        if use_argv_abi {
             let args_ptr = params[0];
             let args_cnt = params[1];
-            codegen.setup_locals(
-                &lambda.args,
-                IncomingArgs::Trampoline { args_ptr, args_cnt },
-            )?;
+            codegen.setup_locals(&lambda.args, IncomingArgs::Argv { args_ptr, args_cnt })?;
         } else {
-            let env_index = params.len().saturating_sub(2);
+            let env_index = params.len().saturating_sub(3);
             let direct_args = &params[..env_index];
             codegen.setup_locals(&lambda.args, IncomingArgs::Direct { args: direct_args })?;
         }
@@ -400,9 +430,10 @@ impl<'a> Codegen<'a> {
     fn call_native_transition(&mut self, func_ptr: Value, args: &[Value]) -> &[Value] {
         let stub_name = format!("jit_call_native_{}", args.len());
         let thread = self.load_mutator_thread();
-        let mut stub_args = Vec::with_capacity(args.len() + 2);
+        let mut stub_args = Vec::with_capacity(args.len() + 3);
         stub_args.push(func_ptr);
         stub_args.push(thread);
+        stub_args.push(self.dynamic);
         stub_args.extend_from_slice(args);
         self.call_import_direct(&stub_name, &stub_args)
     }
@@ -461,7 +492,7 @@ impl<'a> Codegen<'a> {
 
         self.builder.switch_to_block(slow_block);
         self.builder.seal_block(slow_block);
-        self.call_import_direct("jit_safepoint_poll_slow", &[thread]);
+        self.call_import_direct("jit_safepoint_poll_slow", &[thread, self.dynamic]);
         self.builder.ins().jump(done_block, &[]);
 
         self.builder.switch_to_block(done_block);
@@ -523,8 +554,6 @@ impl<'a> Codegen<'a> {
     }
 
     fn setup_locals(&mut self, args: &Args, incoming: IncomingArgs<'_>) -> CodegenResult<()> {
-        self.call_internal("mark_bind", &[self.env]);
-
         let optional_args = args
             .optional
             .as_ref()
@@ -533,7 +562,7 @@ impl<'a> Codegen<'a> {
         let normal_count = args.normal.len();
 
         match incoming {
-            IncomingArgs::Trampoline { args_ptr, args_cnt } => {
+            IncomingArgs::Argv { args_ptr, args_cnt } => {
                 for (i, arg) in args.normal.iter().enumerate() {
                     let val = self.load_arg_from_ptr(args_ptr, i);
                     self.bind_argument(arg, val);
@@ -648,7 +677,10 @@ impl<'a> Codegen<'a> {
         let is_function: i64 = if load_function_cell { 1 } else { 0 };
         let is_function = self.builder.ins().iconst(types::I64, is_function);
         let sym = self.translate_lispobj(&LispSymbol::from(symbol));
-        let result = self.call_internal("load_symbol_value", &[sym, is_function, self.env])[0];
+        let result = self.call_internal(
+            "load_symbol_value",
+            &[sym, is_function, self.env, self.dynamic],
+        )[0];
 
         Ok(result)
     }
@@ -748,27 +780,25 @@ impl<'a> Codegen<'a> {
         self.builder.switch_to_block(call_block);
         self.builder.seal_block(call_block);
 
-        // Check if we should use trampoline (0xffff) or direct call
-        let trampoline_marker = self.builder.ins().iconst(types::I64, 0xffff);
-        let is_trampoline = self
+        // Check if we should use argv ABI or direct fixed-argument ABI.
+        let argv_abi_marker = self.builder.ins().iconst(types::I64, ARGV_ABI_MARKER);
+        let is_argv_abi = self
             .builder
             .ins()
-            .icmp(IntCC::Equal, dispatch_info, trampoline_marker);
+            .icmp(IntCC::Equal, dispatch_info, argv_abi_marker);
 
-        let trampoline_block = self.builder.create_block();
+        let argv_block = self.builder.create_block();
         let direct_block = self.builder.create_block();
 
         self.builder
             .ins()
-            .brif(is_trampoline, trampoline_block, &[], direct_block, &[]);
+            .brif(is_argv_abi, argv_block, &[], direct_block, &[]);
 
-        // Trampoline call block
-        self.builder.switch_to_block(trampoline_block);
-        self.builder.seal_block(trampoline_block);
-        let trampoline_result = self.generate_trampoline_call(&args, func)?;
-        self.builder
-            .ins()
-            .jump(merge_block, &[trampoline_result.into()]);
+        // Argv ABI call block
+        self.builder.switch_to_block(argv_block);
+        self.builder.seal_block(argv_block);
+        let argv_result = self.generate_argv_call(&args, func)?;
+        self.builder.ins().jump(merge_block, &[argv_result.into()]);
 
         // Direct call block
         self.builder.switch_to_block(direct_block);
@@ -844,6 +874,7 @@ impl<'a> Codegen<'a> {
                     sig.params.push(AbiParam::new(types::I64));
                 }
                 sig.params.push(AbiParam::new(types::I64)); // env
+                sig.params.push(AbiParam::new(types::I64)); // dynamic
                 sig.params.push(AbiParam::new(types::I64)); // lexical
                 sig.returns.push(AbiParam::new(types::I64));
 
@@ -851,7 +882,7 @@ impl<'a> Codegen<'a> {
                 let func_ptr = self.builder.use_var(func_ptr_var);
                 let lexical = self.builder.use_var(lexical_var);
 
-                let mut call_args = Vec::with_capacity($argc + 2);
+                let mut call_args = Vec::with_capacity($argc + 3);
                 let actual_len = args.len();
                 for idx in 0..$argc {
                     let val = if idx < actual_len {
@@ -862,14 +893,12 @@ impl<'a> Codegen<'a> {
                     call_args.push(val);
                 }
                 call_args.push(self.env);
+                call_args.push(self.dynamic);
                 call_args.push(lexical);
 
                 let is_native = self.builder.use_var(is_native_var);
                 let zero = self.builder.ins().iconst(types::I64, 0);
-                let call_native = self
-                    .builder
-                    .ins()
-                    .icmp(IntCC::NotEqual, is_native, zero);
+                let call_native = self.builder.ins().icmp(IntCC::NotEqual, is_native, zero);
                 let native_block = self.builder.create_block();
                 let jit_block = self.builder.create_block();
 
@@ -915,8 +944,8 @@ impl<'a> Codegen<'a> {
         Ok(result)
     }
 
-    fn generate_trampoline_call(&mut self, args: &[Value], func: Value) -> CodegenResult<Value> {
-        tracing::debug!("Generating trampoline call with {} arguments", args.len());
+    fn generate_argv_call(&mut self, args: &[Value], func: Value) -> CodegenResult<Value> {
+        tracing::debug!("Generating argv ABI call with {} arguments", args.len());
 
         let argc = args.len();
 
@@ -936,11 +965,12 @@ impl<'a> Codegen<'a> {
         let args_ptr = self.builder.ins().stack_addr(types::I64, slot, 0);
         let args_cnt = self.builder.ins().iconst(types::I64, argc as i64);
 
-        // Create trampoline signature (args_ptr, args_cnt, env, lexical)
+        // Create argv ABI signature (args_ptr, args_cnt, env, dynamic, lexical)
         let mut sig = self.cgctx.module.make_signature();
         sig.params.push(AbiParam::new(types::I64)); // args_ptr
         sig.params.push(AbiParam::new(types::I64)); // args_cnt
         sig.params.push(AbiParam::new(types::I64)); // env
+        sig.params.push(AbiParam::new(types::I64)); // dynamic
         sig.params.push(AbiParam::new(types::I64)); // lexical
         sig.returns.push(AbiParam::new(types::I64));
 
@@ -950,10 +980,7 @@ impl<'a> Codegen<'a> {
         let is_native = self.call_internal("is_native_function", &[func, self.env])[0];
 
         let zero = self.builder.ins().iconst(types::I64, 0);
-        let call_native = self
-            .builder
-            .ins()
-            .icmp(IntCC::NotEqual, is_native, zero);
+        let call_native = self.builder.ins().icmp(IntCC::NotEqual, is_native, zero);
         let native_block = self.builder.create_block();
         let jit_block = self.builder.create_block();
         let merge_block = self.builder.create_block();
@@ -965,7 +992,7 @@ impl<'a> Codegen<'a> {
 
         self.builder.switch_to_block(native_block);
         self.builder.seal_block(native_block);
-        let call_args = [args_ptr, args_cnt, self.env, lexical];
+        let call_args = [args_ptr, args_cnt, self.env, self.dynamic, lexical];
         let result = self.call_native_transition(func_ptr, &call_args)[0];
         self.builder.ins().jump(merge_block, &[result.into()]);
 
@@ -974,7 +1001,7 @@ impl<'a> Codegen<'a> {
         let inst = self.builder.ins().call_indirect(
             sig_ref,
             func_ptr,
-            &[args_ptr, args_cnt, self.env, lexical],
+            &[args_ptr, args_cnt, self.env, self.dynamic, lexical],
         );
         let result = self.builder.inst_results(inst)[0];
         self.builder.ins().jump(merge_block, &[result.into()]);
@@ -1200,7 +1227,6 @@ impl<'a> Codegen<'a> {
         )?;
 
         let result = codegen.translate_exprs(&lambda.body.body)?;
-        codegen.call_internal("unbind_special", &[codegen.env]);
 
         let func_id = codegen.func_id;
         let (result, unresolved) = codegen.finalize(result);
@@ -1234,13 +1260,37 @@ impl<'a> Codegen<'a> {
     fn translate_let_expr<'s>(&mut self, let_expr: &Let) -> CodegenResult<Value> {
         // Remember the current locals count to restore later
         let locals_before = self.locals.len();
+        let dynamic_before = self.dynamic;
+        let binding_count = let_expr.bindings.len();
+        let mut dynamic_slot = None;
+        let mut dynamic_count = None;
+        let dynamic_env = if binding_count == 0 {
+            dynamic_before
+        } else {
+            let header_size = std::mem::size_of::<DynamicEnv>();
+            let binding_size = std::mem::size_of::<DynamicBinding>();
+            let slot_size = header_size + binding_count * binding_size;
+            let slot = self.builder.create_sized_stack_slot(StackSlotData {
+                kind: StackSlotKind::ExplicitSlot,
+                size: slot_size as u32,
+                align_shift: 3,
+            });
+            let dynamic_env = self.builder.ins().stack_addr(types::I64, slot, 0);
+            let zero = self.builder.ins().iconst(types::I64, 0);
+            self.builder.ins().stack_store(zero, slot, 0);
+            self.builder.ins().stack_store(dynamic_before, slot, 8);
+            let count = self.builder.declare_var(types::I64);
+            self.builder.def_var(count, zero);
+            dynamic_count = Some(count);
+            dynamic_slot = Some(slot);
+            dynamic_env
+        };
 
         // Evaluate values in parent scope and create new variables
         let mut new_vars = Vec::new();
-        self.call_internal("mark_bind", &[self.env]);
-        for (arg, value_expr) in &*let_expr.bindings {
+        for (arg, value_expr) in let_expr.bindings.iter() {
             // Evaluate the value expression in the *parent* scope (before adding the new variable)
-            let mut value = if let Some(expr) = value_expr {
+            let value = if let Some(expr) = value_expr {
                 self.translate_expr(expr)?
             } else {
                 self.nil()
@@ -1252,26 +1302,74 @@ impl<'a> Codegen<'a> {
             self.builder.def_var(var, value);
             new_vars.push((arg.clone(), var));
 
-            let sym = Symbol::from(arg.ident);
-            let sym = self.translate_lispobj(&LispSymbol::from(sym));
+            if let (Some(_slot), Some(count_var)) = (dynamic_slot, dynamic_count) {
+                let sym = Symbol::from(arg.ident);
+                let sym = self.translate_lispobj(&LispSymbol::from(sym));
+                let symbol_index =
+                    self.call_internal("resolve_special_symbol_index", &[sym, self.env])[0];
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                let has_dynamic_binding =
+                    self.builder
+                        .ins()
+                        .icmp(IntCC::SignedGreaterThanOrEqual, symbol_index, zero);
+                let store_block = self.builder.create_block();
+                let done_block = self.builder.create_block();
 
-            // let is_special = self.call_internal("is_special", &[sym, self.env])[0];
-            // let fals = self.builder.ins().iconst(types::I64, 0);
-            // let is_special = self.builder.ins().icmp(IntCC::Equal, is_special, fals);
-            // let special_block = self.builder.create_block();
+                self.builder
+                    .ins()
+                    .brif(has_dynamic_binding, store_block, &[], done_block, &[]);
 
-            self.call_internal("bind_special", &[sym, value, self.env]);
+                self.builder.switch_to_block(store_block);
+                self.builder.seal_block(store_block);
+
+                let count = self.builder.use_var(count_var);
+                let binding_offset = self
+                    .builder
+                    .ins()
+                    .imul_imm(count, std::mem::size_of::<DynamicBinding>() as i64);
+                let binding_offset = self
+                    .builder
+                    .ins()
+                    .iadd_imm(binding_offset, std::mem::size_of::<DynamicEnv>() as i64);
+                let binding_addr = self.builder.ins().iadd(dynamic_env, binding_offset);
+
+                self.builder.ins().store(
+                    MemFlags::new(),
+                    symbol_index,
+                    binding_addr,
+                    std::mem::offset_of!(DynamicBinding, index) as i32,
+                );
+                self.builder.ins().store(
+                    MemFlags::new(),
+                    value,
+                    binding_addr,
+                    std::mem::offset_of!(DynamicBinding, obj) as i32,
+                );
+
+                let next_count = self.builder.ins().iadd_imm(count, 1);
+                self.builder.def_var(count_var, next_count);
+                self.builder.ins().jump(done_block, &[]);
+
+                self.builder.switch_to_block(done_block);
+                self.builder.seal_block(done_block);
+            }
+        }
+
+        if let (Some(slot), Some(count_var)) = (dynamic_slot, dynamic_count) {
+            let count = self.builder.use_var(count_var);
+            self.builder.ins().stack_store(count, slot, 0);
         }
 
         // Add all new variables to locals after all values are evaluated
         self.locals.extend(new_vars);
+        self.dynamic = dynamic_env;
 
         // Translate body with new variables in scope
         let result = self.translate_exprs(&let_expr.body.body)?;
 
         // Pop the let-bound variables from locals
         self.locals.truncate(locals_before);
-        self.call_internal("unbind_special", &[self.env]);
+        self.dynamic = dynamic_before;
 
         Ok(result)
     }
@@ -1327,50 +1425,68 @@ fn gen_funcall(module: &mut JITModule) -> CodegenResult<()> {
 }
 
 fn prepare_signature(args: &Args, sig: &mut Signature) {
-    if args.use_trampoline() {
+    if args.use_argv_abi() {
         // args_ptr: pointer to arguments array
         sig.params.push(AbiParam::new(types::I64));
         // args_cnt: number of arguments
         sig.params.push(AbiParam::new(types::I64));
         // env arg
         sig.params.push(AbiParam::new(types::I64));
+        // dynamic bindings arg
+        sig.params.push(AbiParam::new(types::I64));
         // lexical bindings arg
         sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
     } else {
-        let argc = args.total();
+        let argc = args.fixed_param_count();
         for _ in 0..argc {
             sig.params.push(AbiParam::new(types::I64));
         }
 
         // env arg
         sig.params.push(AbiParam::new(types::I64));
+        // dynamic bindings arg
+        sig.params.push(AbiParam::new(types::I64));
         // lexical bindings arg
         sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
     }
 }
 
-fn identify_env(params: &[Value], use_trampoline: bool) -> Value {
-    if use_trampoline {
+fn identify_env(params: &[Value], use_argv_abi: bool) -> Value {
+    if use_argv_abi {
         params
             .get(2)
             .copied()
-            .unwrap_or_else(|| panic!("expected env parameter for trampoline"))
+            .unwrap_or_else(|| panic!("expected env parameter for argv ABI"))
     } else {
         params
-            .get(params.len().saturating_sub(2))
+            .get(params.len().saturating_sub(3))
             .copied()
             .unwrap_or_else(|| panic!("expected env parameter for direct call"))
     }
 }
 
-fn identify_lexical(params: &[Value], use_trampoline: bool) -> Value {
-    if use_trampoline {
+fn identify_dynamic(params: &[Value], use_argv_abi: bool) -> Value {
+    if use_argv_abi {
         params
             .get(3)
             .copied()
-            .unwrap_or_else(|| panic!("expected lexical parameter for trampoline"))
+            .unwrap_or_else(|| panic!("expected dynamic parameter for argv ABI"))
+    } else {
+        params
+            .get(params.len().saturating_sub(2))
+            .copied()
+            .unwrap_or_else(|| panic!("expected dynamic parameter for direct call"))
+    }
+}
+
+fn identify_lexical(params: &[Value], use_argv_abi: bool) -> Value {
+    if use_argv_abi {
+        params
+            .get(4)
+            .copied()
+            .unwrap_or_else(|| panic!("expected lexical parameter for argv ABI"))
     } else {
         params
             .last()
@@ -1389,21 +1505,25 @@ impl CodegenBuilder {
     }
 
     fn identify_env(&self, params: &[Value]) -> Value {
-        identify_env(params, self.args.use_trampoline())
+        identify_env(params, self.args.use_argv_abi())
+    }
+
+    fn identify_dynamic(&self, params: &[Value]) -> Value {
+        identify_dynamic(params, self.args.use_argv_abi())
     }
 
     fn identify_lexical(&self, params: &[Value]) -> Value {
-        identify_lexical(params, self.args.use_trampoline())
+        identify_lexical(params, self.args.use_argv_abi())
     }
 
     /// setup local bindings and return the special value binding for envrionment
     fn setup_locals(&self, params: &[Value], codegen: &mut Codegen) -> CodegenResult<()> {
-        if self.args.use_trampoline() {
+        if self.args.use_argv_abi() {
             let args_ptr = params[0];
             let args_cnt = params[1];
-            codegen.setup_locals(&self.args, IncomingArgs::Trampoline { args_ptr, args_cnt })?;
+            codegen.setup_locals(&self.args, IncomingArgs::Argv { args_ptr, args_cnt })?;
         } else {
-            let env_index = params.len().saturating_sub(2);
+            let env_index = params.len().saturating_sub(3);
             let direct_args = &params[..env_index];
             codegen.setup_locals(&self.args, IncomingArgs::Direct { args: direct_args })?;
         }
@@ -1424,11 +1544,20 @@ impl CodegenBuilder {
         let (builder, func_id, params) = Codegen::create_function_prologue(module, fctx, ctx)?;
         let cgctx = CodegenContext::from_parts(module, data_desc, builtin_funcs);
         let env = self.identify_env(&params);
+        let dynamic = self.identify_dynamic(&params);
         let lexical = self.identify_lexical(&params);
 
         let func = LispFunction::new_closure(func_id, FunctionSignature::from_args(&self.args));
-        let mut codegen =
-            Codegen::assemble(cgctx, builder, func, env, lexical, func_id, Vec::new());
+        let mut codegen = Codegen::assemble(
+            cgctx,
+            builder,
+            func,
+            env,
+            dynamic,
+            lexical,
+            func_id,
+            Vec::new(),
+        );
         self.setup_locals(&params, &mut codegen)?;
         Ok(codegen)
     }

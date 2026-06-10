@@ -5,17 +5,17 @@ use std::{
     marker::PhantomData,
     ptr::NonNull,
     sync::{
-        atomic::{AtomicU8, Ordering},
         LazyLock, RwLock,
+        atomic::{AtomicU8, Ordering},
     },
 };
 
 use mmtk::{
-    util::{Address, ObjectReference},
     AllocationSemantics,
+    util::{Address, ObjectReference},
 };
 
-use super::{post_alloc_with_semantics, thread::current_thread, Tagged, OBJECT_REF_OFFSET};
+use super::{OBJECT_REF_OFFSET, Tagged, post_alloc_with_semantics, thread::current_thread};
 
 /// The tag policy for the low bits of Torrent tagged values.
 ///

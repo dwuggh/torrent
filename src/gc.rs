@@ -1,14 +1,16 @@
+use std::ptr::NonNull;
 use std::sync::OnceLock;
 
 use mmtk::{
-    util::{alloc::AllocatorSelector, Address, ObjectReference},
-    vm::slot::Slot,
-    vm::VMBinding,
     AllocationSemantics, Mutator,
+    util::{Address, ObjectReference, alloc::AllocatorSelector},
+    vm::VMBinding,
+    vm::slot::Slot,
 };
 
-pub use self::thread::{current_thread, MutatorThread};
 use self::thread::{AllocFastPath, THREAD_MANAGER};
+pub use self::thread::{MutatorThread, current_thread};
+use crate::core::object::Object;
 
 mod types;
 pub use types::*;
@@ -162,6 +164,37 @@ pub fn object_slot_write_post(src: ObjectReference, slot_addr: Address) {
     object_reference_write_post(src, slot, new_target);
 }
 
+/// Build the raw tagged Lisp word for a typed heap object reference.
+///
+/// This keeps the MMTk object-reference conversion inside `gc`; callers in
+/// `core` only traffic in the Lisp `Object` representation.
+pub fn tagged_word_from_heap_data<T: HeapObject>(data: NonNull<T>) -> u64 {
+    let object = unsafe { T::object_ref_from_data(data) };
+    object.to_raw_address().as_usize() as u64 | T::PRIMARY_TAG as u64
+}
+
+/// Store `value` into a tagged object field owned by `owner`.
+///
+/// The public owner is the containing Lisp object. This function is the GC
+/// boundary that converts it to MMTk's object-reference representation and
+/// runs the write barrier around the raw slot store.
+#[inline(always)]
+pub fn write_object_slot(owner: Object, slot: &mut Object, value: Object) {
+    debug_assert!(
+        owner.is_reference(),
+        "write barrier owner must be a heap object"
+    );
+    let raw = owner
+        .untagged_ptr()
+        .expect("write barrier owner must not be null");
+    let src =
+        unsafe { ObjectReference::from_raw_address_unchecked(Address::from_ptr(raw.as_ptr())) };
+    let slot_addr = Address::from_ptr(slot as *mut Object);
+    object_slot_write_pre(src, slot_addr);
+    *slot = value;
+    object_slot_write_post(src, slot_addr);
+}
+
 /// Allocate an object by logical metadata tag and return its object-reference address.
 pub fn alloc_with_tag<VM: VMBinding>(mutator: &mut Mutator<VM>, tag: u8) -> Address {
     let meta = get_metadata_for_tag(tag).unwrap();
@@ -252,9 +285,9 @@ pub mod test_support {
 
 pub use mmtk;
 pub use roots::{
-    push_jit_root_frame, push_native_root_frame, scan_native_root_frame, scan_root_chain,
     JitRootFrame, NativeRootFrame, NativeRootFrameHeader, RootFrameGuard, RootLink,
+    push_jit_root_frame, push_native_root_frame, scan_native_root_frame, scan_root_chain,
 };
-pub use scanning::{set_stackmap_provider, StackMapProvider, StackRootVisitor};
+pub use scanning::{StackMapProvider, StackRootVisitor, set_stackmap_provider};
 pub use slot::TaggedPtrSlot;
 pub use vm::MM;

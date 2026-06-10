@@ -440,7 +440,9 @@ fn expand_quoted_data(data: &QuotedData, scope: &Scope, env: &Environment) -> Ru
 /// Legacy function - now redirects to the new macro expansion system
 pub fn macro_expand_call(call: &Call, env: &Environment) -> Option<RuntimeResult<Expr>> {
     let symbol = call.symbol.get().into();
-    let guard = env.load_symbol_guard(symbol, Some(FuncCellType::Macro)).ok()?;
+    let guard = env
+        .load_symbol_guard(symbol, Some(FuncCellType::Macro))
+        .ok()?;
     let val = guard.as_ref();
     let ObjectRef::Function(func) = val.as_ref() else {
         return Some(Err(RuntimeError::WrongType {
@@ -474,10 +476,7 @@ pub fn macro_expand_call(call: &Call, env: &Environment) -> Option<RuntimeResult
         {
             Ok(expr) => Ok(expr),
             Err(parse_errors) => Err(RuntimeError::MacroExpansionError {
-                message: format!(
-                    "Failed to parse macro expansion result: {:?}",
-                    parse_errors
-                ),
+                message: format!("Failed to parse macro expansion result: {:?}", parse_errors),
             }),
         }
     });

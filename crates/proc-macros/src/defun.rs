@@ -6,8 +6,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::function::{
-    calculate_signature, construct_return, construct_return_nodrop, Arg, ArgKind, Function,
-    RetKind,
+    Arg, ArgKind, Function, RetKind, calculate_signature, construct_return, construct_return_nodrop,
 };
 
 pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
@@ -18,10 +17,10 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let lisp_name = spec.name.unwrap_or_else(|| map_function_name(&subr_name));
     let func_name = format_ident!("__wrapper_fn_{}", &subr_name);
 
-    let (use_trampoline, arg_conversion, arg_finish) = get_args(&args);
+    let (use_argv_abi, arg_conversion, arg_finish) = get_args(&args);
 
     // Generate the extern "C" function signature
-    let (c_params, _c_param_idents) = if !use_trampoline {
+    let (c_params, _c_param_idents) = if !use_argv_abi {
         get_direct_c_signature(&args)
     } else {
         (
@@ -29,12 +28,14 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
                 quote! { args_ptr: i64 },
                 quote! { args_cnt: i64 },
                 quote! { env: i64 },
+                quote! { _dynamic: i64 },
                 quote! { _lexical: i64 },
             ],
             vec![
                 format_ident!("args_ptr"),
                 format_ident!("args_cnt"),
                 format_ident!("env"),
+                format_ident!("_dynamic"),
                 format_ident!("_lexical"),
             ],
         )
@@ -152,7 +153,7 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
         }
     };
 
-    let signatures = if !use_trampoline {
+    let signatures = if !use_argv_abi {
         get_direct_signatures(&args)
     } else {
         vec![
@@ -164,6 +165,9 @@ pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
             },
             quote! {
                 sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // env
+            },
+            quote! {
+                sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // dynamic
             },
             quote! {
                 sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // lexical
@@ -212,6 +216,8 @@ fn get_direct_c_signature(args: &[Arg]) -> (Vec<TokenStream>, Vec<proc_macro2::I
     // Always add env at the end
     c_params.push(quote! { env: i64 });
     c_param_idents.push(format_ident!("env"));
+    c_params.push(quote! { _dynamic: i64 });
+    c_param_idents.push(format_ident!("_dynamic"));
     c_params.push(quote! { _lexical: i64 });
     c_param_idents.push(format_ident!("_lexical"));
 
@@ -233,7 +239,7 @@ fn get_direct_signatures(args: &[Arg]) -> Vec<TokenStream> {
                 signatures.push(quote! {
                     sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // slice_argc
                 });
-                // panic!("rest args must be trampolined")
+                // Rest args use the argv ABI.
             }
             _ => {
                 signatures.push(quote! {
@@ -248,6 +254,9 @@ fn get_direct_signatures(args: &[Arg]) -> Vec<TokenStream> {
         sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // env
     });
     signatures.push(quote! {
+        sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // dynamic
+    });
+    signatures.push(quote! {
         sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // lexical
     });
 
@@ -257,8 +266,7 @@ fn get_direct_signatures(args: &[Arg]) -> Vec<TokenStream> {
 fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
     let (normal, optional, rest) = calculate_signature(args);
 
-    // TODO can &rest also not use trampoline somehow?
-    let use_trampoline = rest || { normal + optional + (rest as u8 * 2) > 8 };
+    let use_argv_abi = rest || { normal + optional > 8 };
 
     let object = quote! { crate::core::object::Object };
     let object_slot = quote! { crate::core::object::ObjectSlot };
@@ -269,7 +277,7 @@ fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
     let mut init_args: Vec<TokenStream> = Vec::new();
     let mut finish_args: Vec<TokenStream> = Vec::new();
 
-    if use_trampoline {
+    if use_argv_abi {
         init_args.push(quote! {
             let args_cnt: usize = args_cnt as usize;
         });
@@ -285,7 +293,7 @@ fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
         let ident = &arg.ident;
         let arg_info = &arg.info;
 
-        let load_arg = if use_trampoline {
+        let load_arg = if use_argv_abi {
             quote! {
                 let arg_val = unsafe {
                     let ptr = args_ptr as *const i64;
@@ -406,7 +414,7 @@ fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
                             #tmp
                         };
                         if arg_info.is_ref {
-                            if use_trampoline {
+                            if use_argv_abi {
                                 quote! {
                                     let #tmp = (args_cnt > i).then(|| {
                                         #inner
@@ -421,7 +429,7 @@ fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
                                 }
                             }
                         } else {
-                            if use_trampoline {
+                            if use_argv_abi {
                                 quote! {
                                     let #ident = (args_cnt > i).then(|| {
                                         #inner
@@ -450,7 +458,7 @@ fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
                             #tmp
                         };
 
-                        if use_trampoline {
+                        if use_argv_abi {
                             quote! {
                                 let #tmp = (args_cnt > i).then(|| {
                                     #inner
@@ -483,7 +491,7 @@ fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
                 // Slice arguments consume all remaining arguments
                 let ptr_ident = format_ident!("{}_ptr", ident);
                 let argc_ident = format_ident!("{}_argc", ident);
-                let prog = if use_trampoline {
+                let prog = if use_argv_abi {
                     quote! {
                         let ptr = args_ptr as *const #object;
                         let slice_ptr = ptr.add(#i);
@@ -527,7 +535,7 @@ fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
             }
         };
     }
-    (use_trampoline, init_args, finish_args)
+    (use_argv_abi, init_args, finish_args)
 }
 
 #[derive(Default, PartialEq, Debug, FromMeta)]

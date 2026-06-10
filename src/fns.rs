@@ -13,12 +13,18 @@ fn lisp_not(obj: Object) -> Object {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::number::LispInteger;
     use crate::core::Tag;
+    use crate::core::number::LispInteger;
 
     #[test]
     fn test_not() {
-        assert!(matches!(lisp_not(crate::core::object::nil()).as_ref(), ObjectRef::True));
-        assert!(matches!(lisp_not(LispInteger(1).tag()).as_ref(), ObjectRef::Nil));
+        assert!(matches!(
+            lisp_not(crate::core::object::nil()).as_ref(),
+            ObjectRef::True
+        ));
+        assert!(matches!(
+            lisp_not(LispInteger(1).tag()).as_ref(),
+            ObjectRef::Nil
+        ));
     }
 }

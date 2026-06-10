@@ -1,19 +1,18 @@
-use std::ptr::NonNull;
-
 use crate::{
     core::{
-        object::{Object, write_object_slot},
+        object::Object,
         tag::{TAG_INDIRECT, Tag},
     },
     gc::{Gc, HeaderedObject, HeapObject, Trace, Visitor},
 };
+use proc_macros::HeapEntries;
 
 #[derive(Debug, Clone)]
 pub struct LispIndirect(pub(crate) Gc<Indirect>);
 impl_tagged_for_gc!(LispIndirect, Indirect);
 
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, HeapEntries)]
 pub struct Indirect {
     value: Object,
 }
@@ -54,8 +53,7 @@ impl Indirect {
     }
 
     pub fn store(&mut self, value: Object) {
-        let src = unsafe { Self::object_ref_from_data(NonNull::from(&mut *self)) };
-        write_object_slot(src, &mut self.value, value);
+        self.value_mut().set(value);
     }
 }
 
@@ -68,5 +66,22 @@ unsafe impl HeaderedObject for Indirect {}
 unsafe impl Trace for Indirect {
     unsafe fn trace(&self, visitor: &mut Visitor) {
         unsafe { self.value.trace(visitor) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{number::LispInteger, tag::Tag};
+
+    #[test]
+    fn generated_entry_updates_value() {
+        let _mutator = crate::gc::test_support::bind_nogc_mutator();
+        let mut indirect = LispIndirect(Gc::new(Indirect::new(LispInteger(1).tag())));
+        let value = LispInteger(2).tag();
+
+        indirect.0.as_mut().value_mut().set(value);
+
+        assert_eq!(indirect.0.as_ref().load(), value);
     }
 }

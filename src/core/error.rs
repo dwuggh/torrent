@@ -1,20 +1,13 @@
 use thiserror::Error;
 
-use crate::core::{
-    ident::Ident,
-    object::Object,
-    symbol::Symbol,
-};
+use crate::core::{ident::Ident, object::Object, symbol::Symbol};
 
 /// Runtime errors that can occur during Lisp execution
 #[derive(Debug, Error)]
 pub enum RuntimeError {
     // Type errors
     #[error("Wrong type argument: expected {expected}, got {actual}")]
-    WrongType {
-        expected: &'static str,
-        actual: u8,
-    },
+    WrongType { expected: &'static str, actual: u8 },
 
     #[error("Wrong number of arguments: expected {expected}, got {actual}")]
     WrongNumberOfArgs { expected: usize, actual: usize },

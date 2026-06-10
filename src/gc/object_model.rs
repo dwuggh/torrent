@@ -6,7 +6,7 @@ use mmtk::{
     },
 };
 
-use super::{metadata_for_object, vm::MM, OBJECT_REF_OFFSET};
+use super::{OBJECT_REF_OFFSET, metadata_for_object, vm::MM};
 
 pub struct VMObjectModel;
 

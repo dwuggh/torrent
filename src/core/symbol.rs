@@ -6,14 +6,12 @@
 //! - Thread-safe symbol map with garbage collection support
 //! - Special symbol handling (keywords starting with ':')
 
-use indexmap::IndexMap;
-use std::ptr::NonNull;
-
 use crate::core::error::RuntimeResult;
 use crate::core::ident::Ident;
 use crate::core::object::{Object, nil, write_object_slot};
 use crate::core::tag::{TAG_SYMBOL_MAP, Tag, TaggedPtrError, Untag};
-use crate::gc::{HeaderedObject, HeapObject, Trace, Visitor};
+use crate::gc::{HeaderedObject, Trace, Visitor};
+use indexmap::IndexMap;
 
 // =============================================================================
 // Type Aliases and Constants
@@ -316,11 +314,11 @@ impl SymbolMap {
 
     /// Mutate the value cell of a symbol (initializing it if needed).
     pub fn set_value(&mut self, symbol: Symbol, value: Object) -> Symbol {
-        let src = unsafe { SymbolMap::object_ref_from_data(NonNull::from(&mut *self)) };
+        let owner = Object::from_heap_ref(&*self);
         match symbol.index() {
             Some(index) => {
                 if let Some((_, cell)) = self.map.get_index_mut(index) {
-                    write_object_slot(src, &mut cell.value, value);
+                    write_object_slot(owner, &mut cell.value, value);
                     cell.name
                 } else {
                     symbol
@@ -334,13 +332,13 @@ impl SymbolMap {
                         let symbol = Symbol::new_global(occupied_entry.index());
                         let cell = occupied_entry.get_mut();
                         cell.name = symbol;
-                        write_object_slot(src, &mut cell.value, value);
+                        write_object_slot(owner, &mut cell.value, value);
                         symbol
                     }
                     indexmap::map::Entry::Vacant(vacant_entry) => {
                         let symbol = Symbol::new_global(vacant_entry.index());
                         let cell = vacant_entry.insert(SymbolCell::new(symbol, special));
-                        write_object_slot(src, &mut cell.value, value);
+                        write_object_slot(owner, &mut cell.value, value);
                         symbol
                     }
                 }
@@ -350,11 +348,11 @@ impl SymbolMap {
 
     /// Mutate the function cell of a symbol (initializing it if needed).
     pub fn set_func(&mut self, symbol: Symbol, func: Object) -> Symbol {
-        let src = unsafe { SymbolMap::object_ref_from_data(NonNull::from(&mut *self)) };
+        let owner = Object::from_heap_ref(&*self);
         match symbol.index() {
             Some(index) => {
                 if let Some((_, cell)) = self.map.get_index_mut(index) {
-                    write_object_slot(src, &mut cell.func, func);
+                    write_object_slot(owner, &mut cell.func, func);
                     cell.name
                 } else {
                     symbol
@@ -368,13 +366,13 @@ impl SymbolMap {
                         let symbol = Symbol::new_global(occupied_entry.index());
                         let cell = occupied_entry.get_mut();
                         cell.name = symbol;
-                        write_object_slot(src, &mut cell.func, func);
+                        write_object_slot(owner, &mut cell.func, func);
                         symbol
                     }
                     indexmap::map::Entry::Vacant(vacant_entry) => {
                         let symbol = Symbol::new_global(vacant_entry.index());
                         let cell = vacant_entry.insert(SymbolCell::new(symbol, special));
-                        write_object_slot(src, &mut cell.func, func);
+                        write_object_slot(owner, &mut cell.func, func);
                         symbol
                     }
                 }

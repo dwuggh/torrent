@@ -7,6 +7,7 @@ use cranelift_module::DataDescription;
 use cranelift_module::FuncId;
 use cranelift_module::Module;
 
+use crate::core::Tag;
 use crate::core::compiler::codegen::Codegen;
 use crate::core::compiler::stack_map::{
     declare_jit_runtime_imports, install_stack_map_provider, register_jit_runtime_symbols,
@@ -17,7 +18,6 @@ use crate::core::function::LispFunction;
 use crate::core::parser::expr::Expr;
 use crate::core::runtime::store_symbol_function;
 use crate::core::symbol::Symbol;
-use crate::core::Tag;
 use anyhow::Result;
 
 pub struct JIT {
@@ -32,7 +32,6 @@ impl JIT {
 
         let mut flag_builder = settings::builder();
         flag_builder.set("use_colocated_libcalls", "true").unwrap();
-        // flag_builder.set("enable_safepoints", "true").unwrap();
         flag_builder.set("is_pic", "false").unwrap();
         flag_builder.set("opt_level", "speed").unwrap();
         // flag_builder.set("enable_verifier", "false").unwrap();

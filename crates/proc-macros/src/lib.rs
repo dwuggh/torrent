@@ -1,7 +1,7 @@
 use darling::{Error as DError, FromMeta, ast::NestedMeta};
 use proc_macro::{self, TokenStream};
 use proc_macro2::Span;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{
     DataEnum, DataStruct, DeriveInput, Fields, GenericParam, Generics, Ident, Member, Token, Type,
     parse_macro_input, punctuated::Punctuated,
@@ -66,6 +66,50 @@ pub fn derive_trace(input: TokenStream) -> TokenStream {
     //     syn::Data::Enum(data_enum) => derive_trace_enum(ident, data_enum, generics).into(),
     //     _ => panic!("Union types are not supported."),
     // }
+}
+
+#[proc_macro_derive(HeapEntries)]
+pub fn derive_heap_entries(input: TokenStream) -> TokenStream {
+    let DeriveInput {
+        ident,
+        data,
+        generics,
+        ..
+    } = parse_macro_input!(input);
+
+    let syn::Data::Struct(DataStruct {
+        fields: Fields::Named(fields),
+        ..
+    }) = data
+    else {
+        return TokenStream::from(
+            syn::Error::new_spanned(ident, "HeapEntries only supports structs with named fields")
+                .to_compile_error(),
+        );
+    };
+
+    let accessors = fields.named.iter().filter_map(|field| {
+        if !is_object_type(&field.ty) {
+            return None;
+        }
+
+        let field_ident = field.ident.as_ref().expect("named field");
+        let method = format_ident!("{}_mut", field_ident);
+        Some(quote! {
+            pub fn #method(&mut self) -> crate::core::object::ObjectEntry<'_> {
+                let owner = crate::core::object::Object::from_heap_ref(&*self);
+                crate::core::object::ObjectEntry::new(owner, &mut self.#field_ident)
+            }
+        })
+    });
+
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    quote! {
+        impl #impl_generics #ident #ty_generics #where_clause {
+            #(#accessors)*
+        }
+    }
+    .into()
 }
 
 fn derive_trace_struct(
@@ -307,6 +351,19 @@ fn is_gc(arg: &Type) -> bool {
             .map(|p| p.ident.to_string())
             .as_deref()
             == Some("Gc");
+    }
+    false
+}
+
+fn is_object_type(arg: &Type) -> bool {
+    if let Type::Path(path) = arg {
+        return path
+            .path
+            .segments
+            .last()
+            .map(|p| p.ident.to_string())
+            .as_deref()
+            == Some("Object");
     }
     false
 }

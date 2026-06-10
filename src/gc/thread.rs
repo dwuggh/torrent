@@ -1,17 +1,17 @@
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, Weak};
 use std::thread::JoinHandle;
 
 use mmtk::util::{
-    alloc::{AllocatorSelector, BumpAllocator, ImmixAllocator},
     Address, OpaquePointer, VMMutatorThread, VMThread, VMWorkerThread,
+    alloc::{AllocatorSelector, BumpAllocator, ImmixAllocator},
 };
 use mmtk::{AllocationSemantics, Mutator, MutatorContext};
 
-use super::{default_allocator_selector, lab::LocalAllocationBuffer, vm::MM, OBJECT_REF_OFFSET};
+use super::{OBJECT_REF_OFFSET, default_allocator_selector, lab::LocalAllocationBuffer, vm::MM};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum ThreadState {

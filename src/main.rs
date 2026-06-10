@@ -1,11 +1,11 @@
 pub mod core;
-pub mod gc;
 pub mod data;
 pub mod fns;
+pub mod gc;
 
 use crate::core::{
     compiler::jit::JIT,
-    env::Environment,
+    env::{DynamicEnv, Environment},
     lexical::LexicalBindings,
     object::Object,
     object::init_gc_types,
@@ -43,6 +43,12 @@ unsafe fn run_code(
         match parse_src(code) {
             Ok(exprs) => {
                 let env_ptr = env as *const Environment;
+                let dynamic = DynamicEnv {
+                    len: 0,
+                    parent: std::ptr::null_mut(),
+                    bindings: [],
+                };
+                let dynamic_ptr = &dynamic as *const DynamicEnv;
 
                 for expr in exprs.iter() {
                     expand_and_resolve_everything(expr, env)?;
@@ -55,10 +61,14 @@ unsafe fn run_code(
                         let f = jit.compile_expr(&expr).unwrap();
                         let code_fn = std::mem::transmute::<
                             _,
-                            fn(*const Environment, *mut LexicalBindings) -> Object,
+                            fn(
+                                *const Environment,
+                                *const DynamicEnv,
+                                *mut LexicalBindings,
+                            ) -> Object,
                         >(f);
                         // And now we can call it!
-                        let value = code_fn(env_ptr, std::ptr::null_mut());
+                        let value = code_fn(env_ptr, dynamic_ptr, std::ptr::null_mut());
                         let result = value;
                         println!("result: {result:?}");
                         Ok(result)

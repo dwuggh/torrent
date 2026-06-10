@@ -1,10 +1,10 @@
-use super::env::Environment;
+use super::env::{DynamicEnv, Environment};
 use crate::{
     core::{
         cons::LispCons,
         env::FuncCellType,
         error::{RuntimeError, RuntimeResult},
-        function::{Function, FunctionType},
+        function::{ARGV_ABI_MARKER, Function, FunctionType},
         indirect::Indirect,
         number::LispInteger,
         object::{Object, ObjectRef, nil, tru},
@@ -173,14 +173,37 @@ pub fn store_symbol_function(symbol: Symbol, func: Object, env: &Environment) {
 }
 
 #[internal_fn]
-fn load_symbol_value(symbol: Symbol, load_function_cell: u64, env: &Environment) -> Result<i64> {
+fn load_symbol_value(
+    symbol: Symbol,
+    load_function_cell: u64,
+    env: &Environment,
+    dynamic: i64,
+) -> Result<i64> {
     tracing::debug!(
         "loading symbol value: {} {load_function_cell}",
         symbol.name()
     );
     let ty = FuncCellType::from_num(load_function_cell);
-    let guard = env.load_symbol_guard(symbol, ty)?;
+    let dynamic = if dynamic == 0 {
+        None
+    } else {
+        unsafe { (dynamic as *const DynamicEnv).as_ref() }
+    };
+    let guard = env.load_symbol_guard_with_dynamic(symbol, ty, dynamic)?;
     Ok(guard.raw_i64())
+}
+
+#[internal_fn]
+fn resolve_special_symbol_index(symbol: Symbol, env: &Environment) -> Result<i64> {
+    let Some(cell) = env.symbol_map.as_ref().get_symbol_cell_ref(symbol) else {
+        return Ok(-1);
+    };
+
+    if !cell.special {
+        return Ok(-1);
+    }
+
+    Ok(cell.name.data() as i64)
 }
 
 #[internal_fn]
@@ -221,12 +244,16 @@ fn is_native_function(func: &Object, env: &Environment) -> Result<i64> {
 
 #[internal_fn]
 fn check_function_args(func: &Function, argc: usize) -> i64 {
-    let (is_valid, _total_args, trampoline) = func.check_args(argc);
+    let (is_valid, fixed_param_count, use_argv_abi) = func.check_args(argc);
     if !is_valid {
         return -1;
     }
 
-    if trampoline { 0xffff } else { argc as i64 }
+    if use_argv_abi {
+        ARGV_ABI_MARKER
+    } else {
+        fixed_param_count as i64
+    }
 }
 
 #[internal_fn]
