@@ -8,7 +8,7 @@ pub mod function;
 pub mod hashtable;
 pub mod ident;
 pub mod indirect;
-pub mod lexical;
+
 pub mod number;
 pub mod object;
 pub mod parser;

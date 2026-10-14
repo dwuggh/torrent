@@ -2,10 +2,7 @@ use logos::Logos;
 
 use crate::core::{
     ident::Ident,
-    number::{LispCharacter, LispFloat, LispInteger},
-    object::LispObject,
-    string::LispStr,
-    symbol::{LispSymbol, Symbol},
+    number::{LispCharacter, LispInteger},
 };
 
 #[derive(Logos, Debug, PartialEq, Clone)]
@@ -89,169 +86,81 @@ pub enum Token {
     Error,
 }
 
-impl From<Token> for LispObject {
-    fn from(token: Token) -> Self {
-        match token {
-            Token::Integer(n) => LispObject::Int(LispInteger::new(n)),
-            Token::Float(f) => LispObject::Float(LispFloat::new(f)),
-            Token::Character(c) => LispObject::Character(LispCharacter::new(c)),
-            Token::Str(s) => LispObject::Str(LispStr::new(s)),
-            Token::Ident(ident) => {
-                let symbol = Symbol::from(ident);
-                LispObject::Symbol(LispSymbol(symbol))
-            }
-            // Quote-related tokens become symbols
-            Token::Quote => {
-                let symbol = Symbol::from("quote");
-                LispObject::Symbol(LispSymbol(symbol))
-            }
-            Token::Backquote => {
-                let symbol = Symbol::from("backquote");
-                LispObject::Symbol(LispSymbol(symbol))
-            }
-            Token::Unquote => {
-                let symbol = Symbol::from("unquote");
-                LispObject::Symbol(LispSymbol(symbol))
-            }
-            Token::UnquoteSplice => {
-                let symbol = Symbol::from("unquote-splicing");
-                LispObject::Symbol(LispSymbol(symbol))
-            }
-            // Comments and errors don't have meaningful object representations
-            Token::Comment => {
-                let symbol = Symbol::from("comment");
-                LispObject::Symbol(LispSymbol(symbol))
-            }
-            Token::Error => {
-                let symbol = Symbol::from("error");
-                LispObject::Symbol(LispSymbol(symbol))
-            }
-            // Structural tokens cannot be directly converted to objects
-            // They need context (the tokens they contain)
-            Token::LParen | Token::RParen | Token::LBracket | Token::RBracket => {
-                panic!("Structural tokens cannot be converted to LispObject without context")
-            }
-        }
+impl Token {
+    pub fn to_object(&self, ctx: &mut crate::gc::GcContext) -> crate::core::object::Object {
+        use crate::core::parser::expr::{Datum, Literal, Number};
+        let datum = match self {
+            Self::Integer(n) => Datum::Literal(Literal::Number(Number::Integer(LispInteger(*n)))),
+            Self::Float(f) => Datum::Literal(Literal::Number(Number::Real(*f))),
+            Self::Character(c) => Datum::Literal(Literal::Character(LispCharacter::new(*c))),
+            Self::Str(s) => Datum::Literal(Literal::String(s.clone())),
+            Self::Ident(ident) => Datum::Symbol((*ident).into()),
+            Self::Quote => Datum::Symbol("quote".into()),
+            Self::Backquote => Datum::Symbol("backquote".into()),
+            Self::Unquote => Datum::Symbol("unquote".into()),
+            Self::UnquoteSplice => Datum::Symbol("unquote-splicing".into()),
+            Self::Comment => Datum::Symbol("comment".into()),
+            Self::Error => Datum::Symbol("error".into()),
+            _ => panic!("Structural tokens require their contents"),
+        };
+        datum.to_object(ctx)
     }
-}
 
-/// Convert a sequence of tokens between parentheses to a cons list
-impl TryFrom<Vec<Token>> for LispObject {
-    type Error = &'static str;
-
-    fn try_from(tokens: Vec<Token>) -> Result<Self, Self::Error> {
+    pub fn objects_from_tokens(
+        tokens: &[Self],
+        ctx: &mut crate::gc::GcContext,
+    ) -> Result<crate::core::object::Object, &'static str> {
+        use crate::core::{cons::LispCons, tag::Tag, vector::LispVector};
         if tokens.is_empty() {
-            return Ok(LispObject::Nil);
+            return Ok(crate::core::object::nil());
         }
-
-        // Check if this is a parenthesized list or bracketed vector
-        let (_start_token, _end_token, is_vector) = match (tokens.first(), tokens.last()) {
-            (Some(Token::LParen), Some(Token::RParen)) => (Token::LParen, Token::RParen, false),
-            (Some(Token::LBracket), Some(Token::RBracket)) => {
-                (Token::LBracket, Token::RBracket, true)
-            }
+        let vector = match (tokens.first(), tokens.last()) {
+            (Some(Self::LParen), Some(Self::RParen)) => false,
+            (Some(Self::LBracket), Some(Self::RBracket)) => true,
             _ => return Err("Token sequence must be enclosed in matching delimiters"),
         };
-
-        // Extract the inner tokens (excluding delimiters)
-        if tokens.len() < 2 {
-            return Err("Invalid token sequence");
-        }
-
-        let inner_tokens = &tokens[1..tokens.len() - 1];
-
-        if inner_tokens.is_empty() {
-            return if is_vector {
-                Ok(LispObject::Vector(crate::core::vector::LispVector::new(
-                    vec![],
-                )))
-            } else {
-                Ok(LispObject::Nil)
-            };
-        }
-
-        // Convert inner tokens to LispObjects
-        let mut objects = Vec::new();
-        let mut i = 0;
-
-        while i < inner_tokens.len() {
-            match &inner_tokens[i] {
-                Token::LParen => {
-                    // Find matching closing paren
-                    let mut depth = 1;
-                    let mut j = i + 1;
-                    while j < inner_tokens.len() && depth > 0 {
-                        match &inner_tokens[j] {
-                            Token::LParen => depth += 1,
-                            Token::RParen => depth -= 1,
+        let mut roots = Vec::new();
+        let mut i = 1;
+        while i < tokens.len() - 1 {
+            let value = match &tokens[i] {
+                Self::LParen | Self::LBracket => {
+                    let mut delimiters = Vec::new();
+                    let mut end = i;
+                    loop {
+                        match tokens.get(end) {
+                            Some(Self::LParen) => delimiters.push(Self::RParen),
+                            Some(Self::LBracket) => delimiters.push(Self::RBracket),
+                            Some(token @ (Self::RParen | Self::RBracket)) => {
+                                if delimiters.pop().as_ref() != Some(token) {
+                                    return Err("Mismatched delimiter");
+                                }
+                            }
+                            None => return Err("Unmatched delimiter"),
                             _ => {}
                         }
-                        j += 1;
-                    }
-
-                    if depth != 0 {
-                        return Err("Unmatched parentheses");
-                    }
-
-                    // Recursively convert the nested list
-                    let nested_tokens = inner_tokens[i..j].to_vec();
-                    let nested_obj = LispObject::try_from(nested_tokens)?;
-                    objects.push(nested_obj);
-                    i = j;
-                }
-                Token::LBracket => {
-                    // Find matching closing bracket
-                    let mut depth = 1;
-                    let mut j = i + 1;
-                    while j < inner_tokens.len() && depth > 0 {
-                        match &inner_tokens[j] {
-                            Token::LBracket => depth += 1,
-                            Token::RBracket => depth -= 1,
-                            _ => {}
+                        end += 1;
+                        if delimiters.is_empty() {
+                            break;
                         }
-                        j += 1;
                     }
-
-                    if depth != 0 {
-                        return Err("Unmatched brackets");
-                    }
-
-                    // Recursively convert the nested vector
-                    let nested_tokens = inner_tokens[i..j].to_vec();
-                    let nested_obj = LispObject::try_from(nested_tokens)?;
-                    objects.push(nested_obj);
-                    i = j;
+                    let value = Self::objects_from_tokens(&tokens[i..end], ctx)?;
+                    i = end;
+                    value
                 }
-                Token::RParen | Token::RBracket => {
-                    return Err("Unexpected closing delimiter");
-                }
+                Self::RParen | Self::RBracket => return Err("Unexpected closing delimiter"),
                 token => {
-                    // Convert single token to object
-                    objects.push(LispObject::from(token.clone()));
                     i += 1;
+                    token.to_object(ctx)
                 }
-            }
+            };
+            roots.push(ctx.root(value));
         }
-
-        if is_vector {
-            // Convert to vector
-            let tagged_objects: Vec<_> = objects.into_iter().map(|obj| obj.tag()).collect();
-            Ok(LispObject::Vector(crate::core::vector::LispVector::new(
-                tagged_objects,
-            )))
+        let values = roots.iter().map(|root| *root.get(ctx)).collect::<Vec<_>>();
+        if vector {
+            Ok(LispVector::new(values, ctx).tag())
         } else {
-            // Convert to cons list
-            if objects.is_empty() {
-                Ok(LispObject::Nil)
-            } else {
-                let tagged_objects: Vec<_> = objects.into_iter().map(|obj| obj.tag()).collect();
-                match crate::core::cons::Cons::from_vec(tagged_objects) {
-                    Some(cons) => Ok(LispObject::Cons(crate::core::cons::LispCons(
-                        crate::gc::Gc::new(cons),
-                    ))),
-                    None => Ok(LispObject::Nil),
-                }
-            }
+            let roots = ctx.root_slice(&values);
+            Ok(LispCons::list_from_rooted_slice(&roots, ctx))
         }
     }
 }

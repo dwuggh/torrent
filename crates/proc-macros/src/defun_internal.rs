@@ -3,9 +3,7 @@ use darling::FromMeta;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-use crate::function::{
-    Arg, ArgKind, Function, RetKind, construct_objectref, construct_return, construct_return_nodrop,
-};
+use crate::function::{Arg, ArgKind, Function, RetKind, construct_return, construct_return_nodrop};
 
 pub(crate) fn expand(function: Function, spec: Spec) -> TokenStream {
     let args = function.args;
@@ -190,7 +188,8 @@ fn get_c_signature(args: &[Arg]) -> (Vec<TokenStream>, Vec<proc_macro2::Ident>) 
                 c_params.push(quote! { env: i64 });
                 c_param_idents.push(format_ident!("env"));
             }
-            ArgKind::Slice(_) => {
+            ArgKind::GcContext => {}
+            ArgKind::Slice(_) | ArgKind::RootedSlice => {
                 let ptr_ident = format_ident!("{}_ptr", ident);
                 let argc_ident = format_ident!("{}_argc", ident);
                 c_params.push(quote! { #ptr_ident: i64 });
@@ -211,9 +210,37 @@ fn get_c_signature(args: &[Arg]) -> (Vec<TokenStream>, Vec<proc_macro2::Ident>) 
 fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
     let mut init_args: Vec<TokenStream> = Vec::new();
     let mut finish_args: Vec<TokenStream> = Vec::new();
+    let mut context_binding: Option<TokenStream> = None;
 
     let object = quote! { crate::core::object::Object };
-    let object_slot = quote! { crate::core::object::ObjectSlot };
+    let rooted_slice = quote! { crate::gc::RootedSlice };
+    let has_gc_context = args
+        .iter()
+        .any(|arg| matches!(arg.info.kind, ArgKind::GcContext));
+    let has_rooted_args = args.iter().any(|arg| {
+        matches!(arg.info.kind, ArgKind::Rooted | ArgKind::RootedSlice)
+            || matches!(&arg.info.kind, ArgKind::Slice(inner) if matches!(inner.as_ref(), ArgKind::Rooted))
+    });
+
+    if has_rooted_args && !has_gc_context {
+        panic!("Rooted arguments in #[internal_fn] require &mut GcContext");
+    }
+
+    if has_gc_context {
+        let context = args
+            .iter()
+            .find(|arg| matches!(arg.info.kind, ArgKind::GcContext))
+            .expect("GcContext argument disappeared");
+        if !context.info.is_ref {
+            panic!("GcContext arguments in #[internal_fn] must be borrowed");
+        }
+        if has_rooted_args && !context.info.is_mut {
+            panic!("Rooted arguments in #[internal_fn] require &mut GcContext");
+        }
+        init_args.push(quote! {
+            let mut __gc_context = crate::gc::GcContext::new();
+        });
+    }
 
     // Convert each argument directly from i64 parameter
     for (i, arg) in args.iter().enumerate() {
@@ -232,12 +259,12 @@ fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
 
                 match inner_kind.as_ref() {
                     ArgKind::Object => {
-                        quote! {
-                            let #ident = unsafe {
-                                let ptr = #ptr_ident as *const #object;
-                                std::slice::from_raw_parts(ptr, #argc_ident as usize)
-                            };
-                        }
+                        panic!(
+                            "raw Object slices in #[internal_fn] must be rewritten to &RootedSlice"
+                        )
+                    }
+                    ArgKind::Rooted => {
+                        panic!("&[Rooted] in #[internal_fn] must be rewritten to &RootedSlice")
                     }
                     ArgKind::ObjectRef(_) => {
                         panic!("you should not use ObjectRef in a slice!");
@@ -254,29 +281,62 @@ fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
                 }
             }
             ArgKind::Object => {
-                if arg.info.is_ref {
-                    quote! {
-                        let #tmp = #object(#ident as u64);
-                        let #ident = &#tmp;
-                    }
-                } else {
-                    quote! {
-                        if cfg!(debug_assertions) {
-                            tracing::trace!("[DEBUG] Converting internal arg {} from i64: 0x{:x}", stringify!(#ident), #ident as u64);
-                        }
-                        let #ident = #object(#ident as u64);
-                    }
+                if has_gc_context {
+                    panic!(
+                        "&Object arguments in #[internal_fn] with GcContext must be rewritten to &Rooted"
+                    );
                 }
-            }
-            ArgKind::ObjectSlot => {
-                // Internal helpers use the same raw-word ABI as defuns. Build a
-                // local interior-mutable slot; safepoints spill live objects
-                // into NativeRootFrame separately.
+                if !arg.info.is_ref || arg.info.is_mut {
+                    panic!("Object arguments in #[internal_fn] must be borrowed as &Object");
+                }
                 quote! {
-                    let #ident = #object_slot::new(#object(#ident as u64));
+                    if cfg!(debug_assertions) {
+                        tracing::trace!("[DEBUG] Converting internal arg {} from i64: 0x{:x}", stringify!(#ident), #ident as u64);
+                    }
+                    let #tmp = #object(#ident as u64);
+                    let #ident = &#tmp;
                 }
             }
-            ArgKind::ObjectRef(ty) => construct_objectref(arg.info.is_mut, i, ident, ty),
+            ArgKind::Rooted => {
+                if !arg.info.is_ref {
+                    panic!("Rooted arguments must be passed by reference");
+                }
+                quote! {
+                    let #tmp = __gc_context.root(#object(#ident as u64));
+                    let #ident = &#tmp;
+                }
+            }
+            ArgKind::RootedSlice => {
+                if !arg.info.is_ref || arg.info.is_mut {
+                    panic!("RootedSlice arguments must be borrowed as &RootedSlice");
+                }
+                let ptr_ident = format_ident!("{}_ptr", ident);
+                let argc_ident = format_ident!("{}_argc", ident);
+                quote! {
+                    let #tmp: #rooted_slice = unsafe {
+                        let __slice = ::std::slice::from_raw_parts(
+                            #ptr_ident as *const #object,
+                            #argc_ident as usize,
+                        );
+                        __gc_context.root_slice(__slice)
+                    };
+                    let #ident = &#tmp;
+                }
+            }
+            ArgKind::ObjectRef(ty) => {
+                if has_gc_context {
+                    panic!(
+                        "heap reference arguments in #[internal_fn] with GcContext must be rewritten to &Rooted"
+                    );
+                }
+                if !arg.info.is_ref || arg.info.is_mut {
+                    panic!("heap reference arguments in #[internal_fn] must be borrowed as &T");
+                }
+                quote! {
+                    let #tmp = #object(#ident as u64);
+                    let #ident: &#ty = __unwrap_or_nil!((&#tmp).try_into());
+                }
+            }
             ArgKind::Primitive(ty) => {
                 if ty.to_string() == "Symbol" {
                     quote! {
@@ -288,6 +348,18 @@ fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
                         let #ident = #ident as #ty;
                     }
                 }
+            }
+            ArgKind::GcContext => {
+                context_binding = Some(if arg.info.is_mut {
+                    quote! {
+                        let #ident = &mut __gc_context;
+                    }
+                } else {
+                    quote! {
+                        let #ident = &__gc_context;
+                    }
+                });
+                quote! {}
             }
             _ => {
                 quote! {
@@ -301,22 +373,10 @@ fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
         // Add cleanup for objects that need it
         let cleanup = match &arg.info.kind {
             ArgKind::Object => {
-                if arg.info.is_ref {
-                    quote! {
-                        std::mem::forget(#tmp);
-                    }
-                } else {
-                    quote! {}
-                }
+                quote! {}
             }
             ArgKind::ObjectRef(_) => {
-                if arg.info.is_ref {
-                    quote! {
-                        std::mem::forget(#tmp);
-                    }
-                } else {
-                    quote! {}
-                }
+                quote! {}
             }
             ArgKind::Primitive(ty) if ty.to_string() == "Symbol" => {
                 quote! {
@@ -326,6 +386,10 @@ fn get_args(args: &[Arg]) -> (Vec<TokenStream>, Vec<TokenStream>) {
             _ => quote! {},
         };
         finish_args.push(cleanup);
+    }
+
+    if let Some(binding) = context_binding {
+        init_args.push(binding);
     }
 
     (init_args, finish_args)
@@ -340,7 +404,8 @@ fn get_signatures(args: &[Arg]) -> Vec<TokenStream> {
                     sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // env
                 });
             }
-            ArgKind::Slice(_) => {
+            ArgKind::GcContext => {}
+            ArgKind::Slice(_) | ArgKind::RootedSlice => {
                 signatures.push(quote! {
                     sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // slice_ptr
                 });

@@ -1,4 +1,4 @@
-use std::{cell::Cell, marker::PhantomData, ptr::NonNull};
+use std::{marker::PhantomData, ptr::NonNull};
 
 use crate::{
     core::{
@@ -19,45 +19,12 @@ pub const NIL: i64 = gc::GcTag::NIL as i64;
 pub const TRUE: i64 = TAG_TRUE as i64;
 
 #[repr(transparent)]
-#[derive(PartialEq, PartialOrd, Eq, Hash, Copy)]
+#[derive(Copy, PartialEq, PartialOrd, Eq, Hash)]
 pub struct Object(pub u64);
-
-/// One mutable Rust-side slot holding a raw Lisp object word.
-///
-/// `ObjectSlot` is only for interior mutability at Rust interop boundaries.
-/// Safepoints must spill values into a `NativeRootFrame`; the slot itself is
-/// not a GC root.
-#[repr(transparent)]
-#[derive(PartialEq, PartialOrd, Eq)]
-pub struct ObjectSlot(Cell<Object>);
-
-/// Typed slot for a GC pointer.
-///
-/// This mirrors `ObjectSlot` for typed heap references. The physical storage is
-/// still a single word, so it can be rooted through the same raw-slot machinery.
-#[repr(transparent)]
-pub struct GcSlot<T: HeapObject>(Cell<gc::Gc<T>>);
 
 impl Clone for Object {
     fn clone(&self) -> Self {
         Self(self.0)
-    }
-}
-
-impl ObjectSlot {
-    #[inline(always)]
-    pub fn new(value: Object) -> Self {
-        Self(Cell::new(value))
-    }
-
-    #[inline(always)]
-    pub fn get(&self) -> Object {
-        self.0.get()
-    }
-
-    #[inline(always)]
-    pub fn set(&self, value: Object) {
-        self.0.set(value);
     }
 }
 
@@ -404,14 +371,19 @@ mod tests {
         assert_eq!(integer.get_tag(), gc::GcTag::INT);
         assert!(matches!(integer.as_ref(), ObjectRef::Int(42)));
 
-        let float = LispFloat::new(3.5).tag();
+        let float = LispFloat::new(3.5, &mut crate::gc::GcContext::new()).tag();
         assert_eq!(float.get_tag(), <Float as gc::Tagged>::TAG);
         match float.as_ref() {
             ObjectRef::Float(value) => assert_eq!(value.0, 3.5),
             other => panic!("expected float object, got {other:?}"),
         }
 
-        let cons = LispCons::new(integer.clone(), float.clone()).tag();
+        let cons = LispCons::new(
+            integer.clone(),
+            float.clone(),
+            &mut crate::gc::GcContext::new(),
+        )
+        .tag();
         assert_eq!(cons.get_tag(), gc::GcTag::CONS);
         let ObjectRef::Cons(pair) = cons.as_ref() else {
             panic!("expected cons object, got {:?}", cons.as_ref());

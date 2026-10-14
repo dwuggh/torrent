@@ -357,14 +357,14 @@ pub enum QuotedData {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Number {
     Integer(LispInteger),
-    Real(LispFloat),
+    Real(f64),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
     Number(Number),
     Character(LispCharacter),
-    String(LispStr),
+    String(String),
 }
 
 impl ExprType {
@@ -373,7 +373,7 @@ impl ExprType {
     }
 
     pub fn new_float(f: f64) -> Self {
-        Self::Literal(Literal::Number(Number::Real(LispFloat::new(f))))
+        Self::Literal(Literal::Number(Number::Real(f)))
     }
 
     pub fn new_char(c: char) -> Self {
@@ -381,17 +381,17 @@ impl ExprType {
     }
 
     pub fn new_str(str: String) -> Self {
-        Self::Literal(Literal::String(LispStr::new(str)))
+        Self::Literal(Literal::String(str))
     }
 }
 
-impl From<Literal> for LispObject {
-    fn from(literal: Literal) -> Self {
-        match literal {
-            Literal::Number(Number::Integer(int)) => LispObject::Int(int),
-            Literal::Number(Number::Real(float)) => LispObject::Float(float),
-            Literal::Character(char) => LispObject::Character(char),
-            Literal::String(string) => LispObject::Str(string),
+impl Literal {
+    pub fn to_object(&self, ctx: &mut crate::gc::GcContext) -> crate::core::object::Object {
+        match self {
+            Self::Number(Number::Integer(int)) => int.clone().tag(),
+            Self::Number(Number::Real(float)) => LispFloat::new(*float, ctx).tag(),
+            Self::Character(char) => char.clone().tag(),
+            Self::String(string) => LispStr::new(string.clone(), ctx).tag(),
         }
     }
 }
@@ -409,555 +409,240 @@ impl From<Var> for LispObject {
     }
 }
 
-impl From<Expr> for LispObject {
-    fn from(expr: Expr) -> Self {
-        let expr_type = expr.ty.into_inner();
-        match expr_type {
-            ExprType::Nil => LispObject::Nil,
-            ExprType::Literal(literal) => literal.into(),
-            ExprType::Symbol(var) => var.get().into(),
-            ExprType::Vector(exprs) => {
-                let objects: Vec<_> = exprs
-                    .into_iter()
-                    .map(|e| e.into())
-                    .map(|obj: LispObject| obj.tag())
-                    .collect();
-                LispObject::Vector(LispVector::new(objects))
-            }
-            ExprType::Call(call) => {
-                // Convert function call to a list: (function arg1 arg2 ...)
-                let mut elements: Vec<LispObject> = Vec::new();
-                elements.push(call.symbol.get().into());
-                elements.extend(call.args.into_iter().map(|arg| arg.into()));
+/// Owned syntax data avoids keeping GC handles in the parser or macro input tree.
+#[derive(Clone, Debug)]
+pub(crate) enum Datum {
+    Nil,
+    Symbol(Symbol),
+    Literal(Literal),
+    List(Vec<Datum>),
+    Vector(Vec<Datum>),
+}
 
-                // Convert Vec<LispObject> to proper cons list
-                if elements.is_empty() {
-                    LispObject::Nil
-                } else {
-                    let mut result = nil();
-                    for obj in elements.into_iter().rev() {
-                        result = LispCons::new(obj.tag(), result).tag();
-                    }
-                    result.untag()
+impl Datum {
+    fn symbol(name: impl Into<Symbol>) -> Self {
+        Self::Symbol(name.into())
+    }
+    fn form(name: &str, items: impl IntoIterator<Item = Self>) -> Self {
+        Self::List(std::iter::once(Self::symbol(name)).chain(items).collect())
+    }
+    fn exprs(exprs: &[Expr]) -> Vec<Self> {
+        exprs.iter().map(Expr::to_datum).collect()
+    }
+    fn bindings(bindings: &Bindings) -> Self {
+        Self::List(
+            bindings
+                .iter()
+                .map(|(arg, value)| match value {
+                    Some(value) => Self::List(vec![Self::symbol(arg.ident), value.to_datum()]),
+                    None => Self::symbol(arg.ident),
+                })
+                .collect(),
+        )
+    }
+    fn string(string: &str) -> Self {
+        Self::Literal(Literal::String(string.to_owned()))
+    }
+    pub(crate) fn to_object(&self, ctx: &mut crate::gc::GcContext) -> crate::core::object::Object {
+        match self {
+            Self::Nil => nil(),
+            Self::Symbol(symbol) => LispSymbol(*symbol).tag(),
+            Self::Literal(literal) => literal.to_object(ctx),
+            Self::List(items) | Self::Vector(items) => {
+                let mut roots = Vec::with_capacity(items.len());
+                for item in items {
+                    let value = item.to_object(ctx);
+                    roots.push(ctx.root(value));
                 }
-            }
-            ExprType::SpecialForm(special_form) => {
-                // Convert special forms to lists as well
-                match special_form {
-                    SpecialForm::If(if_expr) => {
-                        let mut elements = vec![
-                            LispObject::Symbol(LispSymbol(Symbol::from("if"))),
-                            (*if_expr.cond).clone().into(),
-                            (*if_expr.then).clone().into(),
-                        ];
-                        // Add else expressions
-                        elements.extend(if_expr.els.body.into_iter().map(|e| e.into()));
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::Let(let_expr) => {
-                        let mut elements =
-                            vec![LispObject::Symbol(LispSymbol(Symbol::from("let")))];
-
-                        // Convert bindings to list of lists
-                        let mut bindings_list = nil();
-                        for (arg, value) in let_expr.bindings.iter().rev() {
-                            let binding = if let Some(val) = value {
-                                // (var value)
-                                let var_obj =
-                                    LispObject::Symbol(LispSymbol(Symbol::from(arg.ident)));
-                                let val_obj: LispObject = val.clone().into();
-                                LispCons::new(
-                                    var_obj.tag(),
-                                    LispCons::new(val_obj.tag(), nil()).tag(),
-                                )
-                                .tag()
-                            } else {
-                                // just var
-                                LispObject::Symbol(LispSymbol(Symbol::from(arg.ident))).tag()
-                            };
-                            bindings_list = LispCons::new(binding, bindings_list).tag();
-                        }
-                        elements.push(bindings_list.untag());
-
-                        // Add body expressions
-                        elements.extend(let_expr.body.body.into_iter().map(|e| e.into()));
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::Quote(quote) => {
-                        let symbol = match quote.kind {
-                            QuoteKind::Quote => "quote",
-                            QuoteKind::Backquote => "backquote",
-                            QuoteKind::Function => "function",
-                        };
-                        let quoted_obj = quote_data_to_lisp_object(quote.expr);
-
-                        let mut result = nil();
-                        result = LispCons::new(quoted_obj.tag(), result).tag();
-                        result = LispCons::new(
-                            LispObject::Symbol(LispSymbol(Symbol::from(symbol))).tag(),
-                            result,
-                        )
-                        .tag();
-                        result.untag()
-                    }
-                    SpecialForm::And(exprs) => {
-                        let mut elements =
-                            vec![LispObject::Symbol(LispSymbol(Symbol::from("and")))];
-                        elements.extend(exprs.into_iter().map(|e| e.into()));
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::Or(exprs) => {
-                        let mut elements = vec![LispObject::Symbol(LispSymbol(Symbol::from("or")))];
-                        elements.extend(exprs.into_iter().map(|e| e.into()));
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::Catch(catch_expr) => {
-                        let mut elements = vec![
-                            LispObject::Symbol(LispSymbol(Symbol::from("catch"))),
-                            (*catch_expr.tag).clone().into(),
-                        ];
-                        elements.extend(catch_expr.body.body.into_iter().map(|e| e.into()));
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::Cond(cond_expr) => {
-                        let mut elements =
-                            vec![LispObject::Symbol(LispSymbol(Symbol::from("cond")))];
-
-                        for clause in cond_expr.clauses {
-                            // Each clause is (condition body...)
-                            let mut clause_elements: Vec<LispObject> =
-                                vec![clause.condition.into()];
-                            clause_elements.extend(clause.body.body.into_iter().map(|e| e.into()));
-
-                            let mut clause_list = nil();
-                            for obj in clause_elements.into_iter().rev() {
-                                clause_list = LispCons::new(obj.tag(), clause_list).tag();
-                            }
-                            elements.push(clause_list.untag());
-                        }
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::ConditionCase(condition_case) => {
-                        let mut elements = vec![LispObject::Symbol(LispSymbol(Symbol::from(
-                            "condition-case",
-                        )))];
-
-                        // Add variable (or nil if None)
-                        if let Some(var) = condition_case.var {
-                            elements.push(LispObject::Symbol(LispSymbol(Symbol::from(var))));
-                        } else {
-                            elements.push(LispObject::Nil);
-                        }
-
-                        // Add protected form
-                        elements.push((*condition_case.protected).clone().into());
-
-                        // Add handlers
-                        for handler in condition_case.handlers {
-                            let mut handler_elements: Vec<LispObject> =
-                                vec![handler.condition.into()];
-                            handler_elements
-                                .extend(handler.body.body.into_iter().map(|e| e.into()));
-
-                            let mut handler_list = nil();
-                            for obj in handler_elements.into_iter().rev() {
-                                handler_list = LispCons::new(obj.tag(), handler_list).tag();
-                            }
-                            elements.push(handler_list.untag());
-                        }
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::Defvar(defvar) => {
-                        let mut elements = vec![
-                            LispObject::Symbol(LispSymbol(Symbol::from("defvar"))),
-                            LispObject::Symbol(LispSymbol(Symbol::from(defvar.symbol))),
-                        ];
-
-                        if let Some(value) = defvar.value {
-                            elements.push((*value).clone().into());
-                        }
-
-                        if let Some(docstring) = defvar.docstring {
-                            elements.push(LispObject::Str(LispStr::new(docstring)));
-                        }
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::Defconst(defconst) => {
-                        let mut elements = vec![
-                            LispObject::Symbol(LispSymbol(Symbol::from("defconst"))),
-                            LispObject::Symbol(LispSymbol(Symbol::from(defconst.symbol))),
-                            (*defconst.value).clone().into(),
-                        ];
-
-                        if let Some(docstring) = defconst.docstring {
-                            elements.push(LispObject::Str(LispStr::new(docstring)));
-                        }
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::Lambda(lambda) => {
-                        let mut elements =
-                            vec![LispObject::Symbol(LispSymbol(Symbol::from("lambda")))];
-
-                        // Convert arguments to list
-                        let mut args_list = nil();
-
-                        // Add rest argument if present
-                        if let Some(ref rest) = lambda.args.rest {
-                            args_list = LispCons::new(
-                                LispObject::Symbol(LispSymbol(Symbol::from(rest.ident))).tag(),
-                                args_list,
-                            )
-                            .tag();
-                            args_list = LispCons::new(
-                                LispObject::Symbol(LispSymbol(Symbol::from("&rest"))).tag(),
-                                args_list,
-                            )
-                            .tag();
-                        }
-
-                        // Add optional arguments if present
-                        if let Some(optional) = &lambda.args.optional {
-                            for arg in optional.iter().rev() {
-                                args_list = LispCons::new(
-                                    LispObject::Symbol(LispSymbol(Symbol::from(arg.ident))).tag(),
-                                    args_list,
-                                )
-                                .tag();
-                            }
-                            args_list = LispCons::new(
-                                LispObject::Symbol(LispSymbol(Symbol::from("&optional"))).tag(),
-                                args_list,
-                            )
-                            .tag();
-                        }
-
-                        // Add normal arguments
-                        for arg in lambda.args.normal.iter().rev() {
-                            args_list = LispCons::new(
-                                LispObject::Symbol(LispSymbol(Symbol::from(arg.ident))).tag(),
-                                args_list,
-                            )
-                            .tag();
-                        }
-
-                        elements.push(args_list.untag());
-
-                        // Add docstring if present
-                        if let Some(docstring) = lambda.docstring {
-                            elements.push(LispObject::Str(LispStr::new(docstring)));
-                        }
-
-                        // Add interactive form if present
-                        if let Some(interactive) = lambda.interactive {
-                            let mut interactive_elements =
-                                vec![LispObject::Symbol(LispSymbol(Symbol::from("interactive")))];
-
-                            if let Some(arg_desc) = interactive.arg_desc {
-                                interactive_elements.push(LispObject::Str(LispStr::new(arg_desc)));
-                            }
-
-                            if let Some(modes) = interactive.modes {
-                                interactive_elements
-                                    .extend(modes.into_iter().map(|var| var.get().into()));
-                            }
-
-                            let mut interactive_list = nil();
-                            for obj in interactive_elements.into_iter().rev() {
-                                interactive_list = LispCons::new(obj.tag(), interactive_list).tag();
-                            }
-                            elements.push(interactive_list.untag());
-                        }
-
-                        // Add body
-                        elements.extend(lambda.body.body.into_iter().map(|e| e.into()));
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::LetStar(let_star) => {
-                        let mut elements =
-                            vec![LispObject::Symbol(LispSymbol(Symbol::from("let*")))];
-
-                        // Convert bindings to list of lists
-                        let mut bindings_list = nil();
-                        for (arg, value) in let_star.bindings.iter().rev() {
-                            let binding = if let Some(val) = value {
-                                // (var value)
-                                let var_obj =
-                                    LispObject::Symbol(LispSymbol(Symbol::from(arg.ident)));
-                                let val_obj: LispObject = val.clone().into();
-                                LispCons::new(
-                                    var_obj.tag(),
-                                    LispCons::new(val_obj.tag(), nil()).tag(),
-                                )
-                                .tag()
-                            } else {
-                                // just var
-                                LispObject::Symbol(LispSymbol(Symbol::from(arg.ident))).tag()
-                            };
-                            bindings_list = LispCons::new(binding, bindings_list).tag();
-                        }
-                        elements.push(bindings_list.untag());
-
-                        // Add body expressions
-                        elements.extend(let_star.body.body.into_iter().map(|e| e.into()));
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::Prog1(prog1) => {
-                        let mut elements = vec![
-                            LispObject::Symbol(LispSymbol(Symbol::from("prog1"))),
-                            (*prog1.first).clone().into(),
-                        ];
-                        elements.extend(prog1.rest.body.into_iter().map(|e| e.into()));
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::Prog2(prog2) => {
-                        let mut elements = vec![
-                            LispObject::Symbol(LispSymbol(Symbol::from("prog2"))),
-                            (*prog2.first).clone().into(),
-                            (*prog2.second).clone().into(),
-                        ];
-                        elements.extend(prog2.rest.body.into_iter().map(|e| e.into()));
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::Progn(progn) => {
-                        let mut elements =
-                            vec![LispObject::Symbol(LispSymbol(Symbol::from("progn")))];
-                        elements.extend(progn.body.into_iter().map(|e| e.into()));
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::Set(set) => {
-                        let elements = vec![
-                            LispObject::Symbol(LispSymbol(Symbol::from("set"))),
-                            LispObject::Symbol(LispSymbol(Symbol::from(set.symbol.get()))),
-                            (*set.value).clone().into(),
-                        ];
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::Setq(setq) => {
-                        let mut elements =
-                            vec![LispObject::Symbol(LispSymbol(Symbol::from("setq")))];
-
-                        for (ident, expr) in setq.assignments {
-                            elements
-                                .push(LispObject::Symbol(LispSymbol(Symbol::from(ident.get()))));
-                            elements.push(expr.into());
-                        }
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::SetqDefault(setq_default) => {
-                        let mut elements =
-                            vec![LispObject::Symbol(LispSymbol(Symbol::from("setq-default")))];
-
-                        for (ident, expr) in setq_default.assignments {
-                            elements
-                                .push(LispObject::Symbol(LispSymbol(Symbol::from(ident.get()))));
-                            elements.push(expr.into());
-                        }
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::SaveCurrentBuffer(progn) => {
-                        let mut elements = vec![LispObject::Symbol(LispSymbol(Symbol::from(
-                            "save-current-buffer",
-                        )))];
-                        elements.extend(progn.body.into_iter().map(|e| e.into()));
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::SaveExcursion(progn) => {
-                        let mut elements = vec![LispObject::Symbol(LispSymbol(Symbol::from(
-                            "save-excursion",
-                        )))];
-                        elements.extend(progn.body.into_iter().map(|e| e.into()));
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::SaveRestriction(progn) => {
-                        let mut elements = vec![LispObject::Symbol(LispSymbol(Symbol::from(
-                            "save-restriction",
-                        )))];
-                        elements.extend(progn.body.into_iter().map(|e| e.into()));
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::UnwindProtect(unwind_protect) => {
-                        let mut elements = vec![
-                            LispObject::Symbol(LispSymbol(Symbol::from("unwind-protect"))),
-                            (*unwind_protect.protected).clone().into(),
-                        ];
-                        elements.extend(unwind_protect.cleanup.body.into_iter().map(|e| e.into()));
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::While(while_expr) => {
-                        let mut elements = vec![
-                            LispObject::Symbol(LispSymbol(Symbol::from("while"))),
-                            (*while_expr.condition).clone().into(),
-                        ];
-                        elements.extend(while_expr.body.body.into_iter().map(|e| e.into()));
-
-                        let mut result = nil();
-                        for obj in elements.into_iter().rev() {
-                            result = LispCons::new(obj.tag(), result).tag();
-                        }
-                        result.untag()
-                    }
-                    SpecialForm::Interactive(_) => {
-                        // Interactive forms shouldn't appear at top level, but handle gracefully
-                        LispObject::Symbol(LispSymbol(Symbol::from("interactive")))
-                    }
+                let values: Vec<_> = roots.iter().map(|root| *root.get(ctx)).collect();
+                let values = ctx.root_slice(&values);
+                if matches!(self, Self::List(_)) {
+                    LispCons::list_from_rooted_slice(&values, ctx)
+                } else {
+                    LispVector(ctx.alloc::<crate::core::vector::Vector>(&values)).tag()
                 }
             }
         }
     }
 }
 
-fn quote_data_to_lisp_object(data: QuotedData) -> LispObject {
-    match data {
-        QuotedData::Literal(literal) => literal.into(),
-        QuotedData::Symbol(var) => var.get().into(),
-        QuotedData::List(items) => {
-            if items.is_empty() {
-                LispObject::Nil
-            } else {
-                let mut result = nil();
-                for item in items.into_iter().rev() {
-                    let obj = quote_data_to_lisp_object(item);
-                    result = LispCons::new(obj.tag(), result).tag();
-                }
-                result.untag()
+impl Expr {
+    pub fn to_object(&self, ctx: &mut crate::gc::GcContext) -> crate::core::object::Object {
+        self.to_datum().to_object(ctx)
+    }
+    fn to_datum(&self) -> Datum {
+        match &*self.ty() {
+            ExprType::Nil => Datum::Nil,
+            ExprType::Literal(lit) => Datum::Literal(lit.clone()),
+            ExprType::Symbol(var) => Datum::symbol(Symbol::from(var.get())),
+            ExprType::Vector(items) => Datum::Vector(Datum::exprs(items)),
+            ExprType::Call(call) => Datum::form(
+                Symbol::from(call.symbol.get()).name(),
+                Datum::exprs(&call.args),
+            ),
+            ExprType::SpecialForm(form) => form.to_datum(),
+        }
+    }
+}
+
+impl QuotedData {
+    fn to_datum(&self) -> Datum {
+        match self {
+            Self::Literal(lit) => Datum::Literal(lit.clone()),
+            Self::Symbol(var) => Datum::symbol(Symbol::from(var.get())),
+            Self::List(items) => Datum::List(items.iter().map(Self::to_datum).collect()),
+            Self::Vector(items) => Datum::Vector(items.iter().map(Self::to_datum).collect()),
+            Self::Unquote(expr) => Datum::form("unquote", [expr.to_datum()]),
+            Self::UnquoteSplice(expr) => Datum::form("unquote-splicing", [expr.to_datum()]),
+        }
+    }
+}
+
+impl SpecialForm {
+    fn to_datum(&self) -> Datum {
+        use Datum as D;
+        let (name, items) = match self {
+            Self::And(exprs) => ("and", D::exprs(exprs)),
+            Self::Or(exprs) => ("or", D::exprs(exprs)),
+            Self::Progn(p) => ("progn", D::exprs(&p.body)),
+            Self::SaveCurrentBuffer(p) => ("save-current-buffer", D::exprs(&p.body)),
+            Self::SaveExcursion(p) => ("save-excursion", D::exprs(&p.body)),
+            Self::SaveRestriction(p) => ("save-restriction", D::exprs(&p.body)),
+            Self::If(e) => (
+                "if",
+                [
+                    vec![e.cond.to_datum(), e.then.to_datum()],
+                    D::exprs(&e.els.body),
+                ]
+                .concat(),
+            ),
+            Self::Let(e) => (
+                "let",
+                [vec![D::bindings(&e.bindings)], D::exprs(&e.body.body)].concat(),
+            ),
+            Self::LetStar(e) => (
+                "let*",
+                [vec![D::bindings(&e.bindings)], D::exprs(&e.body.body)].concat(),
+            ),
+            Self::Quote(e) => (
+                match e.kind {
+                    QuoteKind::Quote => "quote",
+                    QuoteKind::Backquote => "backquote",
+                    QuoteKind::Function => "function",
+                },
+                vec![e.expr.to_datum()],
+            ),
+            Self::Catch(e) => (
+                "catch",
+                [vec![e.tag.to_datum()], D::exprs(&e.body.body)].concat(),
+            ),
+            Self::Cond(e) => (
+                "cond",
+                e.clauses
+                    .iter()
+                    .map(|c| {
+                        D::List([vec![c.condition.to_datum()], D::exprs(&c.body.body)].concat())
+                    })
+                    .collect(),
+            ),
+            Self::ConditionCase(e) => {
+                let mut items = vec![
+                    e.var.map(D::symbol).unwrap_or(D::Nil),
+                    e.protected.to_datum(),
+                ];
+                items.extend(e.handlers.iter().map(|h| {
+                    D::List([vec![h.condition.to_datum()], D::exprs(&h.body.body)].concat())
+                }));
+                ("condition-case", items)
             }
-        }
-        QuotedData::Vector(items) => {
-            let objects: Vec<_> = items
-                .into_iter()
-                .map(quote_data_to_lisp_object)
-                .map(|obj| obj.tag())
-                .collect();
-            LispObject::Vector(LispVector::new(objects))
-        }
-        QuotedData::Unquote(expr) => {
-            // Convert unquote to (unquote expr)
-            let mut result = nil();
-            let car: LispObject = (*expr).clone().into();
-            result = LispCons::new(car.tag(), result).tag();
-            result = LispCons::new(
-                LispObject::Symbol(LispSymbol(Symbol::from(","))).tag(),
-                result,
-            )
-            .tag();
-            result.untag()
-        }
-        QuotedData::UnquoteSplice(expr) => {
-            // Convert unquote-splice to (unquote-splicing expr)
-            let mut result = nil();
-            let car: LispObject = (*expr).clone().into();
-            result = LispCons::new(car.tag(), result).tag();
-            result = LispCons::new(
-                LispObject::Symbol(LispSymbol(Symbol::from(",@"))).tag(),
-                result,
-            )
-            .tag();
-            result.untag()
-        }
+            Self::Defvar(e) => {
+                let mut items = vec![D::symbol(e.symbol)];
+                if let Some(value) = &e.value {
+                    items.push(value.to_datum());
+                }
+                if let Some(doc) = &e.docstring {
+                    items.push(D::string(doc));
+                }
+                ("defvar", items)
+            }
+            Self::Defconst(e) => {
+                let mut items = vec![D::symbol(e.symbol), e.value.to_datum()];
+                if let Some(doc) = &e.docstring {
+                    items.push(D::string(doc));
+                }
+                ("defconst", items)
+            }
+            Self::Lambda(e) => {
+                let mut args: Vec<_> = e.args.normal.iter().map(|a| D::symbol(a.ident)).collect();
+                if let Some(optional) = &e.args.optional {
+                    args.push(D::symbol("&optional"));
+                    args.extend(optional.iter().map(|a| D::symbol(a.ident)));
+                }
+                if let Some(rest) = &e.args.rest {
+                    args.extend([D::symbol("&rest"), D::symbol(rest.ident)]);
+                }
+                let mut items = vec![D::List(args)];
+                if let Some(doc) = &e.docstring {
+                    items.push(D::string(doc));
+                }
+                if let Some(interactive) = &e.interactive {
+                    items.push(Self::Interactive(interactive.clone()).to_datum());
+                }
+                if let Some(declare) = &e.declare {
+                    items.push(D::form("declare", D::exprs(declare)));
+                }
+                items.extend(D::exprs(&e.body.body));
+                ("lambda", items)
+            }
+            Self::Interactive(e) => {
+                let mut items = Vec::new();
+                if let Some(desc) = &e.arg_desc {
+                    items.push(D::string(desc));
+                }
+                if let Some(modes) = &e.modes {
+                    items.extend(modes.iter().map(|v| D::symbol(Symbol::from(v.get()))));
+                }
+                ("interactive", items)
+            }
+            Self::Prog1(e) => (
+                "prog1",
+                [vec![e.first.to_datum()], D::exprs(&e.rest.body)].concat(),
+            ),
+            Self::Prog2(e) => (
+                "prog2",
+                [
+                    vec![e.first.to_datum(), e.second.to_datum()],
+                    D::exprs(&e.rest.body),
+                ]
+                .concat(),
+            ),
+            Self::Set(e) => (
+                "set",
+                vec![D::symbol(Symbol::from(e.symbol.get())), e.value.to_datum()],
+            ),
+            Self::Setq(e) => (
+                "setq",
+                e.assignments
+                    .iter()
+                    .flat_map(|(v, e)| [D::symbol(Symbol::from(v.get())), e.to_datum()])
+                    .collect(),
+            ),
+            Self::SetqDefault(e) => (
+                "setq-default",
+                e.assignments
+                    .iter()
+                    .flat_map(|(v, e)| [D::symbol(Symbol::from(v.get())), e.to_datum()])
+                    .collect(),
+            ),
+            Self::UnwindProtect(e) => (
+                "unwind-protect",
+                [vec![e.protected.to_datum()], D::exprs(&e.cleanup.body)].concat(),
+            ),
+            Self::While(e) => (
+                "while",
+                [vec![e.condition.to_datum()], D::exprs(&e.body.body)].concat(),
+            ),
+        };
+        D::form(name, items)
     }
 }

@@ -3,7 +3,7 @@ use proc_macros::defun;
 use crate::core::object::{Object, ObjectRef, nil, tru};
 
 #[defun]
-fn eq(a: Object, b: Object) -> Object {
+fn eq(a: &Object, b: &Object) -> Object {
     if a.0 == b.0 { tru() } else { nil() }
 }
 
@@ -33,12 +33,12 @@ fn equal_deep(a: &Object, b: &Object) -> bool {
 }
 
 #[defun]
-fn equal(a: Object, b: Object) -> Object {
-    if equal_deep(&a, &b) { tru() } else { nil() }
+fn equal(a: &Object, b: &Object) -> Object {
+    if equal_deep(a, b) { tru() } else { nil() }
 }
 
 #[defun]
-fn null(obj: Object) -> Object {
+fn null(obj: &Object) -> Object {
     match obj.as_ref() {
         ObjectRef::Nil => tru(),
         _ => nil(),
@@ -55,11 +55,11 @@ mod tests {
     #[test]
     fn test_eq_basic() {
         assert!(matches!(
-            eq(LispInteger(1).tag(), LispInteger(1).tag()).as_ref(),
+            eq(&LispInteger(1).tag(), &LispInteger(1).tag()).as_ref(),
             ObjectRef::True
         ));
         assert!(matches!(
-            eq(LispInteger(1).tag(), LispInteger(2).tag()).as_ref(),
+            eq(&LispInteger(1).tag(), &LispInteger(2).tag()).as_ref(),
             ObjectRef::Nil
         ));
     }
@@ -68,20 +68,26 @@ mod tests {
     fn test_equal_lists() {
         let _mutator = crate::gc::test_support::bind_nogc_mutator();
 
-        let l1 = LispCons::from_iter(vec![LispInteger(1).tag(), LispInteger(2).tag()].into_iter())
-            .unwrap()
-            .tag();
-        let l2 = LispCons::from_iter(vec![LispInteger(1).tag(), LispInteger(2).tag()].into_iter())
-            .unwrap()
-            .tag();
+        let l1 = LispCons::from_iter(
+            vec![LispInteger(1).tag(), LispInteger(2).tag()].into_iter(),
+            &mut crate::gc::GcContext::new(),
+        )
+        .unwrap()
+        .tag();
+        let l2 = LispCons::from_iter(
+            vec![LispInteger(1).tag(), LispInteger(2).tag()].into_iter(),
+            &mut crate::gc::GcContext::new(),
+        )
+        .unwrap()
+        .tag();
         assert!(matches!(
-            equal(l1.clone(), l2.clone()).as_ref(),
+            equal(&l1.clone(), &l2.clone()).as_ref(),
             ObjectRef::True
         ));
     }
 
     #[test]
     fn test_null() {
-        assert!(matches!(null(nil()).as_ref(), ObjectRef::True));
+        assert!(matches!(null(&nil()).as_ref(), ObjectRef::True));
     }
 }

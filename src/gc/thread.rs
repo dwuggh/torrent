@@ -57,12 +57,13 @@ pub(crate) struct ThreadHeader {
 pub struct MutatorThread {
     pub header: ThreadHeader,
     pub block_requested: AtomicBool,
-    /// Head of the explicit root chain for this mutator.
+    /// Contiguous native roots owned by this mutator.
     ///
-    /// Only the owner mutator updates this field. GC workers read it only after
-    /// the mutator is parked at a safepoint, so the parking protocol supplies
-    /// the synchronization rather than this field being atomic.
-    pub root_head: Cell<usize>,
+    /// Only the owner mutator changes the stack. GC workers scan it after the
+    /// mutator is parked, so the parking protocol supplies synchronization.
+    pub(crate) native_roots: UnsafeCell<crate::gc::roots::NativeRootStack>,
+    /// Head of the generated-code root-frame chain for this mutator.
+    pub jit_root_head: Cell<*mut crate::gc::roots::JitRootFrame>,
     /// JIT fast path for allocation.
     pub lab: Cell<LocalAllocationBuffer>,
     pub alloc_fastpath: AtomicU8,
@@ -115,9 +116,8 @@ impl MutatorThread {
     /// Offset used by JIT-generated safepoint polling code.
     #[allow(dead_code)]
     pub const BLOCK_REQUESTED_OFFSET: usize = std::mem::offset_of!(Self, block_requested);
-    /// Offset used by root-chain aware generated/runtime code.
     #[allow(dead_code)]
-    pub const ROOT_HEAD_OFFSET: usize = std::mem::offset_of!(Self, root_head);
+    pub const JIT_ROOT_HEAD_OFFSET: usize = std::mem::offset_of!(Self, jit_root_head);
     #[allow(dead_code)]
     pub const LAB_OFFSET: usize = std::mem::offset_of!(Self, lab);
     #[allow(dead_code)]
@@ -137,7 +137,8 @@ impl MutatorThread {
                 id,
             },
             block_requested: AtomicBool::new(false),
-            root_head: Cell::new(0),
+            native_roots: UnsafeCell::new(crate::gc::roots::NativeRootStack::new()),
+            jit_root_head: Cell::new(std::ptr::null_mut()),
             lab: Cell::new(LocalAllocationBuffer::new()),
             alloc_fastpath: AtomicU8::new(AllocFastPath::None as u8),
             mutator: UnsafeCell::new(None),

@@ -89,7 +89,7 @@ fn intern_global(symbol: Symbol, env: &Environment) -> Symbol {
         return symbol;
     }
 
-    let mut symbol_map = env.symbol_map.clone();
+    let mut symbol_map = env.symbol_map();
     symbol_map.as_mut().intern(symbol.ident(), false).0
 }
 

@@ -65,9 +65,9 @@ use std::{cell::RefCell, ptr::NonNull};
 #[derive(Debug)]
 pub struct Environment {
     /// the obarray
-    pub symbol_map: Gc<SymbolMap>,
+    symbol_map: crate::gc::GcRooted<SymbolMap>,
 
-    pub spec_stack: Gc<SpecStack>,
+    spec_stack: crate::gc::GcRooted<SpecStack>,
 
     pub stack_map: StackMap,
 
@@ -93,14 +93,21 @@ pub struct DynamicBinding {
 /// Header for a caller-owned dynamic binding segment.
 ///
 /// JIT code will place this header and `len` following `DynamicBinding` records
-/// in its own stack frame. The zero-length array keeps the Rust type aligned
-/// with the intended tail payload without making `&DynamicEnv` a fat pointer.
+/// in its own stack frame.
 #[repr(C)]
 #[derive(Debug)]
 pub struct DynamicEnv {
     pub len: usize,
     pub parent: *mut DynamicEnv,
     pub bindings: [DynamicBinding; 0],
+}
+
+pub struct Dynamic {
+    raw: Option<NonNull<DynamicEnv>>,
+}
+
+pub struct RootSet<'gc> {
+    dynamics: PhantomData<&'gc DynamicEnv>,
 }
 
 /// Runtime environment view passed through Lisp calls.
@@ -146,15 +153,23 @@ impl Environment {
     pub const THREAD_OFFSET: usize = std::mem::offset_of!(Self, thread);
 }
 
-impl Default for Environment {
-    fn default() -> Self {
-        let thread = crate::gc::current_thread();
+impl Environment {
+    /// The caller's context owns the environment roots and must outlive it.
+    pub fn new(ctx: &mut crate::gc::GcContext) -> Self {
+        let symbol_map = ctx.alloc::<SymbolMap>(());
+        let symbol_map = ctx.root_gc(symbol_map);
+        let spec_stack = ctx.alloc::<SpecStack>(());
+        let spec_stack = ctx.root_gc(spec_stack);
         Self {
-            symbol_map: Gc::default(),
-            spec_stack: Gc::default(),
+            symbol_map,
+            spec_stack,
             stack_map: StackMap::default(),
-            thread: std::sync::Arc::as_ptr(&thread),
+            thread: std::sync::Arc::as_ptr(&crate::gc::current_thread()),
         }
+    }
+
+    pub fn symbol_map(&self) -> Gc<SymbolMap> {
+        self.symbol_map.to_gc(&crate::gc::GcContext::new())
     }
 }
 
@@ -291,7 +306,7 @@ impl Environment {
         }
 
         // Fall back to global environment
-        self.symbol_map
+        self.symbol_map()
             .as_ref()
             .get_symbol_cell_with(symbol, |cell| match load_function_cell {
                 Some(ty) => {
@@ -338,7 +353,8 @@ impl Environment {
             }
         }
 
-        let cell_ref = match self.symbol_map.as_ref().get_symbol_cell_ref(symbol) {
+        let symbol_map = self.symbol_map();
+        let cell_ref = match symbol_map.as_ref().get_symbol_cell_ref(symbol) {
             Some(cell) => cell,
             None => return Err(RuntimeError::unbound_symbol(symbol)),
         };
@@ -380,7 +396,8 @@ impl Environment {
         load_function_cell: Option<FuncCellType>,
         dynamic: Option<&DynamicEnv>,
     ) -> RuntimeResult<EnvValueGuard<'a>> {
-        let cell_ref = match self.symbol_map.as_ref().get_symbol_cell_ref(symbol) {
+        let symbol_map = self.symbol_map();
+        let cell_ref = match symbol_map.as_ref().get_symbol_cell_ref(symbol) {
             Some(cell) => cell,
             None => return Err(RuntimeError::unbound_symbol(symbol)),
         };
@@ -424,11 +441,11 @@ impl Environment {
     }
 
     pub fn get_symbol_cell(&self, symbol: Symbol) -> Option<SymbolCell> {
-        self.symbol_map.as_ref().get_symbol_cell(symbol)
+        self.symbol_map().as_ref().get_symbol_cell(symbol)
     }
 
     pub fn get_or_init_symbol(&self, symbol: Symbol) -> SymbolCell {
-        let mut symbol_map = self.symbol_map.clone();
+        let mut symbol_map = self.symbol_map();
         symbol_map.as_mut().get_or_init_symbol(symbol)
     }
 
@@ -459,7 +476,7 @@ impl Environment {
     }
 
     pub fn is_special(&self, symbol: Symbol) -> bool {
-        self.symbol_map
+        self.symbol_map()
             .as_ref()
             .get_symbol_cell(symbol)
             .map(|cell| cell.special)
@@ -468,7 +485,7 @@ impl Environment {
 
     /// declare a `defvar` or `defconst`
     fn declare_var(&self, ident: Ident) -> Symbol {
-        let mut symbol_map = self.symbol_map.clone();
+        let mut symbol_map = self.symbol_map();
         symbol_map.as_mut().intern(ident, true).0
     }
 }
@@ -542,8 +559,9 @@ mod tests {
     #[test]
     fn dynamic_env_shadows_only_special_value_cells() {
         let _mutator = crate::gc::test_support::bind_nogc_mutator();
-        let env = Environment::default();
-        let mut symbol_map = env.symbol_map.clone();
+        let mut ctx = crate::gc::GcContext::new();
+        let env = Environment::new(&mut ctx);
+        let mut symbol_map = env.symbol_map();
 
         let special = symbol_map.as_mut().intern(Ident::from("special"), true).0;
         let normal = symbol_map.as_mut().intern(Ident::from("normal"), false).0;
@@ -588,5 +606,18 @@ mod tests {
             .load_symbol_guard_with_dynamic(normal, None, Some(&normal_dynamic.header))
             .unwrap();
         assert_eq!(*normal_value.as_ref(), global_normal);
+    }
+}
+
+impl crate::gc::ConstructObject for SpecStack {
+    type Init<'a> = ();
+    fn size_from_init(_init: &Self::Init<'_>) -> usize {
+        std::mem::size_of::<crate::gc::Headered<Self>>()
+    }
+    fn size(&self) -> usize {
+        std::mem::size_of::<crate::gc::Headered<Self>>()
+    }
+    unsafe fn init_fn(_init: Self::Init<'_>, _ctx: &crate::gc::GcContext) -> Self {
+        Self::default()
     }
 }

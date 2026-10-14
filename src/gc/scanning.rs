@@ -60,10 +60,6 @@ impl Scanning<MM> for VMScanning {
         mutator: &'static mut mmtk::Mutator<MM>,
         mut factory: impl mmtk::vm::RootsWorkFactory<<MM as mmtk::vm::VMBinding>::VMSlot>,
     ) {
-        let Some(provider) = STACKMAP_PROVIDER.get().copied() else {
-            return;
-        };
-
         let mut slots: Vec<TaggedPtrSlot> = Vec::new();
         let mtls = mutator.mutator_tls;
         struct RootCollector<'a>(&'a mut Vec<TaggedPtrSlot>);
@@ -74,7 +70,14 @@ impl Scanning<MM> for VMScanning {
             }
         }
 
-        provider.visit_stack_roots(mtls, &mut RootCollector(&mut slots));
+        let thread = unsafe { super::thread::MutatorThread::from_mutator_thread(mtls) };
+        // Native constructor roots exist even before a JIT provider is installed.
+        unsafe {
+            (&*thread.native_roots.get()).scan(&mut RootCollector(&mut slots));
+        }
+        if let Some(provider) = STACKMAP_PROVIDER.get().copied() {
+            provider.visit_stack_roots(mtls, &mut RootCollector(&mut slots));
+        }
         factory.create_process_roots_work(slots);
     }
 

@@ -37,6 +37,7 @@ const SYMBOL_DATA_MASK: usize = (u64::MAX >> (64 - SYMBOL_DATA_BITS)) as usize;
 /// # Examples
 ///
 /// ```rust
+/// # use torrent::core::symbol::Symbol;
 /// let sym = Symbol::from("hello");
 /// println!("Symbol name: {}", sym.name());
 /// ```
@@ -76,7 +77,8 @@ type Map = IndexMap<Ident, SymbolCell, rustc_hash::FxBuildHasher>;
 /// # Examples
 ///
 /// ```rust
-/// let map = SymbolMap::default();
+/// # use torrent::core::{symbol::SymbolMap, ident::Ident};
+/// let mut map = SymbolMap::default();
 /// let sym = map.intern(Ident::from("test"), false);
 /// assert_eq!(sym.0.index(), Some(0));
 /// ```
@@ -147,6 +149,7 @@ impl Symbol {
     /// # Examples
     ///
     /// ```rust
+    /// # use torrent::core::symbol::Symbol;
     /// let sym = Symbol::from("hello");
     /// assert_eq!(sym.name(), "hello");
     /// ```
@@ -627,5 +630,18 @@ mod tests {
         let cell = map.get_or_init_symbol(sym);
         assert!(cell.special); // Should detect ':' prefix
         assert!(cell.name.is_indexed());
+    }
+}
+
+impl crate::gc::ConstructObject for SymbolMap {
+    type Init<'a> = ();
+    fn size_from_init(_init: &Self::Init<'_>) -> usize {
+        std::mem::size_of::<crate::gc::Headered<Self>>()
+    }
+    fn size(&self) -> usize {
+        std::mem::size_of::<crate::gc::Headered<Self>>()
+    }
+    unsafe fn init_fn(_init: Self::Init<'_>, _ctx: &crate::gc::GcContext) -> Self {
+        Self::default()
     }
 }

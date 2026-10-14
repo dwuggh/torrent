@@ -8,7 +8,6 @@ use crate::core::ident::Ident;
 use crate::core::number::*;
 use crate::core::parser::token::Token;
 use crate::core::parser::{Span, expr::*};
-use crate::core::string::LispStr;
 
 type Extra<'s> = extra::Full<Rich<'s, Token, Span>, (), ()>;
 
@@ -44,9 +43,9 @@ where
 
         let literal = select! {
             Token::Integer(n) => Literal::Number(Number::Integer(LispInteger::new(n))),
-            Token::Float(f) => Literal::Number(Number::Real(LispFloat::new(f))),
+            Token::Float(f) => Literal::Number(Number::Real(f)),
             Token::Character(c) => Literal::Character(LispCharacter::new(c)),
-            Token::Str(s) => Literal::String(LispStr::new(s))
+            Token::Str(s) => Literal::String(s)
         }
         .boxed();
 
@@ -140,10 +139,13 @@ where
             .map(Arg::new_uncap)
             .boxed();
         let optional_arg = keyword("&optional")
-            .ignore_then(normal_arg.clone())
-            .repeated()
-            .at_least(1)
-            .collect::<Vec<_>>()
+            .ignore_then(
+                normal_arg
+                    .clone()
+                    .repeated()
+                    .at_least(1)
+                    .collect::<Vec<_>>(),
+            )
             .boxed();
 
         let args = sexp(
@@ -517,7 +519,7 @@ mod tests {
         // Test float
         let result = parse_src("3.14").unwrap();
         match &*result.ty.borrow() {
-            ExprType::Literal(Literal::Number(Number::Real(f))) => assert_eq!(f.value(), 3.14),
+            ExprType::Literal(Literal::Number(Number::Real(f))) => assert_eq!(*f, 3.14),
             _ => panic!("Expected float literal"),
         }
 
@@ -650,7 +652,7 @@ mod tests {
     #[test]
     fn test_parse_lambda() {
         let result = parse_src(
-            "(lambda (x y &optional z &optional x &rest args)
+            "(lambda (x y &optional z w &rest args)
 (interactive \"P\")
 )",
         )

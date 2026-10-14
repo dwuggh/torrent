@@ -195,10 +195,10 @@ fn get_direct_c_signature(args: &[Arg]) -> (Vec<TokenStream>, Vec<proc_macro2::I
         let arg_info = &arg.info;
         let ident = &arg.ident;
         match &arg_info.kind {
-            ArgKind::Env => {
+            ArgKind::Env | ArgKind::GcContext => {
                 // Skip - will be added at the end
             }
-            ArgKind::Slice(_) => {
+            ArgKind::Slice(_) | ArgKind::RootedSlice => {
                 let ptr_ident = format_ident!("{}_ptr", ident);
                 let argc_ident = format_ident!("{}_argc", ident);
                 c_params.push(quote! { #ptr_ident: i64 });
@@ -229,10 +229,10 @@ fn get_direct_signatures(args: &[Arg]) -> Vec<TokenStream> {
 
     for arg in args.iter() {
         match &arg.info.kind {
-            ArgKind::Env => {
+            ArgKind::Env | ArgKind::GcContext => {
                 // Skip - will be added at the end
             }
-            ArgKind::Slice(_) => {
+            ArgKind::Slice(_) | ArgKind::RootedSlice => {
                 signatures.push(quote! {
                     sig.params.push(cranelift::prelude::AbiParam::new(cranelift::prelude::codegen::ir::types::I64)); // slice_ptr
                 });
@@ -269,13 +269,37 @@ fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
     let use_argv_abi = rest || { normal + optional > 8 };
 
     let object = quote! { crate::core::object::Object };
-    let object_slot = quote! { crate::core::object::ObjectSlot };
-    let nil = quote! {
-        crate::core::object::NIL
-    };
-
+    let rooted_slice = quote! { crate::gc::RootedSlice };
+    let has_gc_context = args
+        .iter()
+        .any(|arg| matches!(arg.info.kind, ArgKind::GcContext));
+    let has_rooted_args = args.iter().any(|arg| {
+        matches!(arg.info.kind, ArgKind::Rooted | ArgKind::RootedSlice)
+            || matches!(&arg.info.kind, ArgKind::Slice(inner) if matches!(inner.as_ref(), ArgKind::Rooted))
+    });
     let mut init_args: Vec<TokenStream> = Vec::new();
     let mut finish_args: Vec<TokenStream> = Vec::new();
+    let mut context_binding: Option<TokenStream> = None;
+
+    if has_rooted_args && !has_gc_context {
+        panic!("Rooted arguments in #[defun] require &mut GcContext");
+    }
+
+    if has_gc_context {
+        let context = args
+            .iter()
+            .find(|arg| matches!(arg.info.kind, ArgKind::GcContext))
+            .expect("GcContext argument disappeared");
+        if !context.info.is_ref {
+            panic!("GcContext arguments in #[defun] must be borrowed");
+        }
+        if has_rooted_args && !context.info.is_mut {
+            panic!("Rooted arguments in #[defun] require &mut GcContext");
+        }
+        init_args.push(quote! {
+            let mut __gc_context = crate::gc::GcContext::new();
+        });
+    }
 
     if use_argv_abi {
         init_args.push(quote! {
@@ -309,60 +333,76 @@ fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
         let tmp = format_ident!("__arg_val_{}", i);
         match &arg_info.kind {
             ArgKind::Object => {
-                let init = if arg_info.is_ref {
-                    quote! {
-                        #load_arg
-                        let #tmp = #object(arg_val as u64);
-                        let #ident = &#tmp;
-                        env.stack_map.push(#ident);
-                    }
-                } else {
-                    quote! {
-                        #load_arg
-                        let #ident = #object(arg_val as u64);
-                        env.stack_map.push(&#ident);
-                    }
-                };
-                let post = if arg_info.is_ref {
-                    quote! {
-                        env.stack_map.pop(&#tmp);
-                        std::mem::forget(#tmp);
-                    }
-                } else {
-                    quote! {}
-                };
-                finish_args.push(post);
-                init_args.push(init);
-            }
-            ArgKind::ObjectSlot => {
-                // The extern ABI still passes a tagged word. The wrapper only
-                // gives Rust code interior mutability; safepoints spill live
-                // objects into NativeRootFrame separately.
+                if has_gc_context {
+                    panic!(
+                        "&Object arguments in #[defun] with GcContext must be rewritten to &Rooted"
+                    );
+                }
+                if !arg_info.is_ref || arg_info.is_mut {
+                    panic!("Object arguments in #[defun] must be borrowed as &Object");
+                }
                 let init = quote! {
                     #load_arg
-                    let #ident = #object_slot::new(#object(arg_val as u64));
+                    let #tmp = #object(arg_val as u64);
+                    let #ident = &#tmp;
                 };
                 init_args.push(init);
                 finish_args.push(quote! {});
             }
-            ArgKind::ObjectRef(ty) => {
-                let mut_val = if arg.info.is_mut {
-                    quote! {mut}
-                } else {
-                    quote! {}
+            ArgKind::Rooted => {
+                if !arg_info.is_ref {
+                    panic!("Rooted arguments must be passed by reference");
+                }
+                let init = quote! {
+                    #load_arg
+                    let #tmp = __gc_context.root(#object(arg_val as u64));
+                    let #ident = &#tmp;
                 };
+                init_args.push(init);
+                finish_args.push(quote! {});
+            }
+            ArgKind::RootedSlice => {
+                if !arg_info.is_ref || arg_info.is_mut {
+                    panic!("RootedSlice arguments must be borrowed as &RootedSlice");
+                }
+                let ptr_ident = format_ident!("{}_ptr", ident);
+                let argc_ident = format_ident!("{}_argc", ident);
+                let source = if use_argv_abi {
+                    quote! {
+                        let __slice_ptr = (args_ptr as *const #object).add(#i);
+                        let __slice_len = args_cnt - #i;
+                    }
+                } else {
+                    quote! {
+                        let __slice_ptr = #ptr_ident as *const #object;
+                        let __slice_len = #argc_ident as usize;
+                    }
+                };
+                init_args.push(quote! {
+                    let #tmp: #rooted_slice = unsafe {
+                        #source
+                        let __slice = ::std::slice::from_raw_parts(__slice_ptr, __slice_len);
+                        __gc_context.root_slice(__slice)
+                    };
+                    let #ident = &#tmp;
+                });
+            }
+            ArgKind::ObjectRef(ty) => {
+                if has_gc_context {
+                    panic!(
+                        "heap reference arguments in #[defun] with GcContext must be rewritten to &Rooted"
+                    );
+                }
+                if !arg_info.is_ref || arg_info.is_mut {
+                    panic!("heap reference arguments in #[defun] must be borrowed as &T");
+                }
                 let init = quote! {
                     #load_arg
                     let #tmp = #object(arg_val as u64);
-                    env.stack_map.push(&#tmp);
-                    let #ident: &#mut_val #ty = __unwrap_or_nil!((&#tmp).try_into());
+                    let #ident: &#ty = __unwrap_or_nil!((&#tmp).try_into());
                 };
                 init_args.push(init);
-                let post = quote! {
-                    env.stack_map.pop(&#tmp);
-                    std::mem::forget(#tmp);
-                };
-                finish_args.push(post);
+                finish_args.push(quote! {});
             }
             ArgKind::Primitive(ty) => {
                 let init = match &ty.to_string() as &str {
@@ -403,137 +443,32 @@ fn get_args(args: &[Arg]) -> (bool, Vec<TokenStream>, Vec<TokenStream>) {
                 };
                 init_args.push(init);
             }
-            ArgKind::Option(inner_kind) => {
-                // Optional arguments - check if we have enough arguments
-                let option_conversion = match inner_kind.as_ref() {
-                    ArgKind::Object => {
-                        let inner = quote! {
-                            #load_arg
-                            let #tmp = #object(arg_val as u64);
-                            env.stack_map.push(&#tmp);
-                            #tmp
-                        };
-                        if arg_info.is_ref {
-                            if use_argv_abi {
-                                quote! {
-                                    let #tmp = (args_cnt > i).then(|| {
-                                        #inner
-                                    });
-                                    let #ident = #tmp.as_ref();
-                                }
-                            } else {
-                                quote! {
-                                    let #tmp = #object(#ident as u64);
-                                    env.stack_map.push(&#tmp);
-                                    let #ident = Some(&#tmp);
-                                }
-                            }
-                        } else {
-                            if use_argv_abi {
-                                quote! {
-                                    let #ident = (args_cnt > i).then(|| {
-                                        #inner
-                                    });
-                                }
-                            } else {
-                                quote! {
-                                    let #tmp = #object(#ident as u64);
-                                    env.stack_map.push(&#tmp);
-                                    let #ident = Some(#tmp);
-                                }
-                            }
-                        }
-                    }
-                    ArgKind::ObjectRef(ty) => {
-                        let mut_val = if arg.info.is_mut {
-                            quote! {mut}
-                        } else {
-                            quote! {}
-                        };
-
-                        let inner = quote! {
-                            #load_arg
-                            let #tmp = #object(arg_val as u64);
-                            env.stack_map.push(&#tmp);
-                            #tmp
-                        };
-
-                        if use_argv_abi {
-                            quote! {
-                                let #tmp = (args_cnt > i).then(|| {
-                                    #inner
-                                });
-                                let #ident: Option<&#mut_val #ty> =
-                                    __unwrap_or_nil!(#tmp.as_ref().map(|val| val.try_into()).transpose());
-                            }
-                        } else {
-                            quote! {
-                                let #tmp = if #ident == #nil {
-                                    None
-                                } else {
-                                    let value = #object(#ident as u64);
-                                    env.stack_map.push(&value);
-                                    Some(value)
-                                };
-                                let #ident: Option<&#mut_val #ty> =
-                                    __unwrap_or_nil!(#tmp.as_ref().map(|val| val.try_into()).transpose());
-                            }
-                        }
-                    }
-                    _ => {
-                        panic!("wrong type in option!")
-                    }
-                };
-                // option_conversion
-                init_args.push(option_conversion);
+            ArgKind::Option(_inner_kind) => {
+                panic!("optional arguments in #[defun] must be rewritten for rooted calling")
             }
-            ArgKind::Slice(inner_kind) => {
-                // Slice arguments consume all remaining arguments
-                let ptr_ident = format_ident!("{}_ptr", ident);
-                let argc_ident = format_ident!("{}_argc", ident);
-                let prog = if use_argv_abi {
+            ArgKind::Slice(_) => {
+                panic!("Rust slice arguments in #[defun] must use &RootedSlice")
+            }
+            ArgKind::GcContext => {
+                let binding = if arg_info.is_mut {
                     quote! {
-                        let ptr = args_ptr as *const #object;
-                        let slice_ptr = ptr.add(#i);
-                        let slice_len = args_cnt - #i;
-                        let slice_len = slice_len as usize;
+                        let #ident = &mut __gc_context;
                     }
                 } else {
                     quote! {
-                        let slice_ptr = #ptr_ident as *const #object;
-                        let silce_len = #argc_ident as usize;
+                        let #ident = &__gc_context;
                     }
                 };
-                let slice_conversion = match inner_kind.as_ref() {
-                    ArgKind::Object => {
-                        quote! {
-                            let #ident = unsafe {
-                                #prog
-                                std::slice::from_raw_parts(slice_ptr as *const #object, slice_len)
-                            };
-                            for arg in #ident.iter() {
-                                env.stack_map.push(arg);
-                            }
-                        }
-                    }
-                    _ => {
-                        panic!("cannot convert slice: wrong arg type")
-                    }
-                };
-                init_args.push(slice_conversion);
-
-                let post = quote! {
-                    for arg in #ident.iter() {
-                        env.stack_map.pop(arg);
-                    }
-                };
-                finish_args.push(post);
+                context_binding = Some(binding);
             }
             ArgKind::Env => (),
             _ => {
                 panic!("invalid type!")
             }
         };
+    }
+    if let Some(binding) = context_binding {
+        init_args.push(binding);
     }
     (use_argv_abi, init_args, finish_args)
 }

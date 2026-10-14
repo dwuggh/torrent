@@ -1,5 +1,4 @@
 use std::{
-    alloc::Layout,
     fmt::Debug,
     hash::Hash,
     marker::PhantomData,
@@ -10,12 +9,9 @@ use std::{
     },
 };
 
-use mmtk::{
-    AllocationSemantics,
-    util::{Address, ObjectReference},
-};
+use mmtk::util::{Address, ObjectReference};
 
-use super::{OBJECT_REF_OFFSET, Tagged, post_alloc_with_semantics, thread::current_thread};
+use super::{OBJECT_REF_OFFSET, Tagged};
 
 /// The tag policy for the low bits of Torrent tagged values.
 ///
@@ -135,8 +131,6 @@ impl<'a> Visitor<'a> {
 /// need to know the runtime's concrete object types.
 #[derive(Debug, Clone, Copy)]
 pub struct MetaData {
-    /// Allocation layout for objects with this logical tag.
-    pub layout: Layout,
     /// Trace thunk for an erased object reference.
     pub trace: unsafe fn(object: ObjectReference, visitor: &mut Visitor),
     /// Finalization thunk for an erased object reference.
@@ -170,7 +164,6 @@ pub fn register_headerless_metadata_tag(tag: u8) {
 /// Build an erased metadata entry for a concrete heap object type.
 pub fn metadata_for<T: HeapObject>() -> MetaData {
     MetaData {
-        layout: T::layout(),
         trace: trace_erased::<T>,
         finalize: finalize_erased::<T>,
         size: size_erased::<T>,
@@ -278,17 +271,6 @@ pub struct Gc<T: HeapObject> {
 }
 
 impl<T: HeapObject> Gc<T> {
-    /// Allocate and initialize a new GC-managed value.
-    pub fn new(value: T) -> Self {
-        let thread = current_thread();
-        let size = T::layout().size();
-        let start = thread.alloc(size);
-        unsafe { T::init(start, value) };
-        let object = unsafe { T::object_ref_from_start(start) };
-        post_alloc_with_semantics(thread.mutator(), object, size, AllocationSemantics::Default);
-        Self::from_object_ref(object)
-    }
-
     /// Create a typed handle from an MMTk object reference.
     pub fn from_object_ref(object: ObjectReference) -> Self {
         let ptr = NonNull::new(object.to_raw_address().to_mut_ptr::<()>())
@@ -360,15 +342,6 @@ impl<T: HeapObject + PartialOrd> PartialOrd for Gc<T> {
     }
 }
 
-impl<T> Default for Gc<T>
-where
-    T: HeapObject + Default,
-{
-    fn default() -> Self {
-        Self::new(T::default())
-    }
-}
-
 /// Physical representation for a headered logical value.
 #[repr(C)]
 pub struct Headered<T: Tagged> {
@@ -386,15 +359,22 @@ pub struct Headered<T: Tagged> {
 ///
 /// # Safety
 ///
-/// Implementors must be valid as the `data` field of [`Headered<Self>`].
-pub unsafe trait HeaderedObject: Tagged + Trace + Sized + 'static {}
+/// Implementors must be valid as the `data` field of [`Headered<Self>`], with
+/// that field at the one-word object-reference offset. Their alignment must
+/// therefore be at most eight bytes. Sizing must include the header and tail.
+pub unsafe trait HeaderedObject: Tagged + Trace + ConstructObject + 'static {
+    /// Initialize trailing storage after the prefix has been placed.
+    ///
+    /// # Safety
+    /// `ptr` must point to a newly placed prefix with its full reserved tail.
+    /// This hook must not reach a GC safepoint.
+    unsafe fn init_tail(_ptr: NonNull<Self>) {}
+}
 
 unsafe impl<T> HeapObject for T
 where
     T: HeaderedObject,
 {
-    type Repr = Headered<T>;
-
     const PRIMARY_TAG: u8 = GcTag::SECONDARY;
 
     unsafe fn init(start: Address, value: Self) {
@@ -402,8 +382,28 @@ where
             header: GcHeader::new(Self::TAG),
             data: value,
         };
-        unsafe { start.store::<Headered<T>>(repr) };
+        unsafe {
+            start.store::<Headered<T>>(repr);
+            Self::init_tail(Self::data_from_object_ref(Self::object_ref_from_start(
+                start,
+            )));
+        }
     }
+}
+
+/// Complete allocation inputs, reloaded after any collecting allocation.
+pub trait ConstructObject: Sized {
+    type Init<'a>;
+
+    fn size_from_init(init: &Self::Init<'_>) -> usize;
+    fn size(&self) -> usize;
+
+    /// Build the temporarily unrooted payload after allocation.
+    ///
+    /// # Safety
+    /// The caller must place this payload before any further GC safepoint.
+    /// Implementations must not allocate in the GC heap or poll a safepoint.
+    unsafe fn init_fn(init: Self::Init<'_>, ctx: &super::GcContext) -> Self;
 }
 
 /// Contract between a logical heap type and its physical heap layout.
@@ -413,28 +413,21 @@ where
 /// Implementations must convert between allocation start, MMTk object
 /// reference, and typed logical value pointer without changing the object
 /// identity. MMTk will use these conversions while tracing and copying.
-pub unsafe trait HeapObject: Tagged + Trace + Sized + 'static {
-    /// Physical allocation representation used for this logical value.
-    type Repr: Sized;
-
+pub unsafe trait HeapObject: Tagged + Trace + ConstructObject + 'static {
     /// Low tag stored in the raw Lisp [`Object`] word.
     const PRIMARY_TAG: u8;
 
-    /// Allocation layout requested from MMTk.
-    fn layout() -> Layout {
-        Layout::new::<Self::Repr>()
-    }
-
     /// Initialize a freshly allocated object representation.
     ///
-    /// `start` is allocation start, not the object-reference pointer. Headered
+    /// `start` is allocation start. Headered
     /// objects write [`Headered`] here. Headerless objects write their compact
     /// representation directly.
     ///
     /// # Safety
     ///
-    /// `start` must point to writable memory of at least [`HeapObject::layout`]
-    /// bytes and must not already contain an initialized value.
+    /// `start` must point to writable memory of at least `value.size()` bytes
+    /// and must not already contain an initialized value. Initialization must
+    /// finish without reaching a GC safepoint.
     unsafe fn init(start: Address, value: Self);
 
     /// Convert allocation start to the MMTk object-reference address.
@@ -501,6 +494,7 @@ unsafe fn finalize_erased<T: HeapObject>(object: ObjectReference) {
     unsafe { data.as_mut().finalize() };
 }
 
-unsafe fn size_erased<T: HeapObject>(_object: ObjectReference) -> usize {
-    T::layout().size()
+unsafe fn size_erased<T: HeapObject>(object: ObjectReference) -> usize {
+    let data = unsafe { T::data_from_object_ref(object) };
+    unsafe { data.as_ref().size() }
 }

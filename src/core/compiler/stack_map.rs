@@ -4,9 +4,9 @@ use std::{
 };
 
 use crate::gc::{
-    JitRootFrame, MutatorThread, RootLink, StackMapProvider, StackRootVisitor,
+    JitRootFrame, MutatorThread, StackMapProvider, StackRootVisitor,
     mmtk::util::{Address, VMMutatorThread},
-    push_jit_root_frame, scan_root_chain,
+    push_jit_root_frame, scan_jit_root_chain,
 };
 use cranelift::codegen::ir::{AbiParam, Type, types};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -232,12 +232,19 @@ unsafe fn scan_cranelift_jit_frame(frame: &JitRootFrame, visitor: &mut dyn Stack
     let func_metas = FUNC_METAS.lock().unwrap();
 
     while fp != 0 && fp != stop_fp {
-        let Some((span, stack_map)) = stack_map_for_ip(&func_metas, ip) else {
+        if let Some((span, stack_map)) = stack_map_for_ip(&func_metas, ip) {
+            let sp = explicit_sp.take().unwrap_or(fp - span as usize);
+            visit_stack_map_slots(sp, &stack_map, visitor);
+        } else if func_metas
+            .iter()
+            .any(|meta| meta.start <= ip && ip < meta.end)
+        {
+            // Cranelift omits maps at calls with no live tagged words. Such a
+            // frame can still have an older JIT caller with live roots.
+            explicit_sp = None;
+        } else {
             break;
-        };
-
-        let sp = explicit_sp.take().unwrap_or(fp - span as usize);
-        visit_stack_map_slots(sp, &stack_map, visitor);
+        }
 
         let Some(parent_fp) = parent_fp(fp) else {
             break;
@@ -246,8 +253,8 @@ unsafe fn scan_cranelift_jit_frame(frame: &JitRootFrame, visitor: &mut dyn Stack
             break;
         }
 
-        fp = parent_fp;
         ip = unsafe { arch::return_addr_of_frame(fp as *const u8) as usize };
+        fp = parent_fp;
     }
 }
 
@@ -256,10 +263,13 @@ struct CraneliftStackMapProvider;
 impl StackMapProvider for CraneliftStackMapProvider {
     fn visit_stack_roots(&self, tls: VMMutatorThread, visitor: &mut dyn StackRootVisitor) {
         let thread = unsafe { MutatorThread::from_mutator_thread(tls) };
-        let head = RootLink::from_bits(thread.root_head.get());
 
         unsafe {
-            scan_root_chain(head, visitor, scan_cranelift_jit_frame);
+            scan_jit_root_chain(
+                thread.jit_root_head.get(),
+                visitor,
+                scan_cranelift_jit_frame,
+            );
         }
     }
 }
@@ -325,6 +335,7 @@ unsafe extern "C" fn jit_safepoint_poll_slow(thread: i64, dynamic: i64) -> i64 {
     }
 }
 
+#[inline(always)]
 unsafe fn with_current_jit_root(thread: i64, dynamic: i64, body: impl FnOnce() -> i64) -> i64 {
     let thread = unsafe { &*(thread as *const crate::gc::MutatorThread) };
 
@@ -335,7 +346,8 @@ unsafe fn with_current_jit_root(thread: i64, dynamic: i64, body: impl FnOnce() -
     let frame_pointer = unsafe { arch::parent_frame_pointer(native_fp) } as *const usize;
     let return_pc = unsafe { arch::return_addr_of_frame(native_fp) };
     let dynamic = dynamic as *const crate::core::env::DynamicEnv;
-    let mut frame = JitRootFrame::new(frame_pointer, std::ptr::null(), return_pc, dynamic);
+    let stack_pointer = unsafe { native_fp.add(arch::PARENT_SP_FROM_FP_OFFSET) } as *const usize;
+    let mut frame = JitRootFrame::new(frame_pointer, stack_pointer, return_pc, dynamic);
     let _guard = unsafe { push_jit_root_frame(thread, &mut frame) };
 
     body()

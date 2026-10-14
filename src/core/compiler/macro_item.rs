@@ -6,7 +6,6 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct MacroItem(Gc<MacroItemType>);
 
-#[repr(align(16))]
 #[derive(Clone, Debug)]
 pub enum MacroItemType {
     // List(Vec<LispValue>),
@@ -73,3 +72,16 @@ unsafe impl Trace for MacroItemType {
 //         }
 //     }
 // }
+
+impl crate::gc::ConstructObject for MacroItemType {
+    type Init<'a> = String;
+    fn size_from_init(_: &String) -> usize {
+        std::mem::size_of::<crate::gc::Headered<Self>>()
+    }
+    fn size(&self) -> usize {
+        std::mem::size_of::<crate::gc::Headered<Self>>()
+    }
+    unsafe fn init_fn(init: String, _: &crate::gc::GcContext) -> Self {
+        Self::PrintedRep(init)
+    }
+}

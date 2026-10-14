@@ -141,18 +141,12 @@ impl AsMut<f64> for Float {
 }
 
 impl LispFloat {
-    pub fn new(value: f64) -> Self {
-        Self(crate::gc::Gc::new(Float(value)))
+    pub fn new(value: f64, ctx: &mut crate::gc::GcContext) -> Self {
+        Self(ctx.alloc::<Float>(value))
     }
 
     pub fn value(&self) -> f64 {
         self.0.as_ref().0
-    }
-}
-
-impl From<f64> for LispFloat {
-    fn from(value: f64) -> Self {
-        Self::new(value)
     }
 }
 
@@ -193,5 +187,18 @@ impl From<char> for LispCharacter {
 impl From<LispCharacter> for char {
     fn from(value: LispCharacter) -> Self {
         value.value()
+    }
+}
+
+impl crate::gc::ConstructObject for Float {
+    type Init<'a> = f64;
+    fn size_from_init(_init: &Self::Init<'_>) -> usize {
+        std::mem::size_of::<crate::gc::Headered<Self>>()
+    }
+    fn size(&self) -> usize {
+        std::mem::size_of::<crate::gc::Headered<Self>>()
+    }
+    unsafe fn init_fn(init: Self::Init<'_>, _ctx: &crate::gc::GcContext) -> Self {
+        Self(init)
     }
 }

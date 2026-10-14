@@ -9,19 +9,19 @@ mod x86_64 {
 
     /// Gets the frame pointer which is the parent of the given
     /// frame, pointed to by `fp`.
-    #[inline]
+    #[inline(always)]
     pub(crate) unsafe fn parent_frame_pointer(fp: *const u8) -> *const u8 {
         (unsafe { *(fp as *mut usize) }) as *const u8
     }
 
     /// Gets the return address of the frame, pointed to by `fp`.
-    #[inline]
+    #[inline(always)]
     pub(crate) unsafe fn return_addr_of_frame(fp: *const u8) -> *const u8 {
         (unsafe { *(fp as *mut usize).offset(1) }) as *const u8
     }
 
     /// Gets the current function's frame pointer (rbp).
-    #[inline]
+    #[inline(always)]
     pub(crate) unsafe fn current_frame_pointer() -> *const u8 {
         let fp: usize;
         unsafe {
@@ -38,19 +38,19 @@ mod aarch64 {
 
     /// Gets the frame pointer which is the parent of the given
     /// frame, pointed to by `fp`.
-    #[inline]
+    #[inline(always)]
     pub(crate) unsafe fn parent_frame_pointer(fp: *const u8) -> *const u8 {
         (unsafe { *(fp as *mut usize) }) as *const u8
     }
 
     /// Gets the return address of the frame, pointed to by `fp`.
-    #[inline]
+    #[inline(always)]
     pub(crate) unsafe fn return_addr_of_frame(fp: *const u8) -> *const u8 {
         (unsafe { *(fp as *mut usize).offset(1) }) as *const u8
     }
 
     /// Gets the current function's frame pointer (x29 on AArch64).
-    #[inline]
+    #[inline(always)]
     pub(crate) unsafe fn current_frame_pointer() -> *const u8 {
         let fp: usize;
         unsafe {

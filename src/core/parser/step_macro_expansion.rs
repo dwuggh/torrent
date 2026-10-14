@@ -3,7 +3,7 @@ use std::rc::Rc;
 use crate::core::{
     env::{Environment, FuncCellType},
     error::{RuntimeError, RuntimeResult},
-    object::{LispObject, ObjectRef},
+    object::ObjectRef,
     parser::{
         expr::{Call, Expr, ExprType, QuotedData, SpecialForm},
         macro_expansion::{lisp_object_to_tokens, try_expand_macro_call},
@@ -444,42 +444,43 @@ pub fn macro_expand_call(call: &Call, env: &Environment) -> Option<RuntimeResult
         .load_symbol_guard(symbol, Some(FuncCellType::Macro))
         .ok()?;
     let val = guard.as_ref();
-    let ObjectRef::Function(func) = val.as_ref() else {
+    let ObjectRef::Function(_) = val.as_ref() else {
         return Some(Err(RuntimeError::WrongType {
             expected: "function",
             actual: (val.get_tag()),
         }));
     };
-    let args = call
-        .args
-        .iter()
-        .map(|arg| {
-            let obj: LispObject = arg.clone().into();
-            obj.tag()
-        })
-        .collect::<Vec<_>>();
+    let mut ctx = crate::gc::GcContext::new();
+    let func_root = ctx.root(*val);
+    let mut roots = Vec::new();
+    for arg in &call.args {
+        let value = arg.to_object(&mut ctx);
+        roots.push(ctx.root(value));
+    }
+    let args = roots.iter().map(|root| *root.get(&ctx)).collect::<Vec<_>>();
+    let args = ctx.root_slice(&args);
+    let result =
+        crate::core::runtime::call_lisp(&func_root, &args, env, &mut ctx).and_then(|result| {
+            // Convert the macro result to tokens
+            let tokens = lisp_object_to_tokens(result.untag());
 
-    let result = func.run(&args, env).and_then(|result| {
-        // Convert the macro result to tokens
-        let tokens = lisp_object_to_tokens(result.untag());
+            // Parse the tokens back into an expression
+            let tokens_with_span = tokens
+                .into_iter()
+                .map(|tok| (tok, crate::core::parser::Span::dummy()));
+            let stream = Stream::from_iter(tokens_with_span)
+                .map(crate::core::parser::Span::dummy(), |(t, s)| (t, s));
 
-        // Parse the tokens back into an expression
-        let tokens_with_span = tokens
-            .into_iter()
-            .map(|tok| (tok, crate::core::parser::Span::dummy()));
-        let stream = Stream::from_iter(tokens_with_span)
-            .map(crate::core::parser::Span::dummy(), |(t, s)| (t, s));
-
-        match crate::core::parser::expr_parser::expr_parser()
-            .parse(stream)
-            .into_result()
-        {
-            Ok(expr) => Ok(expr),
-            Err(parse_errors) => Err(RuntimeError::MacroExpansionError {
-                message: format!("Failed to parse macro expansion result: {:?}", parse_errors),
-            }),
-        }
-    });
+            match crate::core::parser::expr_parser::expr_parser()
+                .parse(stream)
+                .into_result()
+            {
+                Ok(expr) => Ok(expr),
+                Err(parse_errors) => Err(RuntimeError::MacroExpansionError {
+                    message: format!("Failed to parse macro expansion result: {:?}", parse_errors),
+                }),
+            }
+        });
 
     Some(result)
 }

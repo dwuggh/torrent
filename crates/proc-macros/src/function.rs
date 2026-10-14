@@ -17,15 +17,15 @@ pub(crate) struct ArgInfo {
 #[derive(PartialEq, Debug, Clone)]
 pub(crate) enum ArgKind {
     Env,
-    /// an Object. can be referenced, but should not be mut refed.
-    /// don't accept LispObject for now, because the methods for object is convenient enough.
+    /// Raw object word type. Marked native functions may borrow this as
+    /// `&Object` for no-safepoint arguments, but wrappers reject by-value use.
     Object,
-    /// A local slot holding one `Object` word.
-    ///
-    /// Lisp still passes the argument as a raw ABI word. The generated wrapper
-    /// builds an `ObjectSlot` for interior mutability; safepoints must spill
-    /// live values into a `NativeRootFrame`.
-    ObjectSlot,
+    /// A GC-published native root slot.
+    Rooted,
+    /// A contiguous range in the current mutator's native root stack.
+    RootedSlice,
+    /// Safepoint/lifetime token. This does not consume a Lisp argument.
+    GcContext,
     /// i64, f64, etc. This will behave differently between defun and internal_fn.
     /// This is converted to Number types in defun, and is loaded directly in internal_fn.
     Primitive(Ident),
@@ -211,11 +211,19 @@ fn is_object_name(ident: &str) -> bool {
     }
 }
 
-fn is_object_slot_name(ident: &str) -> bool {
+fn is_rooted_name(ident: &str) -> bool {
     match ident {
-        "ObjectSlot" => true,
+        "Rooted" => true,
         _ => false,
     }
+}
+
+fn is_rooted_slice_name(ident: &str) -> bool {
+    matches!(ident, "RootedSlice")
+}
+
+fn is_gc_context_name(ident: &str) -> bool {
+    matches!(ident, "GcContext")
 }
 
 // TODO move types to another crate so we can reuse function there
@@ -229,7 +237,7 @@ fn is_object_ref_name(ident: &str) -> bool {
 
 fn is_primitive_name(ident: &str) -> bool {
     match ident {
-        "Symbol" | "i64" | "u64" | "usize" | "u32" => true,
+        "Symbol" | "i64" | "u64" | "usize" | "u32" | "f64" | "char" => true,
         _ => false,
     }
 }
@@ -239,8 +247,12 @@ fn get_object_kind(type_path: &syn::TypePath) -> Option<ArgKind> {
     let ident = outer_type.ident.to_string();
     if is_object_name(&ident) {
         Some(ArgKind::Object)
-    } else if is_object_slot_name(&ident) {
-        Some(ArgKind::ObjectSlot)
+    } else if is_rooted_name(&ident) {
+        Some(ArgKind::Rooted)
+    } else if is_rooted_slice_name(&ident) {
+        Some(ArgKind::RootedSlice)
+    } else if is_gc_context_name(&ident) {
+        Some(ArgKind::GcContext)
     } else if is_object_ref_name(&ident) {
         Some(ArgKind::ObjectRef(outer_type.ident.to_owned()))
     } else if is_primitive_name(&ident) {
@@ -320,19 +332,16 @@ pub fn calculate_signature(args: &[Arg]) -> (u8, u8, bool) {
 
     for arg in args {
         match &arg.info.kind {
-            ArgKind::Env => {
+            ArgKind::Env | ArgKind::GcContext => {
                 break; // Slice must be last
             }
-            ArgKind::Object
-            | ArgKind::ObjectSlot
-            | ArgKind::ObjectRef(_)
-            | ArgKind::Primitive(_) => {
+            ArgKind::Object | ArgKind::Rooted | ArgKind::ObjectRef(_) | ArgKind::Primitive(_) => {
                 normal += 1;
             }
             ArgKind::Option(_) => {
                 optional += 1;
             }
-            ArgKind::Slice(_) => {
+            ArgKind::Slice(_) | ArgKind::RootedSlice => {
                 rest = true;
                 break;
             }

@@ -12,10 +12,8 @@ use crate::core::Tag;
 use crate::core::compiler::error::{CodegenError, CodegenResult};
 use crate::core::compiler::stack_map::{FunctionMetadata, StackMapSlot, append_func_metadata};
 use crate::core::env::{DynamicBinding, DynamicEnv};
-use crate::core::function::LispFunction;
 use crate::core::function::{ARGV_ABI_MARKER, FunctionSignature};
 use crate::core::ident::Ident;
-use crate::core::lexical::LexicalBindings;
 use crate::core::object::NIL;
 use crate::core::object::TRUE;
 use crate::core::parser::expr::*;
@@ -23,70 +21,9 @@ use crate::core::symbol::LispSymbol;
 use crate::core::symbol::Symbol;
 use crate::core::symbol::SymbolSemantics;
 
-#[derive(Debug)]
-pub struct UnresolvedClosure {
-    func: LispFunction,
-    captures: Vec<Arg>,
-}
-
-#[allow(unused)]
-#[derive(Debug)]
-pub enum Closure {
-    Unresolved(UnresolvedClosure),
-    Resolved(LispFunction),
-}
-
 enum IncomingArgs<'a> {
     Argv { args_ptr: Value, args_cnt: Value },
     Direct { args: &'a [Value] },
-}
-
-fn get_local<'a>(locals: &'a [(Arg, Variable)], target: &Arg) -> Option<(&'a Arg, Variable)> {
-    let mut i = locals.len();
-    while i > 0 {
-        i = i - 1;
-        let (arg, var) = &locals[i];
-        if arg == target {
-            return Some((arg, *var));
-        }
-    }
-    None
-}
-
-fn get_locals(locals: &[(Arg, Variable)], target: &Arg) -> Option<Variable> {
-    get_local(locals, target).map(|(_, variable)| variable)
-}
-
-impl UnresolvedClosure {
-    fn resolve(self, codegen: &mut Codegen) -> Closure {
-        let mut unresolved = Vec::new();
-
-        for (index, arg) in self.captures.into_iter().enumerate() {
-            // Try to resolve the argument to a Variable in the current codegen context
-            if let Some((local_arg, variable)) = get_local(&codegen.locals, &arg) {
-                // Get the current value of the variable
-                let mut value = codegen.builder.use_var(variable);
-                if local_arg.is_shared() {
-                    value = codegen.call_internal("create_indirect_object", &[value])[0];
-                }
-                let index = codegen.builder.ins().iconst(types::I64, index as i64);
-                let func_val = codegen.translate_lispobj(&self.func);
-                codegen.call_internal("store_lexical", &[index, value, func_val]);
-            } else {
-                // Still can't resolve this argument, keep it unresolved
-                unresolved.push(arg);
-            }
-        }
-
-        if unresolved.is_empty() {
-            Closure::Resolved(self.func)
-        } else {
-            Closure::Unresolved(Self {
-                func: self.func,
-                captures: unresolved,
-            })
-        }
-    }
 }
 
 #[allow(dead_code)]
@@ -151,18 +88,28 @@ impl<'a> CodegenContext<'a> {
 pub struct Codegen<'a> {
     cgctx: CodegenContext<'a>,
     builder: FunctionBuilder<'a>,
-    func: LispFunction,
+    /// The lexical/local variable environment during codegen. It maps parser Args to Cranelift Variables. It is searched from the end, so shadowing works like a stack. Arguments, let locals, and current captured pseudo-locals all go here.
     locals: Vec<(Arg, Variable)>,
+    /// A fast positional table for formal arguments.
+    /// If a symbol has SymbolSemantics::Argument, its symbol data is used
+    /// as an index into this vector. This is separate from locals because
+    /// resolved argument symbols are index-based now.
     argument_slots: Vec<Variable>,
-    capture_slots: Vec<Arg>,
     pub func_id: FuncId,
     env: Value,
     dynamic: Value,
     lexical: Value,
-    defined_funcs: Vec<Closure>,
 }
 
 impl<'a> Codegen<'a> {
+    fn local(&self, target: &Arg) -> Option<(&Arg, Variable)> {
+        self.locals
+            .iter()
+            .rev()
+            .find(|(arg, _)| arg == target)
+            .map(|(arg, var)| (arg, *var))
+    }
+
     /// Shared boilerplate for declaring a function, creating a FunctionBuilder,
     /// preparing the entry block, and returning the block parameters.
     ///
@@ -192,26 +139,22 @@ impl<'a> Codegen<'a> {
     /// construction across constructors.
     fn assemble(
         cgctx: CodegenContext<'a>,
-        builder: FunctionBuilder<'a>,
-        func: LispFunction,
+        mut builder: FunctionBuilder<'a>,
         env: Value,
         dynamic: Value,
         lexical: Value,
         func_id: FuncId,
-        capture_slots: Vec<Arg>,
     ) -> Self {
+        builder.declare_value_needs_stack_map(lexical);
         Self {
             cgctx,
             builder,
-            func,
             locals: Vec::new(),
             argument_slots: Vec::new(),
-            capture_slots,
             env,
             dynamic,
             lexical,
             func_id,
-            defined_funcs: Vec::new(),
         }
     }
 
@@ -245,18 +188,7 @@ impl<'a> Codegen<'a> {
         let dynamic = params[1];
         let lexical = params[2];
 
-        let func = LispFunction::new_closure(func_id, FunctionSignature::default());
-
-        let mut codegen = Self::assemble(
-            cgctx,
-            builder,
-            func,
-            env,
-            dynamic,
-            lexical,
-            func_id,
-            Vec::new(),
-        );
+        let mut codegen = Self::assemble(cgctx, builder, env, dynamic, lexical, func_id);
 
         codegen.emit_gc_poll();
 
@@ -322,29 +254,7 @@ impl<'a> Codegen<'a> {
             )
         };
 
-        let signature = FunctionSignature::from_args(&lambda.args);
-        let func = LispFunction::new_closure(func_id, signature);
-        let capture_slots = lambda
-            .captures
-            .borrow()
-            .iter()
-            .map(|capture| Arg::new_uncap(Ident::from(*capture)))
-            .collect::<Vec<_>>();
-        let capture_len = capture_slots.len();
-        let _ = func.reset_lexical_bindings(LexicalBindings::with_len(capture_len));
-
-        let mut codegen = Self::assemble(
-            cgctx,
-            builder,
-            func,
-            env,
-            dynamic,
-            lexical,
-            func_id,
-            capture_slots,
-        );
-
-        codegen.emit_gc_poll();
+        let mut codegen = Self::assemble(cgctx, builder, env, dynamic, lexical, func_id);
 
         if use_argv_abi {
             let args_ptr = params[0];
@@ -355,6 +265,17 @@ impl<'a> Codegen<'a> {
             let direct_args = &params[..env_index];
             codegen.setup_locals(&lambda.args, IncomingArgs::Direct { args: direct_args })?;
         }
+
+        for (arg, variable) in codegen.locals.clone() {
+            if arg.captured.get() > 0 {
+                let value = codegen.builder.use_var(variable);
+                let cell = codegen.call_internal("create_indirect_object", &[value])[0];
+                codegen.builder.def_var(variable, cell);
+            }
+        }
+        // Bind incoming words before polling so the entry stack map owns the
+        // values that a moving collection may rewrite.
+        codegen.emit_gc_poll();
 
         codegen.append_captures_to_local(&lambda.captures.borrow());
 
@@ -379,24 +300,40 @@ impl<'a> Codegen<'a> {
     }
 
     pub fn translate_exprs<'s>(&mut self, exprs: &[Expr]) -> CodegenResult<Value> {
-        exprs
-            .iter()
-            .map(|e| self.translate_expr(e))
-            .last()
-            .unwrap_or(Ok(self.nil()))
+        let mut result = self.nil();
+        for expr in exprs {
+            result = self.translate_expr(expr)?;
+        }
+        Ok(result)
     }
 
-    pub fn finalize(mut self, val: Value) -> (UnresolvedClosure, Vec<Closure>) {
+    pub fn finalize(mut self, val: Value) {
         self.builder.ins().return_(&[val]);
+        // Cranelift 0.123's safepoint liveness resolves aliases, but its reload
+        // rewrite checks the operand itself. Canonicalize operands first so
+        // every use of a moved value is reloaded, including SSA merge aliases.
+        // Keep alias definitions alive for FunctionBuilder's variable metadata.
+        let operands: Vec<_> = self
+            .builder
+            .func
+            .layout
+            .blocks()
+            .flat_map(|block| self.builder.func.layout.block_insts(block))
+            .collect();
+        for inst in operands {
+            let aliases: HashMap<_, _> = self
+                .builder
+                .func
+                .dfg
+                .inst_values(inst)
+                .map(|value| (value, self.builder.func.dfg.resolve_aliases(value)))
+                .collect();
+            self.builder
+                .func
+                .dfg
+                .map_inst_values(inst, |value| aliases[&value]);
+        }
         self.builder.finalize();
-
-        let collections = self.defined_funcs;
-        let this = UnresolvedClosure {
-            func: self.func,
-            captures: self.capture_slots,
-        };
-
-        (this, collections)
     }
 
     fn call_import_direct(&mut self, func_name: &str, args: &[Value]) -> &[Value] {
@@ -438,7 +375,7 @@ impl<'a> Codegen<'a> {
         self.call_import_direct(&stub_name, &stub_args)
     }
 
-    fn call_internal(&mut self, func_name: &str, args: &[Value]) -> &[Value] {
+    fn call_internal(&mut self, func_name: &str, args: &[Value]) -> Vec<Value> {
         tracing::debug!("calling native helper through transition: {}", func_name);
 
         let func_id = *self
@@ -452,7 +389,27 @@ impl<'a> Codegen<'a> {
             .declare_func_in_func(func_id, self.builder.func);
         let func_ptr = self.builder.ins().func_addr(types::I64, func_ref);
 
-        self.call_native_transition(func_ptr, args)
+        let results = self.call_native_transition(func_ptr, args).to_vec();
+        if matches!(
+            func_name,
+            "create_closure"
+                | "create_indirect_object"
+                | "load_capture"
+                | "load_lexical"
+                | "load_indirect"
+                | "get_lexical_bindings"
+                | "load_symbol_value"
+                | "collect_rest_args"
+                | "make_float"
+                | "make_string"
+                | "make_vector"
+                | "make_cons"
+        ) {
+            for value in &results {
+                self.builder.declare_value_needs_stack_map(*value);
+            }
+        }
+        results
     }
 
     /// Load the cached `MutatorThread` pointer from the runtime environment.
@@ -505,6 +462,7 @@ impl<'a> Codegen<'a> {
         self.locals.push((arg.clone(), var));
         self.argument_slots.push(var);
 
+        self.builder.declare_value_needs_stack_map(initial);
         let value = initial;
 
         self.builder.def_var(var, value);
@@ -522,12 +480,14 @@ impl<'a> Codegen<'a> {
             .load(types::I64, MemFlags::new(), base, (index * 8) as i32)
     }
 
-    fn append_captures_to_local(&mut self, captures: &Vec<Var>) {
-        for capture in captures.iter() {
+    fn append_captures_to_local(&mut self, captures: &[Var]) {
+        for (index, capture) in captures.iter().enumerate() {
+            let index = self.builder.ins().iconst(types::I64, index as i64);
+            let value = self.call_internal("load_capture", &[index, self.lexical])[0];
             let var = self.builder.declare_var(types::I64);
-            let ident = Ident::from(*capture);
-            let arg = Arg::new_uncap(ident);
-            self.locals.push((arg, var));
+            self.builder.declare_var_needs_stack_map(var);
+            self.builder.def_var(var, value);
+            self.locals.push((Arg::new(Ident::from(*capture), 1), var));
         }
     }
 
@@ -541,12 +501,20 @@ impl<'a> Codegen<'a> {
                     .get(index)
                     .copied()
                     .ok_or_else(|| CodegenError::SymbolNotFound(symbol))?;
-                Ok(self.builder.use_var(variable))
+                let value = self.builder.use_var(variable);
+                let boxed = self
+                    .locals
+                    .iter()
+                    .any(|(arg, var)| *var == variable && arg.captured.get() > 0);
+                Ok(if boxed {
+                    self.call_internal("load_indirect", &[value])[0]
+                } else {
+                    value
+                })
             }
             SymbolSemantics::Lexical => {
                 let index = self.builder.ins().iconst(types::I64, symbol.data() as i64);
-                let func = self.func.clone();
-                let func_val = self.translate_lispobj(&func);
+                let func_val = self.lexical;
                 Ok(self.call_internal("load_lexical", &[index, func_val])[0])
             }
             SymbolSemantics::Unresolved => self.load_symbol(symbol, false),
@@ -621,7 +589,10 @@ impl<'a> Codegen<'a> {
                     self.builder.switch_to_block(present_block);
                     self.builder.seal_block(present_block);
 
-                    let rest_ptr = self.builder.ins().iadd(args_ptr, start_val);
+                    let rest_ptr = self
+                        .builder
+                        .ins()
+                        .iadd_imm(args_ptr, (rest_start * 8) as i64);
                     let rest_cnt = self.builder.ins().isub(args_cnt, start_val);
                     let rest_val =
                         self.call_internal("collect_rest_args", &[rest_ptr, rest_cnt])[0];
@@ -696,6 +667,12 @@ impl<'a> Codegen<'a> {
     }
 
     pub fn translate_expr<'s>(&mut self, expr: &Expr) -> CodegenResult<Value> {
+        let value = self.translate_expr_inner(expr)?;
+        self.builder.declare_value_needs_stack_map(value);
+        Ok(value)
+    }
+
+    fn translate_expr_inner(&mut self, expr: &Expr) -> CodegenResult<Value> {
         match &*expr.ty() {
             ExprType::Nil => Ok(self.nil()),
             ExprType::Symbol(var) => {
@@ -708,9 +685,14 @@ impl<'a> Codegen<'a> {
                     Var::Local(ident) | Var::Captured(ident) | Var::Argument(ident) => {
                         // All local variables (including captured and arguments) are stored in self.locals
                         let arg = Arg::new_uncap(ident);
-                        if let Some(variable) = get_locals(&self.locals, &arg) {
+                        if let Some((arg, variable)) = self.local(&arg) {
+                            let boxed = arg.captured.get() > 0;
                             let value = self.builder.use_var(variable);
-                            Ok(value)
+                            Ok(if boxed {
+                                self.call_internal("load_indirect", &[value])[0]
+                            } else {
+                                value
+                            })
                         } else {
                             Err(CodegenError::SymbolNotFound(ident.into()))
                         }
@@ -728,15 +710,47 @@ impl<'a> Codegen<'a> {
     fn translate_literal(&mut self, literal: &Literal) -> CodegenResult<Value> {
         match literal {
             Literal::Number(Number::Integer(n)) => Ok(self.translate_lispobj(n)),
-            Literal::Number(Number::Real(f)) => Ok(self.translate_lispobj(f)),
+            Literal::Number(Number::Real(f)) => {
+                let bits = self.builder.ins().iconst(types::I64, f.to_bits() as i64);
+                Ok(self.call_internal("make_float", &[bits])[0])
+            }
             Literal::Character(c) => Ok(self.translate_lispobj(c)),
-            Literal::String(s) => Ok(self.translate_lispobj(s)),
+            Literal::String(s) => {
+                let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    s.len().max(1) as u32,
+                    0,
+                ));
+                for (index, byte) in s.bytes().enumerate() {
+                    let value = self.builder.ins().iconst(types::I8, byte as i64);
+                    self.builder.ins().stack_store(value, slot, index as i32);
+                }
+                let ptr = self.builder.ins().stack_addr(types::I64, slot, 0);
+                let len = self.builder.ins().iconst(types::I64, s.len() as i64);
+                Ok(self.call_internal("make_string", &[ptr, len])[0])
+            }
         }
     }
 
-    fn translate_vector<'s>(&mut self, exprs: &[Expr]) -> CodegenResult<Value> {
-        // TODO: implement vector creation
-        todo!("Vector creation not yet implemented")
+    fn translate_vector(&mut self, exprs: &[Expr]) -> CodegenResult<Value> {
+        let values = self.translate_arg_exprs(exprs)?;
+        Ok(self.make_vector(&values))
+    }
+
+    fn make_vector(&mut self, values: &[Value]) -> Value {
+        let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            (values.len().max(1) * 8) as u32,
+            3,
+        ));
+        for (index, value) in values.iter().enumerate() {
+            self.builder
+                .ins()
+                .stack_store(*value, slot, (index * 8) as i32);
+        }
+        let ptr = self.builder.ins().stack_addr(types::I64, slot, 0);
+        let len = self.builder.ins().iconst(types::I64, values.len() as i64);
+        self.call_internal("make_vector", &[ptr, len])[0]
     }
 
     fn translate_call<'s>(&mut self, call: &Call) -> CodegenResult<Value> {
@@ -1017,6 +1031,51 @@ impl<'a> Codegen<'a> {
         match special_form {
             SpecialForm::If(if_expr) => self.translate_if_expr(if_expr),
             SpecialForm::Let(let_expr) => self.translate_let_expr(let_expr),
+            SpecialForm::Setq(setq) => {
+                let mut result = self.nil();
+                for (target, expr) in &setq.assignments {
+                    result = self.translate_expr(expr)?;
+                    match target.get() {
+                        Var::Resolved(symbol) if symbol.semantics() == SymbolSemantics::Lexical => {
+                            let index = self.builder.ins().iconst(types::I64, symbol.data() as i64);
+                            self.call_internal("store_lexical", &[index, result, self.lexical]);
+                        }
+                        target => {
+                            let local = if let Var::Resolved(symbol) = target {
+                                if symbol.semantics() == SymbolSemantics::Argument {
+                                    self.argument_slots.get(symbol.data()).copied().and_then(
+                                        |variable| {
+                                            self.locals
+                                                .iter()
+                                                .find(|(_, var)| *var == variable)
+                                                .map(|(arg, var)| (arg.clone(), *var))
+                                        },
+                                    )
+                                } else {
+                                    None
+                                }
+                            } else {
+                                let arg = Arg::new_uncap(Ident::from(target));
+                                self.local(&arg)
+                                    .map(|(arg, variable)| (arg.clone(), variable))
+                            };
+                            if let Some((arg, variable)) = local {
+                                if arg.captured.get() > 0 {
+                                    let cell = self.builder.use_var(variable);
+                                    self.call_internal("store_indirect", &[cell, result]);
+                                } else {
+                                    self.builder.def_var(variable, result);
+                                }
+                            } else {
+                                let symbol =
+                                    self.translate_lispobj(&LispSymbol::from(Symbol::from(target)));
+                                self.call_internal("set_symbol_value", &[symbol, result, self.env]);
+                            }
+                        }
+                    }
+                }
+                Ok(result)
+            }
             SpecialForm::Lambda(lambda) => self.translate_lambda_expr(lambda),
             SpecialForm::Quote(quote) => self.translate_quote(quote),
             SpecialForm::Progn(exprs) => self.translate_progn(exprs),
@@ -1199,13 +1258,23 @@ impl<'a> Codegen<'a> {
                 let symbol: Symbol = ident.get().into();
                 Ok(self.translate_lispobj(&LispSymbol::from(symbol)))
             }
-            QuotedData::List(_items) => {
-                // TODO: implement list creation
-                todo!("Quoted list creation not yet implemented")
+            QuotedData::List(items) => {
+                let mut result = self.nil();
+                for item in items.iter().rev() {
+                    let value = self.translate_quoted_data(item)?;
+                    self.builder.declare_value_needs_stack_map(value);
+                    result = self.call_internal("make_cons", &[value, result])[0];
+                }
+                Ok(result)
             }
-            QuotedData::Vector(_items) => {
-                // TODO: implement vector creation
-                todo!("Quoted vector creation not yet implemented")
+            QuotedData::Vector(items) => {
+                let mut values = Vec::new();
+                for item in items {
+                    let value = self.translate_quoted_data(item)?;
+                    self.builder.declare_value_needs_stack_map(value);
+                    values.push(value);
+                }
+                Ok(self.make_vector(&values))
             }
             QuotedData::Unquote(_) | QuotedData::UnquoteSplice(_) => {
                 Err(CodegenError::InvalidUnquote)
@@ -1229,30 +1298,32 @@ impl<'a> Codegen<'a> {
         let result = codegen.translate_exprs(&lambda.body.body)?;
 
         let func_id = codegen.func_id;
-        let (result, unresolved) = codegen.finalize(result);
-
-        tracing::debug!("Defining lambda function with id: {:?}", func_id);
-
-        // Use the new CodegenContext helper to define, collect stack maps and finalize.
-        let mut cgctx = CodegenContext::from_parts(
-            self.cgctx.module,
-            self.cgctx.data_desc,
-            self.cgctx.builtin_funcs,
+        codegen.finalize(result);
+        let func_ptr = self.cgctx.define_and_finalize_function(&mut ctx, func_id);
+        let sig = FunctionSignature::from_args(&lambda.args);
+        let id = self
+            .builder
+            .ins()
+            .iconst(types::I64, func_id.as_u32() as i64);
+        let code = self.builder.ins().iconst(types::I64, func_ptr as i64);
+        let signature = self.builder.ins().iconst(
+            types::I64,
+            sig.normal as i64 | ((sig.optional as i64) << 8) | ((sig.rest as i64) << 16),
         );
-        let func_ptr = cgctx.define_and_finalize_function(&mut ctx, func_id);
-
-        result.func.set_func_ptr(func_ptr);
-        let func_val = self.translate_lispobj(&result.func);
-
-        // resolve closure captures
-        let result = result.resolve(self);
-        self.defined_funcs.push(result);
-
-        for func in unresolved.into_iter() {
-            if let Closure::Unresolved(func) = func {
-                let result = func.resolve(self);
-                self.defined_funcs.push(result);
-            }
+        let count = self
+            .builder
+            .ins()
+            .iconst(types::I64, lambda.captures.borrow().len() as i64);
+        let func_val = self.call_internal("create_closure", &[id, code, signature, count])[0];
+        for (index, capture) in lambda.captures.borrow().iter().enumerate() {
+            let arg = Arg::new_uncap(Ident::from(*capture));
+            let variable = self
+                .local(&arg)
+                .map(|(_, variable)| variable)
+                .ok_or_else(|| CodegenError::SymbolNotFound(arg.ident.into()))?;
+            let value = self.builder.use_var(variable);
+            let index = self.builder.ins().iconst(types::I64, index as i64);
+            self.call_internal("init_capture", &[index, value, func_val]);
         }
         Ok(func_val)
     }
@@ -1296,10 +1367,15 @@ impl<'a> Codegen<'a> {
                 self.nil()
             };
 
-            // Create the variable and add to locals
+            // Allocate one cell for each captured binding; closures share this cell.
+            let local_value = if arg.captured.get() > 0 {
+                self.call_internal("create_indirect_object", &[value])[0]
+            } else {
+                value
+            };
             let var = self.builder.declare_var(types::I64);
-
-            self.builder.def_var(var, value);
+            self.builder.declare_var_needs_stack_map(var);
+            self.builder.def_var(var, local_value);
             new_vars.push((arg.clone(), var));
 
             if let (Some(_slot), Some(count_var)) = (dynamic_slot, dynamic_count) {
@@ -1547,17 +1623,7 @@ impl CodegenBuilder {
         let dynamic = self.identify_dynamic(&params);
         let lexical = self.identify_lexical(&params);
 
-        let func = LispFunction::new_closure(func_id, FunctionSignature::from_args(&self.args));
-        let mut codegen = Codegen::assemble(
-            cgctx,
-            builder,
-            func,
-            env,
-            dynamic,
-            lexical,
-            func_id,
-            Vec::new(),
-        );
+        let mut codegen = Codegen::assemble(cgctx, builder, env, dynamic, lexical, func_id);
         self.setup_locals(&params, &mut codegen)?;
         Ok(codegen)
     }

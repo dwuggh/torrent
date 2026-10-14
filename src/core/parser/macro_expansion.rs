@@ -223,22 +223,20 @@ pub fn try_expand_macro_call(
         Err(_) => return Ok(None), // Symbol not found
     };
     let val = guard.as_ref();
-    let ObjectRef::Function(func) = val.as_ref() else {
+    let ObjectRef::Function(_) = val.as_ref() else {
         return Ok(None);
     };
 
-    // Convert arguments to LispObjects (unevaluated for macros)
-    let args = call
-        .args
-        .iter()
-        .map(|arg| {
-            let obj: LispObject = arg.clone().into();
-            obj.tag()
-        })
-        .collect::<Vec<_>>();
-
-    // Execute the macro
-    let result = func.run(&args, env)?;
+    let mut ctx = crate::gc::GcContext::new();
+    let func_root = ctx.root(*val);
+    let mut roots = Vec::new();
+    for arg in &call.args {
+        let value = arg.to_object(&mut ctx);
+        roots.push(ctx.root(value));
+    }
+    let args = roots.iter().map(|root| *root.get(&ctx)).collect::<Vec<_>>();
+    let args = ctx.root_slice(&args);
+    let result = crate::core::runtime::call_lisp(&func_root, &args, env, &mut ctx)?;
 
     // Convert result back to ExprType
     let tokens = lisp_object_to_tokens(result.untag());

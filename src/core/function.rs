@@ -1,66 +1,48 @@
-use crate::core::error::{RuntimeError, RuntimeResult};
-use smallvec::SmallVec;
-use std::cell::UnsafeCell;
-
-use crate::core::ident::Ident;
-use crate::core::lexical::LexicalBindings;
-use crate::core::parser::expr::Args;
-use cranelift_module::FuncId;
-
 use crate::core::env::{DynamicEnv, Environment};
-use crate::{
-    core::{object::Object, tag::TAG_FUNCTION},
-    gc::{Gc, HeaderedObject, Trace, Visitor},
+use crate::core::error::{RuntimeError, RuntimeResult};
+use crate::core::indirect::Indirect;
+use crate::core::object::{Object, nil, write_object_slot};
+use crate::core::parser::expr::Args;
+use crate::core::tag::TAG_FUNCTION;
+use crate::gc::{
+    ConstructObject, Gc, GcContext, Headered, HeaderedObject, RootedSlice, Trace, Visitor,
 };
+use cranelift_module::FuncId;
+use std::ptr::NonNull;
 
 pub const MAX_FIXED_ARGS: usize = 8;
 pub const ARGV_ABI_MARKER: i64 = 0xffff;
-
-// ============================================================================
-// Type Definitions
-// ============================================================================
-
-/// Function pointer type - now just a raw pointer to allow varying signatures
 pub type FuncPtr = *const u8;
 
 #[derive(Debug, Clone)]
 pub struct LispFunction(pub(crate) Gc<Function>);
 impl_tagged_for_gc!(LispFunction, Function);
 
-#[derive(Debug)]
-pub struct Function {
-    pub func_type: FunctionType,
-
-    pub signature: FunctionSignature,
-}
-
-#[derive(Debug)]
-pub enum FunctionType {
-    Subr(SubrFn),
-    Lambda(Closure),
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionKind {
+    Jit,
+    Native,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct SubrFn {
-    name: Ident,
-    func_id: FuncId,
-    func_ptr: Option<FuncPtr>,
+pub struct FunctionInit {
+    pub signature: FunctionSignature,
+    pub id: FuncId,
+    pub code: FuncPtr,
+    pub kind: FunctionKind,
+    pub binding_len: usize,
 }
 
-pub struct Closure {
-    captures: UnsafeCell<LexicalBindings>,
-    func_id: FuncId,
-    func_ptr: Option<FuncPtr>,
-}
-
-impl std::fmt::Debug for Closure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Closure")
-            .field("captures", self.captures())
-            .field("func_id", &self.func_id)
-            .field("func_ptr", &self.func_ptr)
-            .finish()
-    }
+#[repr(C)]
+#[derive(Debug)]
+pub struct Function {
+    pub signature: FunctionSignature,
+    kind: FunctionKind,
+    id: FuncId,
+    code: FuncPtr,
+    binding_len: usize,
+    bindings: [Object; 0],
 }
 
 #[allow(unused)]
@@ -114,195 +96,150 @@ impl crate::gc::Tagged for Function {
     const TAG: u8 = TAG_FUNCTION;
 }
 
-unsafe impl HeaderedObject for Function {}
+impl ConstructObject for Function {
+    type Init<'a> = FunctionInit;
+    fn size_from_init(init: &FunctionInit) -> usize {
+        Self::size_for_bindings(init.binding_len)
+    }
+    fn size(&self) -> usize {
+        Self::size_for_bindings(self.binding_len)
+    }
+    unsafe fn init_fn(init: FunctionInit, _ctx: &GcContext) -> Self {
+        Self {
+            signature: init.signature,
+            kind: init.kind,
+            id: init.id,
+            code: init.code,
+            binding_len: init.binding_len,
+            bindings: [],
+        }
+    }
+}
+
+unsafe impl HeaderedObject for Function {
+    unsafe fn init_tail(ptr: NonNull<Self>) {
+        // The allocator reserved the prefix and binding_len trailing words.
+        // Initialize every slot before post_alloc makes the object visible.
+        unsafe {
+            let tail = std::ptr::addr_of_mut!((*ptr.as_ptr()).bindings).cast::<Object>();
+            for index in 0..(*ptr.as_ptr()).binding_len {
+                tail.add(index).write(nil());
+            }
+        }
+    }
+}
 
 unsafe impl Trace for Function {
     unsafe fn trace(&self, visitor: &mut Visitor) {
-        if let FunctionType::Lambda(closure) = &self.func_type {
-            unsafe { closure.trace(visitor) };
+        for value in self.bindings() {
+            visitor.visit_slot_address(crate::gc::mmtk::util::Address::from_ptr(
+                value as *const Object,
+            ));
         }
     }
 }
-
-unsafe impl Trace for Closure {
-    unsafe fn trace(&self, visitor: &mut Visitor) {
-        unsafe { self.captures().trace(visitor) };
-    }
-}
-
-impl Closure {
-    pub fn new(func_id: FuncId) -> Self {
-        Self {
-            captures: UnsafeCell::new(LexicalBindings::empty()),
-            func_id,
-            func_ptr: None,
-        }
-    }
-
-    pub fn captures(&self) -> &LexicalBindings {
-        unsafe { &*self.captures.get() }
-    }
-
-    pub fn captures_mut(&self) -> &mut LexicalBindings {
-        unsafe { &mut *self.captures.get() }
-    }
-
-    pub fn lexical_ptr(&self) -> *mut LexicalBindings {
-        self.captures.get()
-    }
-
-    pub fn reset_captures(&self, captures: LexicalBindings) {
-        unsafe { *self.captures.get() = captures };
-    }
-}
-
-// ============================================================================
-// Function Implementation
-// ============================================================================
 
 impl Function {
-    /// Create a new closure function
-    pub fn new_closure(func_id: FuncId, signature: FunctionSignature) -> Self {
-        let closure = Closure::new(func_id);
-        Self {
-            func_type: FunctionType::Lambda(closure),
-            signature,
-        }
+    pub fn size_for_bindings(len: usize) -> usize {
+        len.checked_mul(std::mem::size_of::<Object>())
+            .and_then(|tail| std::mem::size_of::<Headered<Self>>().checked_add(tail))
+            .expect("function allocation size overflow")
     }
-
-    /// Create a new built-in function (subr)
-    pub fn new_subr(
-        func_id: FuncId,
-        name: &str,
-        func_ptr: FuncPtr,
-        signature: FunctionSignature,
-    ) -> Self {
-        let name = name.into();
-        let subr = SubrFn {
-            name,
-            func_id,
-            func_ptr: Some(func_ptr),
-        };
-        Self {
-            func_type: FunctionType::Subr(subr),
-            signature,
-        }
+    pub fn binding_len(&self) -> usize {
+        self.binding_len
     }
-
-    /// Get the function ID
+    pub fn bindings(&self) -> &[Object] {
+        // Only published Functions may be borrowed; their full tails are initialized.
+        unsafe { std::slice::from_raw_parts(self.bindings.as_ptr(), self.binding_len) }
+    }
     pub fn func_id(&self) -> FuncId {
-        match &self.func_type {
-            FunctionType::Subr(subr) => subr.func_id,
-            FunctionType::Lambda(closure) => closure.func_id,
-        }
+        self.id
     }
-
-    /// Set the function pointer
-    pub fn set_func_ptr(&mut self, func_ptr: FuncPtr) {
-        match &mut self.func_type {
-            FunctionType::Subr(subr) => subr.func_ptr = Some(func_ptr),
-            FunctionType::Lambda(closure) => closure.func_ptr = Some(func_ptr),
-        }
+    pub fn kind(&self) -> FunctionKind {
+        self.kind
     }
-
-    /// Get the function pointer
     pub fn get_func_ptr(&self) -> Option<FuncPtr> {
-        match &self.func_type {
-            FunctionType::Subr(subr) => subr.func_ptr,
-            FunctionType::Lambda(closure) => closure.func_ptr,
-        }
+        Some(self.code)
     }
-
-    pub fn lexical_ptr(&self) -> *mut LexicalBindings {
-        match &self.func_type {
-            FunctionType::Subr(_) => std::ptr::null_mut(),
-            FunctionType::Lambda(closure) => closure.lexical_ptr(),
-        }
-    }
-
-    pub fn load_lexical(&self, index: usize) -> RuntimeResult<Object> {
-        let FunctionType::Lambda(closure) = &self.func_type else {
-            return Err(RuntimeError::internal_error("subr has no lexical bindings"));
-        };
-        closure
-            .captures()
-            .load(index)
-            .ok_or_else(|| RuntimeError::internal_error("lexical binding index out of bounds"))
-    }
-
-    pub fn store_lexical(&mut self, index: usize, value: Object) -> RuntimeResult<()> {
-        let owner = Object::from_heap_ref(&*self);
-        let FunctionType::Lambda(closure) = &self.func_type else {
-            return Err(RuntimeError::internal_error("subr has no lexical bindings"));
-        };
-        closure.captures_mut().store_with_owner(owner, index, value);
-        Ok(())
-    }
-
-    pub fn reset_lexical_bindings(&mut self, captures: LexicalBindings) -> RuntimeResult<()> {
-        let FunctionType::Lambda(closure) = &self.func_type else {
-            return Err(RuntimeError::internal_error("subr has no lexical bindings"));
-        };
-        closure.reset_captures(captures);
-        Ok(())
-    }
-
-    /// Get the function signature
     pub fn signature(&self) -> FunctionSignature {
         self.signature
     }
-
-    /// Check if argument count is valid and return calling convention info.
-    ///
-    /// Returns `(is_valid, fixed_param_count, use_argv_abi)`.
-    pub fn check_args(&self, argc: usize) -> (bool, usize, bool) {
-        let sig = &self.signature;
-        let is_valid = sig.accepts_argc(argc);
-        let total_args = sig.fixed_param_count();
-        let use_argv_abi = sig.use_argv_abi();
-
-        (is_valid, total_args, use_argv_abi)
+    pub fn binding(&self, index: usize) -> RuntimeResult<Object> {
+        self.bindings()
+            .get(index)
+            .copied()
+            .ok_or_else(|| RuntimeError::internal_error("lexical binding index out of bounds"))
     }
-
-    pub fn run(&self, args: &[Object], env: &Environment) -> RuntimeResult<Object> {
-        if matches!(&self.func_type, FunctionType::Lambda(_)) {
-            return match args.len() {
-                0 => self.run_with_native_frame::<0>(args, env),
-                1 => self.run_with_native_frame::<1>(args, env),
-                2 => self.run_with_native_frame::<2>(args, env),
-                3 => self.run_with_native_frame::<3>(args, env),
-                4 => self.run_with_native_frame::<4>(args, env),
-                5 => self.run_with_native_frame::<5>(args, env),
-                6 => self.run_with_native_frame::<6>(args, env),
-                7 => self.run_with_native_frame::<7>(args, env),
-                8 => self.run_with_native_frame::<8>(args, env),
-                _ => self.run_with_native_frame::<0>(args, env),
-            };
+    pub fn load_lexical(&self, index: usize) -> RuntimeResult<Object> {
+        let value = self.binding(index)?;
+        Ok(if Indirect::is_object(value) {
+            unsafe { Indirect::from_object(value) }.load()
+        } else {
+            value
+        })
+    }
+    pub fn set_binding(&mut self, index: usize, value: Object) -> RuntimeResult<()> {
+        if index >= self.binding_len {
+            return Err(RuntimeError::internal_error(
+                "lexical binding index out of bounds",
+            ));
         }
-
-        self.run_unrooted(args, env)
+        let owner = Object::from_heap_ref(&*self);
+        // The checked index is within the initialized trailing allocation.
+        let slot = unsafe { &mut *self.bindings.as_mut_ptr().add(index) };
+        write_object_slot(owner, slot, value);
+        Ok(())
     }
-
-    fn run_with_native_frame<const N: usize>(
+    pub fn store_lexical(&mut self, index: usize, value: Object) -> RuntimeResult<()> {
+        let old = self.binding(index)?;
+        if Indirect::is_object(old) {
+            unsafe { Indirect::from_object_mut(old) }.store(value);
+            Ok(())
+        } else {
+            self.set_binding(index, value)
+        }
+    }
+    pub fn check_args(&self, argc: usize) -> (bool, usize, bool) {
+        (
+            self.signature.accepts_argc(argc),
+            self.signature.fixed_param_count(),
+            self.signature.use_argv_abi(),
+        )
+    }
+    pub fn run(
         &self,
         args: &[Object],
         env: &Environment,
+        ctx: &mut GcContext,
     ) -> RuntimeResult<Object> {
-        let thread = crate::gc::current_thread();
-        let mut frame = crate::gc::NativeRootFrame::<N>::new(SmallVec::from_slice(args));
-        let _guard = unsafe { crate::gc::push_native_root_frame(&thread, &mut frame) };
-        self.run_unrooted(frame.slots.as_slice(), env)
+        let roots = ctx.root_slice(args);
+        self.run_rooted(&roots, env, ctx)
+    }
+
+    pub fn run_rooted(
+        &self,
+        args: &RootedSlice,
+        env: &Environment,
+        ctx: &mut GcContext,
+    ) -> RuntimeResult<Object> {
+        let args: Vec<Object> = args.iter().map(|arg| *arg.get(ctx)).collect();
+        self.run_unrooted(args.as_slice(), env, ctx)
     }
 
     /// Run the function with given arguments after the caller has handled any
     /// root publication required by the current Rust/JIT boundary.
-    fn run_unrooted(&self, args: &[Object], env: &Environment) -> RuntimeResult<Object> {
+    fn run_unrooted(
+        &self,
+        args: &[Object],
+        env: &Environment,
+        ctx: &mut GcContext,
+    ) -> RuntimeResult<Object> {
         let dynamic = DynamicEnv {
             len: 0,
             parent: std::ptr::null_mut(),
             bindings: [],
         };
-        self.run_unrooted_with_dynamic(args, env, &dynamic)
+        self.run_unrooted_with_dynamic(args, env, &dynamic, ctx)
     }
 
     fn run_unrooted_with_dynamic(
@@ -310,7 +247,9 @@ impl Function {
         args: &[Object],
         env: &Environment,
         dynamic: &DynamicEnv,
+        ctx: &mut GcContext,
     ) -> RuntimeResult<Object> {
+        let owner = ctx.root(Object::from_heap_ref(self));
         let func_ptr = self
             .get_func_ptr()
             .ok_or(RuntimeError::internal_error("no function pointer"))?;
@@ -330,7 +269,7 @@ impl Function {
                 u64,
                 *const Environment,
                 *const DynamicEnv,
-                *mut LexicalBindings,
+                Object,
             ) -> Object = unsafe { std::mem::transmute(func_ptr) };
             let result = unsafe {
                 func(
@@ -338,7 +277,7 @@ impl Function {
                     args.len() as u64,
                     env,
                     dynamic,
-                    self.lexical_ptr(),
+                    *owner.get(ctx),
                 )
             };
             Ok(result)
@@ -347,7 +286,7 @@ impl Function {
 
             let env_raw = env as *const Environment as i64;
             let dynamic_raw = dynamic as *const DynamicEnv as i64;
-            let lexical_raw = self.lexical_ptr() as i64;
+            let lexical_raw = owner.get(ctx).raw() as i64;
 
             macro_rules! gen_func_type {
                 (@type $_:tt) => {
@@ -390,102 +329,54 @@ impl Function {
             }
         }
     }
-
-    /// Get mutable reference to function type
-    pub fn get_func_type_mut(&mut self) -> &mut FunctionType {
-        &mut self.func_type
-    }
 }
-
-impl FunctionType {
-    pub fn as_closure_mut(&mut self) -> Option<&mut Closure> {
-        if let FunctionType::Lambda(func) = self {
-            Some(func)
-        } else {
-            None
-        }
-    }
-}
-
-// ============================================================================
-// LispFunction Implementation
-// ============================================================================
 
 impl LispFunction {
-    /// Create a new closure function
-    pub fn new_closure(func_id: FuncId, signature: FunctionSignature) -> Self {
-        let inner = Gc::new(Function::new_closure(func_id, signature));
-        Self(inner)
+    pub fn new(init: FunctionInit, ctx: &mut GcContext) -> Self {
+        Self(ctx.alloc::<Function>(init))
     }
-
-    /// Create a new built-in function (subr)
     pub fn new_subr(
-        func_id: FuncId,
-        name: &str,
-        func_ptr: FuncPtr,
+        id: FuncId,
+        code: FuncPtr,
         signature: FunctionSignature,
+        ctx: &mut GcContext,
     ) -> Self {
-        let inner = Gc::new(Function::new_subr(func_id, name, func_ptr, signature));
-        Self(inner)
+        Self::new(
+            FunctionInit {
+                signature,
+                id,
+                code,
+                kind: FunctionKind::Native,
+                binding_len: 0,
+            },
+            ctx,
+        )
     }
-
-    /// Get the function ID
     pub fn func_id(&self) -> FuncId {
         self.0.as_ref().func_id()
     }
-
-    /// Get mutable reference to function type
-    pub fn get_func_type_mut(&self) -> &mut FunctionType {
-        let mut inner = self.0.clone();
-        let ptr = &mut inner.as_mut().func_type as *mut FunctionType;
-        unsafe { &mut *ptr }
-    }
-
-    /// Get closure if this is a lambda function
-    pub fn as_closure(&self) -> Option<&mut Closure> {
-        match self.get_func_type_mut() {
-            FunctionType::Lambda(closure) => Some(closure),
-            _ => None,
-        }
-    }
-
-    /// Set the function pointer
-    pub fn set_func_ptr(&self, func_ptr: FuncPtr) {
-        let mut inner = self.0.clone();
-        inner.as_mut().set_func_ptr(func_ptr)
-    }
-
-    pub fn reset_lexical_bindings(&self, captures: LexicalBindings) -> RuntimeResult<()> {
-        let mut inner = self.0.clone();
-        inner.as_mut().reset_lexical_bindings(captures)
-    }
-
-    /// Get the function pointer
     pub fn get_func_ptr(&self) -> Option<FuncPtr> {
         self.0.as_ref().get_func_ptr()
     }
-
-    /// Check if argument count is valid and return calling convention info.
-    ///
-    /// Returns `(is_valid, fixed_param_count, use_argv_abi)`.
+    pub fn signature(&self) -> FunctionSignature {
+        self.0.as_ref().signature()
+    }
     pub fn check_args(&self, argc: usize) -> (bool, usize, bool) {
         self.0.as_ref().check_args(argc)
     }
-
-    /// Run the function with given arguments
-    pub fn run(&self, args: &[Object], env: &Environment) -> RuntimeResult<Object> {
-        self.0.as_ref().run(args, env)
-    }
-
-    /// Get the function signature
-    pub fn signature(&self) -> FunctionSignature {
-        self.0.as_ref().signature()
+    pub fn run(
+        &self,
+        args: &[Object],
+        env: &Environment,
+        ctx: &mut GcContext,
+    ) -> RuntimeResult<Object> {
+        self.0.as_ref().run(args, env, ctx)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::FunctionSignature;
 
     #[test]
     fn signature_uses_argv_abi_only_for_rest_or_large_fixed_arity() {
@@ -498,28 +389,10 @@ mod tests {
     #[test]
     fn signature_accepts_missing_optional_arguments_without_padding() {
         let sig = FunctionSignature::new(1, 2, false);
-
         assert!(sig.accepts_argc(1));
         assert!(sig.accepts_argc(2));
         assert!(sig.accepts_argc(3));
         assert!(!sig.accepts_argc(0));
         assert!(!sig.accepts_argc(4));
-    }
-
-    #[test]
-    fn check_args_reports_fixed_abi_param_count_for_optional_arguments() {
-        let func_id =
-            cranelift_module::FuncId::from_name(&cranelift_module::ModuleRelocTarget::User {
-                namespace: 0,
-                index: 0,
-            });
-        let func = Function::new_subr(
-            func_id,
-            "optional-test",
-            std::ptr::null(),
-            FunctionSignature::new(1, 2, false),
-        );
-
-        assert_eq!(func.check_args(1), (true, 3, false));
     }
 }

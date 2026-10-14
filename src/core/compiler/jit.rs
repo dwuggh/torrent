@@ -27,7 +27,7 @@ pub struct JIT {
 }
 
 impl JIT {
-    pub fn new(env: &Environment) -> Self {
+    pub fn new(env: &Environment, ctx: &mut crate::gc::GcContext) -> Self {
         install_stack_map_provider();
 
         let mut flag_builder = settings::builder();
@@ -60,9 +60,10 @@ impl JIT {
         for func in inventory::iter::<BuiltinFnPlugin> {
             let (name, id) = (func.decl_subr)(&mut module).unwrap();
             tracing::debug!("loading builtin function {name:?}...");
-            let func = LispFunction::new_subr(id, &name, func.ptr(), func.signature);
+            let func = LispFunction::new_subr(id, func.ptr(), func.signature, ctx);
             let symbol = Symbol::from(name);
-            store_symbol_function(symbol, func.tag(), env);
+            let func = ctx.root(func.tag());
+            store_symbol_function(symbol, &func, env, ctx);
         }
 
         // Load internal functions
@@ -93,13 +94,13 @@ impl JIT {
         let val = codegen.translate_expr(expr)?;
 
         let func_id = codegen.func_id;
-        let (_, funcs) = codegen.finalize(val);
-
-        self.module.define_function(func_id, &mut ctx)?;
-        self.module.finalize_definitions()?;
-        let f = self.module.get_finalized_function(func_id);
-        self.module.clear_context(&mut ctx);
-        tracing::info!("compile done: {funcs:?}");
+        codegen.finalize(val);
+        let f = crate::core::compiler::codegen::CodegenContext::from_parts(
+            &mut self.module,
+            &mut self.data_desc,
+            &self.builtin_funcs,
+        )
+        .define_and_finalize_function(&mut ctx, func_id);
         Ok(f)
     }
 }

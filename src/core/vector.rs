@@ -12,8 +12,9 @@ pub struct LispVector(pub Gc<Vector>);
 pub struct Vector(pub Vec<Object>);
 
 impl LispVector {
-    pub fn new(objs: Vec<Object>) -> Self {
-        Self(Gc::new(Vector(objs)))
+    pub fn new(objs: Vec<Object>, ctx: &mut crate::gc::GcContext) -> Self {
+        let roots = ctx.root_slice(&objs);
+        Self(ctx.alloc::<Vector>(&roots))
     }
 }
 
@@ -48,3 +49,16 @@ unsafe impl Trace for Vector {
 }
 
 impl_tagged_for_gc!(LispVector, Vector);
+
+impl crate::gc::ConstructObject for Vector {
+    type Init<'a> = &'a crate::gc::RootedSlice;
+    fn size_from_init(_init: &Self::Init<'_>) -> usize {
+        std::mem::size_of::<crate::gc::Headered<Self>>()
+    }
+    fn size(&self) -> usize {
+        std::mem::size_of::<crate::gc::Headered<Self>>()
+    }
+    unsafe fn init_fn(init: Self::Init<'_>, ctx: &crate::gc::GcContext) -> Self {
+        Self(init.iter().map(|root| *root.get(ctx)).collect())
+    }
+}

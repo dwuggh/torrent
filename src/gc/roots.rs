@@ -1,9 +1,15 @@
-//! Root-chain support shared by Rust/native frames and generated JIT frames.
+//! Root support shared by Rust/native slots and generated JIT frames.
 //!
-//! Native frames own spilled `Object` words. JIT frames describe generated-code
-//! stack slots that are located from Cranelift stack-map metadata.
+//! Native code stores rooted `Object` words in a per-mutator stack. Generated
+//! code publishes JIT frame descriptors, and Cranelift stack-map metadata
+//! locates the actual generated-code slots from those descriptors.
 
-use smallvec::SmallVec;
+use std::cell::UnsafeCell;
+use std::fmt;
+use std::marker::PhantomData;
+use std::ptr;
+use std::ptr::NonNull;
+use std::rc::Rc;
 
 use mmtk::util::Address;
 
@@ -11,105 +17,317 @@ use crate::core::env::{DynamicBinding, DynamicEnv};
 use crate::core::object::Object;
 use crate::gc::scanning::StackRootVisitor;
 use crate::gc::thread::MutatorThread;
+use crate::gc::{Gc, HeapObject};
 
-const ROOT_LINK_TAG_MASK: usize = 0b1;
-const ROOT_LINK_NATIVE: usize = 0b0;
-const ROOT_LINK_JIT: usize = 0b1;
-
-/// Tagged pointer to one frame in a mutator's root chain.
+/// Native roots owned by one mutator.
 ///
-/// Frames are aligned, so the low bit encodes whether the pointer is a native
-/// frame header or a JIT frame. `NULL` terminates the chain.
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct RootLink(usize);
-
-impl RootLink {
-    pub const NULL: Self = Self(0);
-
-    #[inline]
-    pub fn is_null(self) -> bool {
-        self.0 == 0
-    }
-
-    #[inline]
-    pub fn bits(self) -> usize {
-        self.0
-    }
-
-    #[inline]
-    pub(crate) fn tag(self) -> usize {
-        self.0 & ROOT_LINK_TAG_MASK
-    }
-
-    #[inline]
-    pub(crate) fn ptr<T>(self) -> *mut T {
-        (self.0 & !ROOT_LINK_TAG_MASK) as *mut T
-    }
-
-    #[inline]
-    pub fn from_bits(bits: usize) -> Self {
-        Self(bits)
-    }
-
-    #[inline]
-    pub fn native(frame: *mut NativeRootFrameHeader) -> Self {
-        debug_assert_eq!((frame as usize) & ROOT_LINK_TAG_MASK, 0);
-        Self((frame as usize) | ROOT_LINK_NATIVE)
-    }
-
-    #[inline]
-    pub fn jit(frame: *mut JitRootFrame) -> Self {
-        debug_assert_eq!((frame as usize) & ROOT_LINK_TAG_MASK, 0);
-        Self((frame as usize) | ROOT_LINK_JIT)
-    }
+/// Every element in `slots` is currently live as a root. Reserved vector
+/// capacity is not part of the active root set and is not scanned.
+pub(crate) struct NativeRootStack {
+    slots: Vec<UnsafeCell<Object>>,
 }
 
-/// Erased header shared by every const-generic native root frame.
-#[repr(C, align(16))]
-pub struct NativeRootFrameHeader {
-    /// Previous frame in the mutator-local root chain.
-    pub prev: RootLink,
-    scan: unsafe fn(*mut NativeRootFrameHeader, &mut dyn StackRootVisitor),
-}
+impl NativeRootStack {
+    pub(crate) const fn new() -> Self {
+        Self { slots: Vec::new() }
+    }
 
-impl NativeRootFrameHeader {
     #[inline]
-    fn new(scan: unsafe fn(*mut NativeRootFrameHeader, &mut dyn StackRootVisitor)) -> Self {
-        Self {
-            prev: RootLink::NULL,
-            scan,
+    pub(crate) fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    #[inline]
+    fn push(&mut self, value: Object) -> usize {
+        let index = self.slots.len();
+        self.slots.push(UnsafeCell::new(value));
+        index
+    }
+
+    #[inline]
+    fn truncate(&mut self, mark: usize) {
+        self.slots.truncate(mark);
+    }
+
+    #[inline]
+    fn slot(&self, index: usize) -> &UnsafeCell<Object> {
+        &self.slots[index]
+    }
+
+    #[inline]
+    fn set(&self, index: usize, value: Object) {
+        unsafe { *self.slot(index).get() = value };
+    }
+
+    /// Visit every active native root while its mutator is parked.
+    ///
+    /// # Safety
+    ///
+    /// The owning mutator must remain parked for the entire scan.
+    pub(crate) unsafe fn scan(&self, visitor: &mut dyn StackRootVisitor) {
+        for slot in &self.slots {
+            visitor.visit_tagged_slot(Address::from_ptr(slot.get()));
         }
     }
 }
 
-/// Explicit root frame for Rust/native code.
+/// Stack-local cursor and safepoint token for native Rust code.
 ///
-/// The frame owns the spilled `Object` words that MMTk may update through
-/// `TaggedPtrSlot`. `N` is the inline capacity of the `SmallVec`.
-#[repr(C, align(16))]
-pub struct NativeRootFrame<const N: usize> {
-    pub header: NativeRootFrameHeader,
-    pub slots: SmallVec<[Object; N]>,
+/// `mark` is the native root-stack length on entry. `size` is the current
+/// length after roots created by this activation have been appended.
+pub struct GcContext {
+    stack: NonNull<NativeRootStack>,
+    mark: usize,
+    size: usize,
 }
 
-impl<const N: usize> NativeRootFrame<N> {
+impl GcContext {
+    /// Enter a native root-stack activation on the current mutator.
     #[inline]
-    pub fn new(slots: SmallVec<[Object; N]>) -> Self {
+    pub fn new() -> Self {
+        let thread = crate::gc::current_thread();
+        let stack = NonNull::new(thread.native_roots.get())
+            .expect("mutator native root stack must have a stable address");
+        let size = unsafe { stack.as_ref().len() };
+
         Self {
-            header: NativeRootFrameHeader::new(scan_native_root_frame_impl::<N>),
-            slots,
+            stack,
+            mark: size,
+            size,
+        }
+    }
+
+    #[inline]
+    fn stack(&self) -> &NativeRootStack {
+        unsafe { self.stack.as_ref() }
+    }
+
+    #[inline]
+    fn stack_mut(&mut self) -> &mut NativeRootStack {
+        unsafe { self.stack.as_mut() }
+    }
+
+    #[inline]
+    fn assert_current(&self) {
+        assert_eq!(
+            self.stack().len(),
+            self.size,
+            "only the innermost GcContext may manipulate native roots",
+        );
+    }
+
+    #[inline]
+    fn push_object(&mut self, value: Object) -> usize {
+        self.assert_current();
+        let index = self.stack_mut().push(value);
+        self.size += 1;
+        index
+    }
+
+    /// Append one tagged value to the current mutator's native root stack.
+    #[inline]
+    pub fn root(&mut self, value: Object) -> Rooted {
+        Rooted::from_index(self.push_object(value))
+    }
+
+    /// Append one typed heap reference as a tagged native root.
+    #[inline]
+    pub fn root_gc<T: HeapObject>(&mut self, value: Gc<T>) -> GcRooted<T> {
+        let raw = value.as_untagged_ptr().as_ptr() as usize as u64 | T::PRIMARY_TAG as u64;
+        GcRooted::from_index(self.push_object(Object::from_raw(raw)))
+    }
+
+    /// Copy a contiguous argument slice into the native root stack.
+    pub fn root_slice(&mut self, values: &[Object]) -> RootedSlice {
+        self.assert_current();
+        let start = self.size;
+
+        for value in values.iter().copied() {
+            self.stack_mut().push(value);
+            self.size += 1;
+        }
+
+        RootedSlice::new(start, values.len())
+    }
+
+    /// Poll the current mutator's safepoint flag.
+    ///
+    /// Moving GC may update published root slots while this call blocks.
+    #[inline]
+    pub fn safepoint(&mut self) {
+        self.assert_current();
+        crate::gc::current_thread().safepoint_poll();
+    }
+
+    /// Allocate an unrooted handle. Root it explicitly before another safepoint.
+    ///
+    /// Constructor inputs must be rooted; a prebuilt cons is rejected:
+    /// ```compile_fail
+    /// use torrent::{core::cons::Cons, gc::GcContext};
+    /// fn prebuilt(ctx: &mut GcContext, payload: Cons) {
+    ///     ctx.alloc::<Cons>(payload);
+    /// }
+    /// ```
+    pub fn alloc<T: HeapObject>(&mut self, init: T::Init<'_>) -> Gc<T> {
+        self.assert_current();
+        let size = T::size_from_init(&init);
+        let thread = crate::gc::current_thread();
+        #[cfg(test)]
+        crate::gc::test_support::collect_before_allocation();
+        let start = thread.alloc(size);
+        // Allocation may move constructor inputs. Reload them from their roots
+        // now; no safepoint is allowed until initialization and post_alloc finish.
+        let payload = unsafe { T::init_fn(init, &*self) };
+        assert_eq!(payload.size(), size, "constructor allocation size mismatch");
+        unsafe { T::init(start, payload) };
+        let object = unsafe { T::object_ref_from_start(start) };
+        crate::gc::post_alloc_with_semantics(
+            thread.mutator(),
+            object,
+            size,
+            mmtk::AllocationSemantics::Default,
+        );
+        Gc::from_object_ref(object)
+    }
+}
+
+impl Drop for GcContext {
+    fn drop(&mut self) {
+        self.assert_current();
+        let mark = self.mark;
+        self.stack_mut().truncate(mark);
+        self.size = mark;
+    }
+}
+
+/// Index of one active value in the current mutator's native root stack.
+///
+/// Constructors are private so safe runtime code can only obtain handles from
+/// a live `GcContext`. The procedural wrappers keep handles inside that
+/// context's call frame.
+pub struct Rooted<T = Object> {
+    index: usize,
+    _ty: PhantomData<fn() -> T>,
+    _not_send: PhantomData<Rc<()>>,
+}
+
+pub type GcRooted<T> = Rooted<Gc<T>>;
+
+impl<T> Rooted<T> {
+    #[inline]
+    fn from_index(index: usize) -> Self {
+        Self {
+            index,
+            _ty: PhantomData,
+            _not_send: PhantomData,
         }
     }
 }
 
-/// JIT root frame describing one generated-code safepoint.
+impl<T> fmt::Debug for Rooted<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Rooted").field(&self.index).finish()
+    }
+}
+
+impl Rooted {
+    #[inline]
+    pub fn get<'gc>(&self, ctx: &'gc GcContext) -> &'gc Object {
+        ctx.assert_current();
+        assert!(self.index < ctx.size, "root index is outside this context");
+        unsafe { &*ctx.stack().slot(self.index).get() }
+    }
+
+    #[inline]
+    pub fn set(&self, value: Object, ctx: &mut GcContext) {
+        ctx.assert_current();
+        assert!(self.index < ctx.size, "root index is outside this context");
+        ctx.stack().set(self.index, value);
+    }
+}
+
+impl<T: HeapObject> GcRooted<T> {
+    #[inline]
+    pub fn get_gc<'gc>(&self, ctx: &'gc GcContext) -> &'gc T {
+        ctx.assert_current();
+        assert!(self.index < ctx.size, "root index is outside this context");
+        let object = unsafe { &*ctx.stack().slot(self.index).get() };
+        let object_ref = unsafe { object.object_ref_unchecked() };
+        unsafe { T::data_from_object_ref(object_ref).as_ref() }
+    }
+
+    /// Snapshot the current handle; root it before retaining it across a safepoint.
+    pub fn to_gc(&self, ctx: &GcContext) -> Gc<T> {
+        let value = self.get_gc(ctx);
+        Gc::from_object_ref(unsafe { T::object_ref_from_data(NonNull::from(value)) })
+    }
+
+    #[inline]
+    pub fn set_gc(&self, value: Gc<T>, ctx: &mut GcContext) {
+        ctx.assert_current();
+        assert!(self.index < ctx.size, "root index is outside this context");
+        let raw = value.as_untagged_ptr().as_ptr() as usize as u64 | T::PRIMARY_TAG as u64;
+        ctx.stack().set(self.index, Object::from_raw(raw));
+    }
+}
+
+/// Contiguous range of active native root indices.
+pub struct RootedSlice {
+    start: usize,
+    len: usize,
+    _not_send: PhantomData<Rc<()>>,
+}
+
+impl RootedSlice {
+    #[inline]
+    fn new(start: usize, len: usize) -> Self {
+        Self {
+            start,
+            len,
+            _not_send: PhantomData,
+        }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[inline]
+    pub fn get(&self, index: usize) -> Option<Rooted> {
+        (index < self.len).then(|| Rooted::from_index(self.start + index))
+    }
+
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = Rooted> + ExactSizeIterator + use<> {
+        let end = self
+            .start
+            .checked_add(self.len)
+            .expect("rooted slice index overflow");
+        (self.start..end).map(Rooted::from_index)
+    }
+}
+
+impl fmt::Debug for RootedSlice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RootedSlice")
+            .field("start", &self.start)
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
+/// JIT root frame describing one generated-code stack-map segment.
 ///
-/// The actual stack-map metadata is owned by the JIT code registry. This frame
-/// captures the dynamic bases needed to interpret one live generated frame.
+/// `stop_frame_pointer` is the older JIT frame boundary, allowing nested
+/// `jit -> native -> jit -> native` transitions to scan only their own segment.
 #[repr(C, align(16))]
 pub struct JitRootFrame {
-    pub prev: RootLink,
+    pub prev: *mut JitRootFrame,
     pub frame_pointer: *const usize,
     pub stop_frame_pointer: *const usize,
     pub stack_pointer: *const usize,
@@ -126,9 +344,9 @@ impl JitRootFrame {
         dynamic_env: *const DynamicEnv,
     ) -> Self {
         Self {
-            prev: RootLink::NULL,
+            prev: ptr::null_mut(),
             frame_pointer,
-            stop_frame_pointer: std::ptr::null(),
+            stop_frame_pointer: ptr::null(),
             stack_pointer,
             return_pc,
             dynamic_env,
@@ -136,150 +354,72 @@ impl JitRootFrame {
     }
 }
 
-/// RAII handle for a pushed root frame.
-///
-/// Dropping the guard pops exactly the frame it pushed. Root frames form a
-/// stack and must be removed in strict LIFO order.
+/// RAII guard for a published JIT root frame.
 pub struct RootFrameGuard {
     thread: *const MutatorThread,
-    expected_head: RootLink,
-    prev: RootLink,
+    expected_head: *mut JitRootFrame,
+    prev: *mut JitRootFrame,
 }
 
 impl Drop for RootFrameGuard {
     fn drop(&mut self) {
         unsafe {
             let thread = &*self.thread;
-            let current = RootLink::from_bits(thread.root_head.get());
             debug_assert_eq!(
-                current, self.expected_head,
-                "root frames must be popped in LIFO order"
+                thread.jit_root_head.get(),
+                self.expected_head,
+                "JIT root frames must be popped in LIFO order"
             );
-            thread.root_head.set(self.prev.bits());
+            thread.jit_root_head.set(self.prev);
         }
     }
 }
 
-/// Push a native root frame onto the current mutator's root chain.
+/// Push a JIT root frame onto the current mutator's JIT root chain.
 ///
 /// # Safety
 ///
 /// `frame` must remain valid and unmoved until the returned guard is dropped.
-/// The caller must push only on the current mutator thread and must drop
-/// root-frame guards in strict LIFO order.
-pub unsafe fn push_native_root_frame<const N: usize>(
-    thread: &MutatorThread,
-    frame: *mut NativeRootFrame<N>,
-) -> RootFrameGuard {
-    let prev = RootLink::from_bits(thread.root_head.get());
-    let header = unsafe { &mut (*frame).header };
-    header.prev = prev;
-
-    let head = RootLink::native(header);
-    thread.root_head.set(head.bits());
-
-    RootFrameGuard {
-        thread,
-        expected_head: head,
-        prev,
-    }
-}
-
-/// Push a JIT root frame onto the current mutator's root chain.
-///
-/// # Safety
-///
-/// `frame` must remain valid and unmoved until the returned guard is dropped.
-/// `return_pc` must identify a known JIT safepoint when a GC scans the frame,
-/// and the frame bases must match the Cranelift stack-map offset convention.
+/// `return_pc` must identify a known JIT safepoint when a GC scans the frame.
 pub unsafe fn push_jit_root_frame(
     thread: &MutatorThread,
     frame: *mut JitRootFrame,
 ) -> RootFrameGuard {
-    let prev = RootLink::from_bits(thread.root_head.get());
+    let prev = thread.jit_root_head.get();
     unsafe {
         (*frame).prev = prev;
-        (*frame).stop_frame_pointer = nearest_jit_frame_pointer(prev);
+        (*frame).stop_frame_pointer = if prev.is_null() {
+            ptr::null()
+        } else {
+            (*prev).frame_pointer
+        };
     }
 
-    let head = RootLink::jit(frame);
-    thread.root_head.set(head.bits());
+    thread.jit_root_head.set(frame);
 
     RootFrameGuard {
         thread,
-        expected_head: head,
+        expected_head: frame,
         prev,
     }
 }
 
-unsafe fn nearest_jit_frame_pointer(mut link: RootLink) -> *const usize {
-    while !link.is_null() {
-        match link.tag() {
-            ROOT_LINK_NATIVE => {
-                let header = link.ptr::<NativeRootFrameHeader>();
-                link = unsafe { (*header).prev };
-            }
-            ROOT_LINK_JIT => {
-                let frame = unsafe { &*link.ptr::<JitRootFrame>() };
-                return frame.frame_pointer;
-            }
-            other => panic!("bad root-link tag: {other:#x}"),
-        }
-    }
-
-    std::ptr::null()
-}
-
-/// Walk a linked root chain and visit every published root slot.
+/// Scan all JIT root frames for one mutator.
 ///
 /// # Safety
 ///
-/// `link` must be the head of a well-formed chain whose frames remain live for
-/// the duration of the scan. The JIT scanner must understand every JIT frame's
-/// metadata convention.
-pub unsafe fn scan_root_chain(
-    mut link: RootLink,
+/// `frame` must be the head of a live JIT root-frame chain. `scan_jit_frame`
+/// must understand the Cranelift stack-map convention used by every frame.
+pub unsafe fn scan_jit_root_chain(
+    mut frame: *mut JitRootFrame,
     visitor: &mut dyn StackRootVisitor,
     scan_jit_frame: unsafe fn(&JitRootFrame, &mut dyn StackRootVisitor),
 ) {
-    while !link.is_null() {
-        match link.tag() {
-            ROOT_LINK_NATIVE => {
-                let header = link.ptr::<NativeRootFrameHeader>();
-                unsafe { scan_native_root_frame(header, visitor) };
-                link = unsafe { (*header).prev };
-            }
-            ROOT_LINK_JIT => {
-                let frame = unsafe { &*link.ptr::<JitRootFrame>() };
-                unsafe { scan_jit_frame(frame, visitor) };
-                unsafe { scan_dynamic_env(frame.dynamic_env, visitor) };
-                link = frame.prev;
-            }
-            other => panic!("bad root-link tag: {other:#x}"),
-        }
-    }
-}
-
-/// Visit root slots published by a native Rust frame.
-///
-/// # Safety
-///
-/// `header` must point to the header of a live `NativeRootFrame<N>`.
-pub unsafe fn scan_native_root_frame(
-    header: *mut NativeRootFrameHeader,
-    visitor: &mut dyn StackRootVisitor,
-) {
-    let scan = unsafe { (*header).scan };
-    unsafe { scan(header, visitor) };
-}
-
-unsafe fn scan_native_root_frame_impl<const N: usize>(
-    header: *mut NativeRootFrameHeader,
-    visitor: &mut dyn StackRootVisitor,
-) {
-    let frame = header.cast::<NativeRootFrame<N>>();
-    for obj in unsafe { (*frame).slots.iter_mut() } {
-        visitor.visit_tagged_slot(Address::from_ptr(obj as *mut Object));
+    while !frame.is_null() {
+        let current = unsafe { &*frame };
+        unsafe { scan_jit_frame(current, visitor) };
+        unsafe { scan_dynamic_env(current.dynamic_env, visitor) };
+        frame = current.prev;
     }
 }
 
@@ -320,83 +460,71 @@ mod tests {
         visitor.visit_tagged_slot(Address::from_ptr(frame.stack_pointer as *mut Object));
     }
 
-    unsafe fn empty_jit_scan(_frame: &JitRootFrame, _visitor: &mut dyn StackRootVisitor) {}
+    unsafe fn context_for(stack: &mut NativeRootStack) -> GcContext {
+        let stack = NonNull::from(stack);
+        let size = unsafe { stack.as_ref().len() };
+        GcContext {
+            stack,
+            mark: size,
+            size,
+        }
+    }
 
     #[test]
-    fn native_root_frame_reports_registered_slot_addresses() {
-        let mut frame = NativeRootFrame::<2>::new(smallvec::smallvec![Object(1), Object(2)]);
-        let mut visitor = CollectingVisitor(Vec::new());
+    fn native_root_stack_preserves_nested_indices_and_slice_order() {
+        let mut stack = NativeRootStack::new();
+        let mut outer = unsafe { context_for(&mut stack) };
+        let first = outer.root(Object(1));
+        let values = [Object(2), Object(3), Object(4)];
+        let values = outer.root_slice(&values);
 
+        assert_eq!(
+            values
+                .iter()
+                .map(|root| root.get(&outer).raw())
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4],
+        );
+        assert_eq!(
+            values
+                .iter()
+                .rev()
+                .map(|root| root.get(&outer).raw())
+                .collect::<Vec<_>>(),
+            vec![4, 3, 2],
+        );
+
+        for raw in 5..256 {
+            outer.root(Object(raw));
+        }
+        assert_eq!(first.get(&outer).raw(), 1);
+
+        let outer_size = outer.size;
+        {
+            let mut inner = unsafe { context_for(outer.stack.as_mut()) };
+            let child = inner.root(Object(256));
+            assert_eq!(child.get(&inner).raw(), 256);
+        }
+        assert_eq!(outer.stack().len(), outer_size);
+
+        let mut visitor = CollectingVisitor(Vec::new());
         unsafe {
-            scan_native_root_frame(&mut frame.header, &mut visitor);
+            outer.stack().scan(&mut visitor);
+        }
+        assert_eq!(visitor.0.len(), outer_size);
+
+        drop(outer);
+        assert_eq!(stack.len(), 0);
+    }
+
+    #[test]
+    fn jit_root_chain_scans_nested_jit_and_dynamic_env() {
+        #[repr(C)]
+        struct DynamicEnv1 {
+            header: DynamicEnv,
+            bindings: [DynamicBinding; 1],
         }
 
-        let base = frame.slots.as_mut_ptr();
-        assert_eq!(
-            visitor.0,
-            vec![
-                Address::from_ptr(base),
-                Address::from_ptr(unsafe { base.add(1) }),
-            ]
-        );
-    }
-
-    #[test]
-    fn native_root_frame_zero_inline_capacity_scans_owned_slots() {
-        let mut frame =
-            NativeRootFrame::<0>::new(SmallVec::from_slice(&[Object(1), Object(2), Object(3)]));
-        let mut visitor = CollectingVisitor(Vec::new());
-
-        unsafe {
-            scan_native_root_frame(&mut frame.header, &mut visitor);
-        }
-
-        let base = frame.slots.as_mut_ptr();
-        assert_eq!(
-            visitor.0,
-            vec![
-                Address::from_ptr(base),
-                Address::from_ptr(unsafe { base.add(1) }),
-                Address::from_ptr(unsafe { base.add(2) }),
-            ]
-        );
-    }
-
-    #[test]
-    fn root_chain_scans_jit_and_native_frames() {
-        let mut native = NativeRootFrame::<1>::new(smallvec::smallvec![Object(1)]);
-        let mut jit_value = Object(2);
-        let mut jit = JitRootFrame::new(
-            ptr::null(),
-            &mut jit_value as *mut Object as *const usize,
-            ptr::null(),
-            ptr::null(),
-        );
-        jit.prev = RootLink::native(&mut native.header);
-        let mut visitor = CollectingVisitor(Vec::new());
-
-        unsafe {
-            scan_root_chain(RootLink::jit(&mut jit), &mut visitor, fake_jit_scan);
-        }
-
-        let native_base = native.slots.as_mut_ptr();
-        assert_eq!(
-            visitor.0,
-            vec![
-                Address::from_ptr(&mut jit_value as *mut Object),
-                Address::from_ptr(native_base),
-            ]
-        );
-    }
-
-    #[repr(C)]
-    struct DynamicEnv1 {
-        header: DynamicEnv,
-        bindings: [DynamicBinding; 1],
-    }
-
-    #[test]
-    fn root_chain_scans_dynamic_env_from_jit_frame() {
         let mut dynamic = DynamicEnv1 {
             header: DynamicEnv {
                 len: 1,
@@ -408,32 +536,50 @@ mod tests {
                 obj: Object(3),
             }],
         };
-        let mut jit = JitRootFrame::new(ptr::null(), ptr::null(), ptr::null(), &mut dynamic.header);
+        let mut jit_value = Object(2);
+        let mut older = JitRootFrame::new(
+            0x1000 as *const usize,
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+        );
+        let mut newer = JitRootFrame::new(
+            0x2000 as *const usize,
+            &mut jit_value as *mut Object as *const usize,
+            ptr::null(),
+            &mut dynamic.header,
+        );
+        newer.prev = &mut older;
+        newer.stop_frame_pointer = older.frame_pointer;
         let mut visitor = CollectingVisitor(Vec::new());
 
         unsafe {
-            scan_root_chain(RootLink::jit(&mut jit), &mut visitor, empty_jit_scan);
+            scan_jit_root_chain(&mut newer, &mut visitor, fake_jit_scan);
         }
 
         assert_eq!(
             visitor.0,
-            vec![Address::from_ptr(
-                &mut dynamic.bindings[0].obj as *mut Object
-            )]
+            vec![
+                Address::from_ptr(&mut jit_value as *mut Object),
+                Address::from_ptr(&mut dynamic.bindings[0].obj as *mut Object),
+                Address::from_ptr(ptr::null_mut::<Object>()),
+            ]
         );
     }
 
     #[test]
-    fn tagged_ptr_slot_updates_native_frame_object_word() {
-        let mut frame =
-            NativeRootFrame::<1>::new(smallvec::smallvec![Object(0x1000 | GcTag::CONS as u64,)]);
-        let slot = TaggedPtrSlot::from_address(Address::from_ptr(frame.slots.as_mut_ptr()));
+    fn tagged_ptr_slot_updates_rooted_object_word() {
+        let mut stack = NativeRootStack::new();
+        let mut ctx = unsafe { context_for(&mut stack) };
+        let root = ctx.root(Object(0x1000 | GcTag::CONS as u64));
+        let address = Address::from_ptr(ctx.stack().slot(root.index).get());
+        let slot = TaggedPtrSlot::from_address(address);
         let moved = unsafe {
             mmtk::util::ObjectReference::from_raw_address_unchecked(Address::from_usize(0x2000))
         };
 
         slot.store(moved);
 
-        assert_eq!(frame.slots[0].raw(), 0x2000 | GcTag::CONS as u64);
+        assert_eq!(root.get(&ctx).raw(), 0x2000 | GcTag::CONS as u64);
     }
 }

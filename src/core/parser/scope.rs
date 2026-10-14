@@ -71,35 +71,22 @@ impl<'a> Scope<'a> {
                     return Var::Argument(ident);
                 }
 
-                // Check if already captured
                 if captures
                     .borrow()
                     .iter()
                     .any(|var| Ident::from(*var) == ident)
                 {
+                    if let Some(inner) = current_captures {
+                        push_capture_once(&inner, Var::Captured(ident));
+                    }
                     return Var::Captured(ident);
                 }
-
-                // if we already have a capture list, which means the querying value
-                // already have a (inner) closure scope to be captured, then we do not want
-                // the outer closure to capture it, unless it is actually used.
-                let current_captures = current_captures.or(Some(Rc::clone(captures)));
-                let result = parent.resolve_inner(ident, current_captures.clone());
-
-                // let result = parent.resolve_inner(ident, Some(Rc::clone(captures)));
-                // match result {
-                //     Var::Captured(ident) => {
-                //         current_captures
-                //             .map(|captures| captures.borrow_mut().push(Var::Captured(ident)));
-                //     }
-                //     Var::Argument(ident) => {
-                //         current_captures
-                //             .map(|captures| captures.borrow_mut().push(Var::Captured(ident)));
-                //     }
-                //     Var::Global(_) => {}
-                //     _ => unreachable!(),
-                // }
-
+                let result = parent.resolve_inner(ident, Some(Rc::clone(captures)));
+                if matches!(result, Var::Captured(_)) {
+                    if let Some(inner) = current_captures {
+                        push_capture_once(&inner, Var::Captured(ident));
+                    }
+                }
                 result
             }
             Scope::Lexical {
@@ -161,6 +148,7 @@ mod tests {
 
     struct TestEnv {
         env: Environment,
+        _ctx: crate::gc::GcContext,
         _mutator: crate::gc::test_support::MutatorGuard,
     }
 
@@ -174,8 +162,10 @@ mod tests {
 
     fn create_test_env() -> TestEnv {
         let mutator = crate::gc::test_support::bind_nogc_mutator();
+        let mut ctx = crate::gc::GcContext::new();
         TestEnv {
-            env: Environment::default(),
+            env: Environment::new(&mut ctx),
+            _ctx: ctx,
             _mutator: mutator,
         }
     }
@@ -562,7 +552,8 @@ mod tests {
         let result = inner_closure.resolve(Ident::from("a"));
 
         assert!(matches!(result, Var::Captured(_)));
-        assert_eq!(outer_captures.borrow().len(), 0);
+        // The intermediate closure must carry the cell when constructing its child.
+        assert_eq!(outer_captures.borrow().len(), 1);
         assert_eq!(inner_captures.borrow().len(), 1);
     }
 

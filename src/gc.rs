@@ -35,6 +35,32 @@ compile_error!("torrent GC currently assumes 64-bit object references");
 pub const OBJECT_REF_OFFSET: usize = 8;
 
 pub(crate) static MMTK: OnceLock<&'static mmtk::MMTK<MM>> = OnceLock::new();
+static GC_TYPES: OnceLock<()> = OnceLock::new();
+
+fn init_gc_metadata() {
+    GC_TYPES.get_or_init(crate::core::object::init_gc_types);
+}
+
+/// Initialize the process-wide GC runtime and bind the current thread.
+///
+/// This must run before constructing an [`Environment`] or allocating through
+/// [`Gc`], because both paths expect the current thread to have a bound MMTk
+/// mutator.
+pub fn init() {
+    let mmtk = *MMTK.get_or_init(|| {
+        let builder = mmtk::MMTKBuilder::new();
+        let mmtk = Box::leak(mmtk::memory_manager::mmtk_init::<MM>(&builder));
+        initialize_collection(mmtk);
+        mmtk
+    });
+
+    init_gc_metadata();
+
+    let thread = THREAD_MANAGER.add_or_get_current_thread();
+    if thread.guard_mutator().is_none() {
+        bind_mutator(mmtk);
+    }
+}
 
 pub(crate) fn mmtk_instance() -> &'static mmtk::MMTK<MM> {
     MMTK.get().copied().expect("MMTk is not initialized")
@@ -195,35 +221,6 @@ pub fn write_object_slot(owner: Object, slot: &mut Object, value: Object) {
     object_slot_write_post(src, slot_addr);
 }
 
-/// Allocate an object by logical metadata tag and return its object-reference address.
-pub fn alloc_with_tag<VM: VMBinding>(mutator: &mut Mutator<VM>, tag: u8) -> Address {
-    let meta = get_metadata_for_tag(tag).unwrap();
-    let size = meta.layout.size();
-    let start = alloc_start_with_semantics(mutator, size, AllocationSemantics::Default);
-    let object = unsafe { ObjectReference::from_raw_address_unchecked(start + OBJECT_REF_OFFSET) };
-    post_alloc_with_semantics(mutator, object, size, AllocationSemantics::Default);
-    object.to_raw_address()
-}
-
-/// Allocate an object for `O` and return a raw tagged object word.
-///
-/// This low-level helper only reserves memory. Typed initialization should use
-/// `Gc<T>::new` so the object representation is written before publication.
-pub fn alloc<O: HeapObject>() -> Option<u64> {
-    let tag = O::TAG;
-    let meta = get_metadata_for_tag(tag)?;
-    let size = meta.layout.size();
-    let thread = current_thread();
-    let start = thread.alloc(size);
-    let object = unsafe {
-        mmtk::util::ObjectReference::from_raw_address_unchecked(start + OBJECT_REF_OFFSET)
-    };
-    post_alloc_with_semantics(thread.mutator(), object, size, AllocationSemantics::Default);
-    let addr = object.to_raw_address().as_usize() as u64;
-    let result = addr | O::PRIMARY_TAG as u64;
-    Some(result)
-}
-
 /// Destroy the MMTk mutator bound to the current thread.
 pub fn destroy_mutator() {
     let thread = THREAD_MANAGER.add_or_get_current_thread();
@@ -233,11 +230,24 @@ pub fn destroy_mutator() {
 
 #[cfg(test)]
 pub mod test_support {
-    use std::sync::OnceLock;
-
     use super::THREAD_MANAGER;
+    thread_local! { static COLLECT_ON_ALLOC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
-    static GC_TYPES: OnceLock<()> = OnceLock::new();
+    pub fn collect_on_alloc(enabled: bool) {
+        COLLECT_ON_ALLOC.set(enabled);
+    }
+    pub(crate) fn collect_before_allocation() {
+        if COLLECT_ON_ALLOC.get() {
+            collect();
+        }
+    }
+    pub fn collect() {
+        let thread = super::current_thread();
+        assert!(super::mmtk::memory_manager::handle_user_collection_request(
+            super::mmtk_instance(),
+            thread.to_mutator_thread()
+        ));
+    }
 
     /// Keeps the current test thread bound to MMTk while allocation-capable
     /// parser/core tests are running.
@@ -267,7 +277,7 @@ pub mod test_support {
             mmtk
         });
 
-        GC_TYPES.get_or_init(crate::core::object::init_gc_types);
+        super::init_gc_metadata();
 
         let thread = THREAD_MANAGER.add_or_get_current_thread();
         if thread.guard_mutator().is_some() {
@@ -285,9 +295,12 @@ pub mod test_support {
 
 pub use mmtk;
 pub use roots::{
-    JitRootFrame, NativeRootFrame, NativeRootFrameHeader, RootFrameGuard, RootLink,
-    push_jit_root_frame, push_native_root_frame, scan_native_root_frame, scan_root_chain,
+    GcContext, GcRooted, JitRootFrame, RootFrameGuard, Rooted, RootedSlice, push_jit_root_frame,
+    scan_jit_root_chain,
 };
 pub use scanning::{StackMapProvider, StackRootVisitor, set_stackmap_provider};
 pub use slot::TaggedPtrSlot;
 pub use vm::MM;
+
+#[cfg(test)]
+mod allocation_tests;

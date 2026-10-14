@@ -37,6 +37,12 @@ pub trait Tag {
     fn tag(self) -> Object;
 }
 
+impl Tag for Object {
+    fn tag(self) -> Object {
+        self
+    }
+}
+
 /// Convert a raw tagged object word into a typed Lisp value.
 pub trait Untag: Sized {
     /// Try to decode `object` as `Self`.
