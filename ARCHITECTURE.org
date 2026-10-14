@@ -357,3 +357,15 @@ we add safepoint polling at start of a lisp function. so the whole routine is:
 - safepoint poll
 - funcall
 - post safepoint poll.
+
+
+
+* TODOs
+* dynamic variable
+dynamic variables are stored by pair: (index, value) into DynamicEnv.
+*DynamicEnv* is a linked list on stack.
+
+When querying symbol value, check whether it is special(fast), if it is, load through
+DynamicEnv(slow).
+
+DynamicEnv is passed through every funcall
